@@ -98,7 +98,7 @@ export const DEFAULT_PRINTER_CONFIG: ThermalPrinterConfig = {
 };
 
 const DB_KEY_PREFIX = 'omnicomercio_v1_';
-const ACTIVE_FIREBASE_PROJECT_ID = 'gestaofacilerp-novosim';
+const ACTIVE_FIREBASE_PROJECT_ID = 'gestaofacilerp-paulocesarmc';
 
 export interface DatabaseState {
   companies: Company[];
@@ -1444,7 +1444,7 @@ export class Database {
 
   public static load(): DatabaseState {
     try {
-      // Ao migrar ou iniciar no projeto exclusivo gestaofacilerp-novosim, garante base local zerada sem resíduos do ambiente de testes anterior
+      // Ao migrar ou iniciar no projeto exclusivo gestaofacilerp-paulocesarmc, garante base local zerada sem resíduos do ambiente de testes anterior
       if (typeof window !== 'undefined' && typeof localStorage !== 'undefined') {
         const storedProject = localStorage.getItem(DB_KEY_PREFIX + 'firebase_project');
         if (storedProject !== ACTIVE_FIREBASE_PROJECT_ID) {

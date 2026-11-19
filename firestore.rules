@@ -47,7 +47,7 @@ service cloud.firestore {
       return isValidId(id) && id.matches('^comp-[a-zA-Z0-9_\\-]+$');
     }
 
-    // Referência exclusiva do Administrador Master do Gestão Fácil ERP NovoSim:
+    // Referência exclusiva do Administrador Master do Gestão Fácil ERP (Paulo Cesar Mat Constr):
     // romeujr.suporte@gmail.com (e-mails administrativos da conta Google Cloud não recebem privilégio automático)
     function isMasterAdminEmail() {
       return isSignedIn() &&

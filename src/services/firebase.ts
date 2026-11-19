@@ -31,14 +31,14 @@ import { User, UserRole } from "../types";
 
 const env = (import.meta as any).env || {};
 
-// Configuração exclusiva do projeto Firebase: gestaofacilerp-novosim
+// Configuração exclusiva do projeto Firebase: gestaofacilerp-paulocesarmc
 const firebaseConfig = {
-  apiKey: env.VITE_FIREBASE_API_KEY || firebaseConfigJson.apiKey || "AIzaSyCD5HCr0SAuRxNjaTgwL9562Dsh7j0AP-Q",
-  authDomain: env.VITE_FIREBASE_AUTH_DOMAIN || firebaseConfigJson.authDomain || "gestaofacilerp-novosim.firebaseapp.com",
-  projectId: env.VITE_FIREBASE_PROJECT_ID || firebaseConfigJson.projectId || "gestaofacilerp-novosim",
-  storageBucket: env.VITE_FIREBASE_STORAGE_BUCKET || firebaseConfigJson.storageBucket || "gestaofacilerp-novosim.firebasestorage.app",
-  messagingSenderId: env.VITE_FIREBASE_MESSAGING_SENDER_ID || firebaseConfigJson.messagingSenderId || "832956953766",
-  appId: env.VITE_FIREBASE_APP_ID || firebaseConfigJson.appId || "1:832956953766:web:9c0ddc9dd776570a2df067",
+  apiKey: env.VITE_FIREBASE_API_KEY || firebaseConfigJson.apiKey,
+  authDomain: env.VITE_FIREBASE_AUTH_DOMAIN || firebaseConfigJson.authDomain,
+  projectId: env.VITE_FIREBASE_PROJECT_ID || firebaseConfigJson.projectId,
+  storageBucket: env.VITE_FIREBASE_STORAGE_BUCKET || firebaseConfigJson.storageBucket,
+  messagingSenderId: env.VITE_FIREBASE_MESSAGING_SENDER_ID || firebaseConfigJson.messagingSenderId,
+  appId: env.VITE_FIREBASE_APP_ID || firebaseConfigJson.appId,
 };
 
 // Initialize Firebase
