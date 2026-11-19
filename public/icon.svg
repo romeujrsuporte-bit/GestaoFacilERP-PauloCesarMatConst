@@ -1,0 +1,20 @@
+<svg width="512" height="512" viewBox="0 0 44 44" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="gf-grad-primary" x1="0" y1="0" x2="44" y2="44" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#059669" />
+      <stop offset="1" stop-color="#047857" />
+    </linearGradient>
+  </defs>
+  <rect x="2" y="2" width="40" height="40" rx="11" fill="url(#gf-grad-primary)" />
+  <rect x="8" y="8" width="11" height="11" rx="3.5" fill="white" fill-opacity="0.22" />
+  <rect x="23" y="8" width="11" height="11" rx="3.5" fill="white" fill-opacity="0.22" />
+  <rect x="8" y="23" width="11" height="11" rx="3.5" fill="white" fill-opacity="0.22" />
+  <path
+    d="M18 26.5L23.5 32L34 16"
+    stroke="white"
+    stroke-width="3.6"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+  <circle cx="34" cy="16" r="2.2" fill="#34D399" />
+</svg>

@@ -1,0 +1,101 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "Perfil de usuário do Gestão Fácil ERP com controle de perfil e acesso",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "Identificador único do Firebase Auth"
+        },
+        "erpUserId": {
+          "type": "string",
+          "description": "ID interno do usuário no estado do ERP"
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "description": "E-mail corporativo ou de acesso do operador"
+        },
+        "name": {
+          "type": "string",
+          "description": "Nome completo do usuário ou operador"
+        },
+        "login": {
+          "type": "string",
+          "description": "Login / identificador de acesso do usuário (ex: admin, gerente, balcao)"
+        },
+        "role": {
+          "type": "string",
+          "enum": ["admin", "gerente", "balconista", "vendedor_externo", "financeiro"],
+          "description": "Papel de acesso RBAC no ERP: admin, gerente, balconista, vendedor_externo, financeiro"
+        },
+        "companyId": {
+          "type": "string",
+          "description": "ID da empresa matriz ou filial vinculada"
+        },
+        "status": {
+          "type": "string",
+          "enum": ["ativo", "inativo"],
+          "description": "Status do cadastro do usuário"
+        },
+        "phone": {
+          "type": "string",
+          "description": "Telefone de contato do operador"
+        },
+        "createdAt": {
+          "type": "string",
+          "description": "Data e hora de criação do perfil"
+        },
+        "updatedAt": {
+          "type": "string",
+          "description": "Data e hora da última modificação"
+        }
+      },
+      "required": ["uid", "name", "role", "companyId", "status", "createdAt"]
+    },
+    "ErpSync": {
+      "title": "ErpSync",
+      "description": "Sincronização em tempo real e persistência dos dados do ERP Gestão Fácil por empresa",
+      "type": "object",
+      "properties": {
+        "companyId": {
+          "type": "string",
+          "description": "Identificador da empresa ou filial raiz (ex: comp-matriz)"
+        },
+        "updatedAt": {
+          "type": "string",
+          "description": "Timestamp ISO da última modificação"
+        },
+        "updatedBy": {
+          "type": "string",
+          "description": "UID do usuário do Firebase Auth responsável pela alteração"
+        },
+        "version": {
+          "type": "number",
+          "description": "Número incremental ou timestamp da versão dos dados"
+        },
+        "registeredCompanyIds": {
+          "type": "object",
+          "description": "Mapa de IDs únicos de empresas e filiais ativas vinculadas à Matriz para validação nas regras"
+        },
+        "state": {
+          "type": "object",
+          "description": "Mapa com os dados completos das coleções do ERP da empresa"
+        }
+      },
+      "required": ["companyId", "updatedAt", "updatedBy", "state"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "Documentos individuais de perfil de usuário indexados pelo UID do Firebase Auth com papel RBAC"
+    },
+    "/erp_sync/{companyId}": {
+      "schema": "ErpSync",
+      "description": "Documentos centrais de sincronização e persistência de dados em tempo real por empresa"
+    }
+  }
+}

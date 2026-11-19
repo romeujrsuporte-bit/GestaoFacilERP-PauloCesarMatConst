@@ -1,0 +1,546 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // 1. Default deny catch-all: bloqueia qualquer coleção ou documento não autorizado explicitamente
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Endpoint técnico de verificação de conectividade inicial (sem dados sensíveis; escrita e listagem bloqueadas)
+    match /test/connection {
+      allow get: if true;
+      allow list, write: if false;
+    }
+
+    // =========================================================================
+    // Funções auxiliares globais de autenticação, validação, RBAC e integridade
+    // =========================================================================
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null &&
+        (!('firebase' in request.auth.token) ||
+         request.auth.token.firebase.sign_in_provider != 'anonymous');
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isValidId(id) {
+      return id is string &&
+        id.size() > 0 &&
+        id.size() <= 128 &&
+        id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isValidCompanyId(id) {
+      return isValidId(id) && id.matches('^comp-[a-zA-Z0-9_\\-]+$');
+    }
+
+    // Referência exclusiva do Administrador Master do Gestão Fácil ERP NovoSim:
+    // romeujr.suporte@gmail.com (e-mails administrativos da conta Google Cloud não recebem privilégio automático)
+    function isMasterAdminEmail() {
+      return isSignedIn() &&
+        request.auth.token.email != null &&
+        (request.auth.token.email == 'romeujr.suporte@gmail.com' ||
+         request.auth.token.email.matches('(?i)^romeujr[.]suporte@gmail[.]com$'));
+    }
+
+    function hasUserProfile() {
+      return isSignedIn() &&
+        exists(/databases/$(database)/documents/users/$(request.auth.uid));
+    }
+
+    function userProfile() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+
+    function isActiveUserWithRole(roles) {
+      return hasUserProfile() &&
+        userProfile().status == 'ativo' &&
+        userProfile().role in roles;
+    }
+
+    function isAdmin() {
+      return isMasterAdminEmail() || isActiveUserWithRole(['admin']);
+    }
+
+    function isGerente() {
+      return isActiveUserWithRole(['gerente']);
+    }
+
+    function isFinanceiro() {
+      return isActiveUserWithRole(['financeiro']);
+    }
+
+    function isBalconista() {
+      return isActiveUserWithRole(['balconista']);
+    }
+
+    function isVendedorExterno() {
+      return isActiveUserWithRole(['vendedor_externo']);
+    }
+
+    function isActiveOperator() {
+      return isMasterAdminEmail() ||
+        isActiveUserWithRole(['admin', 'gerente', 'balconista', 'vendedor_externo', 'financeiro']);
+    }
+
+    // Validação rigorosa do vínculo entre usuário e empresa/filial:
+    // - Admin autorizado acessa o documento de empresa válida.
+    // - Operador ativo só acessa se:
+    //   (a) seu companyId for exatamente o companyId do documento; OU
+    //   (b) o documento for a Matriz ('comp-matriz') e o companyId EXATO da filial do usuário
+    //       estiver explicitamente registrado e ativo no mapa 'registeredCompanyIds' do documento,
+    //       com múltiplas empresas cadastradas e raiz coincidente em state.companies[0].id.
+    // - Bloqueia qualquer filial inexistente, inativa ou não vinculada à Matriz.
+    // - LIMITAÇÃO CEL: a linguagem CEL do Firestore Rules não permite iterar sobre state.companies (List<Map>)
+    //   para validar dinamicamente IDs/unicidade nos índices 1..N; por isso o índice em mapa 'registeredCompanyIds'
+    //   (somente editável por Admin ou Gerente da Matriz) é usado como registro de chaves únicas.
+    function isOperatorInCompany(companyId) {
+      return isAdmin() || (
+        resource != null &&
+        isActiveOperator() &&
+        hasUserProfile() &&
+        'companyId' in userProfile() &&
+        isValidCompanyId(userProfile().companyId) &&
+        (
+          userProfile().companyId == companyId ||
+          (
+            companyId == 'comp-matriz' &&
+            'registeredCompanyIds' in existing() &&
+            existing().registeredCompanyIds is map &&
+            userProfile().companyId in existing().registeredCompanyIds &&
+            existing().registeredCompanyIds[userProfile().companyId] == true &&
+            existing().state.companies is list &&
+            existing().state.companies.size() >= 1 &&
+            existing().state.companies[0] is map &&
+            'id' in existing().state.companies[0] &&
+            existing().state.companies[0].id == companyId
+          )
+        )
+      );
+    }
+
+    function sameOptionalField(key) {
+      return (!(key in existing()) && !(key in incoming())) ||
+        ((key in existing()) && (key in incoming()) && incoming()[key] == existing()[key]);
+    }
+
+    function isValidUser(data) {
+      return data.keys().hasAll(['uid', 'name', 'role', 'companyId', 'status', 'createdAt']) &&
+        data.keys().hasOnly([
+          'uid',
+          'erpUserId',
+          'email',
+          'name',
+          'login',
+          'role',
+          'companyId',
+          'status',
+          'createdAt',
+          'updatedAt',
+          'phone'
+        ]) &&
+        data.uid is string && data.uid.size() > 0 && data.uid.size() <= 128 &&
+        (!('erpUserId' in data) || (data.erpUserId is string && data.erpUserId.size() <= 128)) &&
+        (!('email' in data) || (data.email is string && data.email.size() > 0 && data.email.size() <= 128)) &&
+        (!('login' in data) || (data.login is string && data.login.size() > 0 && data.login.size() <= 128)) &&
+        data.name is string && data.name.size() > 0 && data.name.size() <= 128 &&
+        data.role in ['admin', 'gerente', 'balconista', 'vendedor_externo', 'financeiro'] &&
+        isValidCompanyId(data.companyId) &&
+        data.status in ['ativo', 'inativo'] &&
+        data.createdAt is string && data.createdAt.size() > 0 && data.createdAt.size() <= 64 &&
+        (!('updatedAt' in data) || (data.updatedAt is string && data.updatedAt.size() <= 64)) &&
+        (!('phone' in data) || (data.phone is string && data.phone.size() <= 64));
+    }
+
+    // ATENÇÃO (LIMITAÇÃO TÉCNICA DA LINGUAGEM CEL DO FIRESTORE):
+    // As Security Rules (CEL) NÃO possuem laços (for/while) nem iteração em listas (all/map/filter).
+    // Portanto, NÃO é tecnicamente possível nas regras do Firestore inspecionar todos os índices 0..N
+    // de state.users (até 500 itens) para garantir ausência de 'password' em qualquer posição da lista.
+    // Esta função aplica apenas a barreira mínima no primeiro item (índice 0) e limite de tamanho.
+    // A remoção integral em todas as posições depende da higienização no cliente (firebaseSync.ts),
+    // Cloud Function ou migração futura de state.users para subcoleção dedicada.
+    function usersFirstEntryHasNoLegacyPassword(usersList) {
+      return usersList is list &&
+        usersList.size() <= 500 &&
+        (usersList.size() == 0 || (usersList[0] is map && !('password' in usersList[0])));
+    }
+
+    function isValidErpSyncState(state) {
+      return state is map &&
+        state.keys().hasAll(['companies', 'users', 'products', 'orders']) &&
+        state.keys().hasOnly([
+          'companies',
+          'users',
+          'deletedUserIds',
+          'currentCompanyId',
+          'currentUserId',
+          'stockLocations',
+          'products',
+          'components',
+          'stockBalances',
+          'stockMovements',
+          'customers',
+          'suppliers',
+          'orders',
+          'cashRegisters',
+          'accountsReceivable',
+          'accountsPayable',
+          'purchaseOrders',
+          'purchaseReceipts',
+          'productionOrders',
+          'transferOrders',
+          'inventoryCounts',
+          'auditLogs',
+          'auditLogsClearedAt',
+          'printerConfig',
+          'hideOverdueAlert',
+          'stockControlConfig',
+          'paymentMethods',
+          'financialAccounts',
+          'paymentTermsList',
+          'sidebarMenuConfig',
+          'deliveryRoutes',
+          'deliveryDrivers',
+          'deliveryVehicles',
+          'deliveryManifests',
+          'marketAreas',
+          'states',
+          'cities',
+          'neighborhoods',
+          'companyStockTransfers',
+          'chartOfAccounts',
+          'nfeImportHistory',
+          'supplierProductMappings',
+          'salesReturns',
+          'customerVouchers'
+        ]) &&
+        state.companies is list &&
+        state.companies.size() >= 1 &&
+        state.companies.size() <= 50 &&
+        state.companies[0] is map &&
+        'id' in state.companies[0] &&
+        isValidCompanyId(state.companies[0].id) &&
+        state.users is list && state.users.size() <= 500 &&
+        state.products is list &&
+        state.orders is list &&
+        (!('deletedUserIds' in state) || (state.deletedUserIds is list && state.deletedUserIds.size() <= 500)) &&
+        (!('auditLogs' in state) || (state.auditLogs is list && state.auditLogs.size() <= 200)) &&
+        (!('currentCompanyId' in state) || isValidCompanyId(state.currentCompanyId)) &&
+        (!('currentUserId' in state) || (state.currentUserId is string && state.currentUserId.size() <= 128)) &&
+        (!('auditLogsClearedAt' in state) || (state.auditLogsClearedAt is string && state.auditLogsClearedAt.size() <= 64)) &&
+        (!('printerConfig' in state) || state.printerConfig is map) &&
+        (!('hideOverdueAlert' in state) || state.hideOverdueAlert is bool) &&
+        (!('stockControlConfig' in state) || state.stockControlConfig is map) &&
+        (!('sidebarMenuConfig' in state) || state.sidebarMenuConfig is map);
+    }
+
+    function isValidErpSync(data) {
+      return data.keys().hasAll(['companyId', 'updatedAt', 'updatedBy', 'state']) &&
+        data.keys().hasOnly(['companyId', 'updatedAt', 'updatedBy', 'version', 'registeredCompanyIds', 'state']) &&
+        isValidCompanyId(data.companyId) &&
+        data.updatedAt is string && data.updatedAt.size() > 0 && data.updatedAt.size() <= 64 &&
+        data.updatedBy is string && data.updatedBy.size() > 0 && data.updatedBy.size() <= 128 &&
+        (!('version' in data) || data.version is number) &&
+        (!('registeredCompanyIds' in data) || (
+          data.registeredCompanyIds is map &&
+          data.registeredCompanyIds.size() >= 1 &&
+          data.registeredCompanyIds.size() <= 50 &&
+          data.companyId in data.registeredCompanyIds &&
+          data.registeredCompanyIds[data.companyId] == true
+        )) &&
+        isValidErpSyncState(data.state);
+    }
+
+    // Garante que chaves protegidas ausentes no documento inicial não possam receber dados indevidos
+    // caso o cliente inicialize o array vazio [] durante a reconciliação local
+    function isImmutableOrEmptyInit(key) {
+      return (
+        (!(key in existing().state) && !(key in incoming().state)) ||
+        ((key in existing().state) && (key in incoming().state) && incoming().state[key] == existing().state[key]) ||
+        (!(key in existing().state) && (key in incoming().state) && incoming().state[key] is list && incoming().state[key].size() == 0)
+      );
+    }
+
+    // Permissões de gravação por módulo para o perfil Gerente Geral
+    // (Bloqueado de alterar usuários, usuários excluídos, menus globais do sistema, limpeza de auditoria
+    // e registeredCompanyIds; alteração cadastral de 'companies' permitida apenas ao gerente vinculado à Matriz)
+    function canGerenteUpdateState(companyId) {
+      return incoming().state.diff(existing().state).affectedKeys().hasOnly([
+        'companies',
+        'currentCompanyId',
+        'currentUserId',
+        'stockLocations',
+        'products',
+        'components',
+        'stockBalances',
+        'stockMovements',
+        'customers',
+        'suppliers',
+        'orders',
+        'cashRegisters',
+        'accountsReceivable',
+        'accountsPayable',
+        'purchaseOrders',
+        'purchaseReceipts',
+        'productionOrders',
+        'transferOrders',
+        'inventoryCounts',
+        'auditLogs',
+        'printerConfig',
+        'hideOverdueAlert',
+        'stockControlConfig',
+        'paymentMethods',
+        'financialAccounts',
+        'paymentTermsList',
+        'deliveryRoutes',
+        'deliveryDrivers',
+        'deliveryVehicles',
+        'deliveryManifests',
+        'marketAreas',
+        'states',
+        'cities',
+        'neighborhoods',
+        'companyStockTransfers',
+        'chartOfAccounts',
+        'nfeImportHistory',
+        'supplierProductMappings',
+        'salesReturns',
+        'customerVouchers',
+        'deletedUserIds'
+      ]) &&
+      isImmutableOrEmptyInit('deletedUserIds') &&
+      sameOptionalField('registeredCompanyIds') &&
+      (userProfile().companyId == companyId || incoming().state.companies == existing().state.companies);
+    }
+
+    // Permissões de gravação por módulo para o perfil Financeiro
+    // (Financeiro, Contas a Pagar/Receber, Caixa, Compras/Fornecedores, Clientes, Vales e Custos na entrada)
+    function canFinanceiroUpdateState() {
+      return incoming().state.diff(existing().state).affectedKeys().hasOnly([
+        'accountsReceivable',
+        'accountsPayable',
+        'cashRegisters',
+        'financialAccounts',
+        'chartOfAccounts',
+        'paymentMethods',
+        'paymentTermsList',
+        'customerVouchers',
+        'customers',
+        'suppliers',
+        'purchaseOrders',
+        'purchaseReceipts',
+        'nfeImportHistory',
+        'supplierProductMappings',
+        'products',
+        'stockBalances',
+        'stockMovements',
+        'auditLogs',
+        'currentCompanyId',
+        'currentUserId',
+        'printerConfig',
+        'hideOverdueAlert',
+        'deletedUserIds',
+        'companyStockTransfers',
+        'deliveryManifests'
+      ]) &&
+      isImmutableOrEmptyInit('deletedUserIds') &&
+      isImmutableOrEmptyInit('companyStockTransfers') &&
+      isImmutableOrEmptyInit('deliveryManifests') &&
+      sameOptionalField('registeredCompanyIds');
+    }
+
+    // Permissões de gravação por módulo para o perfil Balconista (PDV Balcão / Pedidos / Devoluções)
+    // (Bloqueado de alterar usuários, empresas, produtos, compras, produção, expedição, contas a pagar e contas bancárias)
+    function canBalconistaUpdateState() {
+      return incoming().state.diff(existing().state).affectedKeys().hasOnly([
+        'orders',
+        'customers',
+        'stockBalances',
+        'stockMovements',
+        'cashRegisters',
+        'accountsReceivable',
+        'salesReturns',
+        'auditLogs',
+        'currentCompanyId',
+        'currentUserId',
+        'printerConfig',
+        'hideOverdueAlert',
+        'deletedUserIds',
+        'companyStockTransfers',
+        'customerVouchers',
+        'deliveryManifests'
+      ]) &&
+      isImmutableOrEmptyInit('deletedUserIds') &&
+      isImmutableOrEmptyInit('companyStockTransfers') &&
+      isImmutableOrEmptyInit('customerVouchers') &&
+      isImmutableOrEmptyInit('deliveryManifests') &&
+      sameOptionalField('registeredCompanyIds');
+    }
+
+    // Permissões de gravação por módulo para o perfil Vendedor Externo (Vendas Mobile / Pedidos)
+    // (Mesma restrição do Balconista, porém também bloqueado de alterar cashRegisters)
+    function canVendedorExternoUpdateState() {
+      return incoming().state.diff(existing().state).affectedKeys().hasOnly([
+        'orders',
+        'customers',
+        'stockBalances',
+        'stockMovements',
+        'accountsReceivable',
+        'salesReturns',
+        'auditLogs',
+        'currentCompanyId',
+        'currentUserId',
+        'printerConfig',
+        'hideOverdueAlert',
+        'deletedUserIds',
+        'companyStockTransfers',
+        'customerVouchers',
+        'deliveryManifests'
+      ]) &&
+      isImmutableOrEmptyInit('deletedUserIds') &&
+      isImmutableOrEmptyInit('companyStockTransfers') &&
+      isImmutableOrEmptyInit('customerVouchers') &&
+      isImmutableOrEmptyInit('deliveryManifests') &&
+      sameOptionalField('registeredCompanyIds');
+    }
+
+    // =========================================================================
+    // 2. Perfis de Usuários (/users/{userId}) indexados pelo UID do Firebase Auth
+    // =========================================================================
+    match /users/{userId} {
+      // Leitura pontual (PII isolada): apenas o próprio usuário autenticado ou Administrador autorizado
+      allow get: if isSignedIn() && isValidId(userId) && (isOwner(userId) || isAdmin());
+
+      // Listagem: restrita estritamente ao Administrador Master (sem lookups em listagem)
+      allow list: if isMasterAdminEmail();
+
+      // Criação de perfil (Anti-Escalada de Privilégios):
+      // 1) Somente o Administrador Master (romeujr.suporte@gmail.com) pode criar seu próprio perfil inicial de 'admin'.
+      // 2) Somente Administradores autorizados podem criar perfis de outros usuários
+      //    (e apenas o Administrador Master pode atribuir o papel 'admin').
+      // 3) Nenhum usuário comum pode criar o próprio perfil nem escolher/autoatribuir papel privilegiado.
+      allow create: if isSignedIn() &&
+        isValidId(userId) &&
+        isValidUser(incoming()) &&
+        incoming().uid == userId &&
+        (
+          (
+            isOwner(userId) &&
+            isMasterAdminEmail() &&
+            incoming().role == 'admin' &&
+            incoming().status == 'ativo'
+          ) ||
+          (
+            !isOwner(userId) &&
+            isAdmin() &&
+            (incoming().role != 'admin' || isMasterAdminEmail())
+          )
+        );
+
+      // Atualização de perfil:
+      // - Admin pode gerenciar usuários (somente Admin Master altera/concede papel 'admin'; sem auto-rebaixamento)
+      // - Usuário comum ativo só pode atualizar seus próprios dados básicos de contato (name, phone, updatedAt)
+      allow update: if isSignedIn() &&
+        isValidId(userId) &&
+        isValidUser(incoming()) &&
+        incoming().uid == existing().uid &&
+        incoming().createdAt == existing().createdAt &&
+        (
+          (
+            isAdmin() &&
+            ((incoming().role == 'admin' || existing().role == 'admin') ? isMasterAdminEmail() : true) &&
+            (!isOwner(userId) || (incoming().role == existing().role && incoming().status == existing().status))
+          ) ||
+          (
+            isOwner(userId) &&
+            existing().status == 'ativo' &&
+            incoming().role == existing().role &&
+            incoming().status == existing().status &&
+            sameOptionalField('erpUserId') &&
+            sameOptionalField('login') &&
+            sameOptionalField('email') &&
+            sameOptionalField('companyId') &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['name', 'phone', 'updatedAt'])
+          )
+        );
+
+      // Exclusão: exclusiva do Administrador (nunca pode excluir a si mesmo; admin só pelo Master Admin)
+      allow delete: if isAdmin() &&
+        isValidId(userId) &&
+        !isOwner(userId) &&
+        (existing().role != 'admin' || isMasterAdminEmail());
+    }
+
+    // =========================================================================
+    // 3. Sincronização Central do ERP (/erp_sync/{companyId})
+    //    ATENÇÃO SOBRE LEITURA: como todos os módulos residem em um único documento
+    //    /erp_sync/comp-matriz, qualquer operador autorizado com 'allow get' recebe
+    //    o documento completo na leitura (incluindo dados financeiros). O isolamento
+    //    real de leitura por módulo requer futuramente o desmembramento em subcoleções.
+    // =========================================================================
+    match /erp_sync/{companyId} {
+      // Leitura: exige usuário autenticado COM perfil ativo aprovado em /users/{uid}
+      // vinculado à empresa matriz ou filial registrada em registeredCompanyIds.
+      allow get: if isSignedIn() &&
+        isValidCompanyId(companyId) &&
+        isOperatorInCompany(companyId);
+
+      // Listagem: estritamente restrita ao Administrador Master (impede enumeração de empresas)
+      allow list: if isMasterAdminEmail();
+
+      // Criação inicial do documento raiz da empresa: exclusiva de Administrador autorizado,
+      // exigindo registeredCompanyIds e barreira inicial contra senha legada em state.users[0]
+      allow create: if isSignedIn() &&
+        isValidCompanyId(companyId) &&
+        isValidErpSync(incoming()) &&
+        'registeredCompanyIds' in incoming() &&
+        usersFirstEntryHasNoLegacyPassword(incoming().state.users) &&
+        incoming().companyId == companyId &&
+        incoming().state.companies[0].id == companyId &&
+        incoming().updatedBy == request.auth.uid &&
+        isAdmin();
+
+      // Atualização: validação de esquema + barreira incondicional em state.users[0] (sem atalho
+      // quando outros módulos são alterados) + controle de escrita por módulo segundo o perfil RBAC.
+      allow update: if isSignedIn() &&
+        isValidCompanyId(companyId) &&
+        isValidErpSync(incoming()) &&
+        incoming().companyId == companyId &&
+        incoming().companyId == existing().companyId &&
+        incoming().updatedBy == request.auth.uid &&
+        incoming().diff(existing()).affectedKeys().hasOnly([
+          'updatedAt',
+          'updatedBy',
+          'version',
+          'registeredCompanyIds',
+          'state'
+        ]) &&
+        usersFirstEntryHasNoLegacyPassword(incoming().state.users) &&
+        (
+          (isAdmin() && 'registeredCompanyIds' in incoming()) ||
+          (isOperatorInCompany(companyId) && (
+            (isGerente() && canGerenteUpdateState(companyId)) ||
+            (isFinanceiro() && canFinanceiroUpdateState()) ||
+            (isBalconista() && canBalconistaUpdateState()) ||
+            (isVendedorExterno() && canVendedorExternoUpdateState())
+          ))
+        );
+
+      // Exclusão do documento raiz da empresa: exclusiva do Administrador
+      allow delete: if isAdmin() && isValidCompanyId(companyId);
+    }
+  }
+}

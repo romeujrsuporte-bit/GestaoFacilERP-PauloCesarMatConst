@@ -1,0 +1,524 @@
+PROJETO: PLANO DE CONTAS INDUSTRIAL E COMERCIAL + DRE GERENCIAL – GESTÃO FÁCIL ERP
+Preciso implementar no Gestão Fácil ERP um módulo completo de Plano de Contas e DRE Gerencial (Demonstração do Resultado do Exercício), personalizado inicialmente para uma empresa que atua no segmento de produtos de limpeza, exercendo simultaneamente atividades de fabricação, comércio e distribuição.
+A empresa possui uma matriz e mais de uma filial. Sua operação envolve:
+Fabricação própria de produtos de limpeza.
+Compra de mercadorias prontas para revenda.
+Compra e armazenamento de matérias-primas.
+Compra de embalagens, rótulos e materiais utilizados na fabricação.
+Controle de estoque por empresa/unidade.
+Produção por meio de fichas técnicas e ordens de produção.
+Vendas no balcão e vendas externas.
+Entregas próprias e terceirizadas.
+Despesas com combustível, manutenção de veículos e logística.
+O objetivo é permitir que o empresário compreenda o resultado da operação comercial e industrial, identificando faturamento, custos de fabricação, custo das mercadorias revendidas, despesas operacionais, despesas de entrega, resultado por unidade e resultado consolidado.
+IMPORTANTE: Não quero somente uma tela de relatório. Preciso que seja implementada toda a lógica de classificação, integração e cálculo dos valores que alimentarão a DRE Gerencial.
+A implementação deverá respeitar a arquitetura atual do Gestão Fácil ERP, que utiliza Firebase Authentication e Firestore, preservando os cadastros, dados, funcionalidades e integrações já existentes.
+
+1. PLANO DE CONTAS – ESTRUTURA PERSONALIZADA
+Criar um Plano de Contas hierárquico, organizado em grupos, subgrupos e contas analíticas.
+A estrutura deverá contemplar tanto a atividade industrial quanto a comercial.
+1 – RECEITAS OPERACIONAIS
+1.1 – Venda de mercadorias para revenda
+1.1.01 – Venda de produtos de limpeza para revenda
+1.1.02 – Venda de descartáveis
+1.1.03 – Venda de acessórios e utensílios
+1.1.04 – Venda de produtos de higiene
+1.1.05 – Venda de outras mercadorias
+1.2 – Venda de produtos fabricados
+1.2.01 – Venda de produtos de fabricação própria
+1.2.02 – Venda de produtos químicos de fabricação própria
+1.2.03 – Venda de produtos de limpeza concentrados
+1.2.04 – Venda de produtos embalados e fracionados
+1.3 – Outras receitas operacionais
+1.3.01 – Prestação de serviços
+1.3.02 – Outras receitas operacionais
+2 – DEDUÇÕES DA RECEITA
+2.1 – Devoluções e descontos
+2.1.01 – Devoluções de vendas
+2.1.02 – Descontos concedidos
+2.1.03 – Cancelamentos de vendas
+2.2 – Impostos sobre vendas
+2.2.01 – Simples Nacional
+2.2.02 – Outros impostos sobre vendas
+3 – CUSTOS DOS PRODUTOS E MERCADORIAS VENDIDOS
+Este grupo deverá separar claramente o custo das mercadorias adquiridas prontas para revenda do custo dos produtos fabricados pela empresa.
+3.1 – Custo das Mercadorias Vendidas (CMV)
+3.1.01 – Custo de produtos de limpeza para revenda
+3.1.02 – Custo de descartáveis para revenda
+3.1.03 – Custo de acessórios e utensílios
+3.1.04 – Custo de produtos de higiene para revenda
+3.1.05 – Custo de outras mercadorias
+3.2 – Custo dos Produtos Vendidos (CPV)
+3.2.01 – Matérias-primas consumidas na produção
+3.2.02 – Produtos químicos e componentes
+3.2.03 – Embalagens utilizadas na fabricação
+3.2.04 – Rótulos, tampas e lacres
+3.2.05 – Mão de obra direta de produção
+3.2.06 – Encargos da mão de obra direta
+3.2.07 – Energia elétrica da produção
+3.2.08 – Água utilizada na fabricação
+3.2.09 – Manutenção de máquinas e equipamentos industriais
+3.2.10 – Outros custos indiretos de fabricação
+Atenção: o CPV deverá ser reconhecido somente quando os produtos fabricados forem vendidos, considerando o custo de produção apurado e incorporado ao estoque de produtos acabados.
+Os custos de fabricação deverão ser inicialmente apropriados à produção e ao estoque de produtos acabados, e não lançados diretamente como despesa da DRE no momento da compra ou do pagamento.
+4 – DESPESAS COMERCIAIS E DE ENTREGA
+4.1 – Despesas com vendas
+4.1.01 – Comissões de vendedores
+4.1.02 – Bonificações comerciais
+4.1.03 – Marketing e publicidade
+4.1.04 – Materiais promocionais
+4.1.05 – Outras despesas comerciais
+4.2 – Despesas com entregas e logística
+4.2.01 – Combustível de veículos de entrega
+4.2.02 – Manutenção de veículos de entrega
+4.2.03 – Pneus e peças de veículos
+4.2.04 – Lubrificantes e troca de óleo
+4.2.05 – Seguro de veículos
+4.2.06 – Licenciamento e documentação de veículos
+4.2.07 – Pedágios e estacionamentos
+4.2.08 – Fretes terceirizados
+4.2.09 – Serviços de entrega terceirizados
+4.2.10 – Salários e encargos de entregadores
+4.2.11 – Outras despesas de entrega e logística
+5 – DESPESAS ADMINISTRATIVAS
+5.1 – Estrutura física
+5.1.01 – Aluguel
+5.1.02 – Energia elétrica administrativa
+5.1.03 – Água e esgoto
+5.1.04 – Internet e telefone
+5.1.05 – Limpeza e conservação
+5.1.06 – Manutenção predial
+5.2 – Despesas administrativas gerais
+5.2.01 – Material de escritório
+5.2.02 – Contabilidade
+5.2.03 – Sistemas e softwares
+5.2.04 – Serviços terceirizados
+5.2.05 – Outras despesas administrativas
+5.3 – Pessoal administrativo
+5.3.01 – Salários administrativos
+5.3.02 – Encargos trabalhistas
+5.3.03 – Benefícios e alimentação
+5.3.04 – Outras despesas com pessoal
+6 – DESPESAS FINANCEIRAS
+6.1 – Despesas financeiras
+6.1.01 – Tarifas bancárias
+6.1.02 – Taxas de cartões
+6.1.03 – Juros pagos
+6.1.04 – Multas e encargos financeiros
+6.1.05 – Juros de empréstimos
+7 – RECEITAS FINANCEIRAS E OUTRAS RECEITAS
+7.1 – Receitas financeiras
+7.1.01 – Rendimentos de aplicações
+7.1.02 – Juros recebidos
+7.2 – Outras receitas
+7.2.01 – Receitas não operacionais
+8 – OUTRAS DESPESAS
+8.1 – Despesas não operacionais
+8.1.01 – Perdas e baixas extraordinárias
+8.1.02 – Outras despesas não operacionais
+9 – MOVIMENTAÇÕES QUE NÃO ENTRAM DIRETAMENTE NA DRE
+9.1 – Compras para estoque
+9.1.01 – Compra de mercadorias para revenda
+9.1.02 – Compra de matérias-primas
+9.1.03 – Compra de produtos químicos e componentes
+9.1.04 – Compra de embalagens
+9.1.05 – Compra de rótulos, tampas e lacres
+9.1.06 – Compra de materiais auxiliares de produção
+9.2 – Investimentos
+9.2.01 – Máquinas e equipamentos industriais
+9.2.02 – Móveis e instalações
+9.2.03 – Veículos
+9.2.04 – Equipamentos e ferramentas
+9.2.05 – Outros investimentos
+9.3 – Movimentações financeiras
+9.3.01 – Amortização de empréstimos
+9.3.02 – Retiradas dos sócios
+9.3.03 – Transferências entre contas bancárias
+Os grupos e subgrupos deverão funcionar como totalizadores. Somente as contas analíticas receberão classificações e lançamentos.
+A estrutura deverá permitir inclusão de novas contas sem comprometer relatórios ou lançamentos históricos.
+
+2. DOIS CÓDIGOS PARA CADA CONTA ANALÍTICA
+Cada conta analítica deverá possuir dois códigos independentes.
+A. Código hierárquico
+Utilizado para organizar o Plano de Contas e apresentar a DRE.
+Exemplo: 4.2.01 – Combustível de veículos de entrega.
+B. Código de lançamento
+Código curto, exclusivo, composto por três dígitos, utilizado para facilitar a classificação das movimentações.
+Exemplos:
+Código de lançamento
+Conta
+Código hierárquico
+101
+Combustível de veículos de entrega
+4.2.01
+102
+Manutenção de veículos
+4.2.02
+103
+Fretes terceirizados
+4.2.08
+104
+Tarifas bancárias
+6.1.01
+105
+Taxas de cartões
+6.1.02
+106
+Matéria-prima consumida
+3.2.01
+107
+Embalagens utilizadas na fabricação
+3.2.03
+108
+Mão de obra direta de produção
+3.2.05
+
+Os códigos são exemplos iniciais e poderão ser organizados durante a implantação.
+Regras:
+Exatamente três dígitos, armazenados como texto.
+Não permitir duplicidade dentro do Plano de Contas da empresa.
+Grupos e subgrupos não recebem códigos curtos.
+Não reutilizar códigos já utilizados, mesmo que uma conta seja inativada.
+Permitir pesquisa por código ou descrição.
+Ao selecionar o código, identificar automaticamente a conta e sua classificação hierárquica.
+
+3. INTEGRAÇÃO COM O CONTAS A PAGAR
+O Contas a Pagar deverá permitir classificar as despesas por meio do Plano de Contas.
+Na inclusão ou baixa de um pagamento, o usuário deverá poder informar o código de três dígitos ou pesquisar a conta pela descrição.
+Exemplo 1 – Combustível:
+Descrição: Abastecimento de veículo de entrega.
+Valor: R$ 350,00.
+Unidade: Filial 01.
+Conta: 4.2.01 – Combustível de veículos de entrega.
+Código: 101.
+Data da baixa: data do pagamento.
+O valor deverá alimentar as despesas de entrega da filial na DRE.
+Exemplo 2 – Compra de matéria-prima:
+Descrição: Compra de matéria-prima para fabricação.
+Valor: R$ 2.000,00.
+Unidade: Matriz.
+Classificação: 9.1.02 – Compra de matérias-primas.
+Essa movimentação será registrada no Fluxo de Caixa, mas não será lançada diretamente como despesa da DRE.
+A matéria-prima entrará no estoque e será apropriada ao custo de produção quando consumida na fabricação.
+Exemplo 3 – Pagamento de taxa de cartão:
+Valor: R$ 180,00.
+Conta: 6.1.02 – Taxas de cartões.
+O valor deverá integrar as despesas financeiras da DRE quando baixado e classificado.
+Permitir configurar uma conta padrão para determinados fornecedores, facilitando classificações recorrentes.
+
+4. INTEGRAÇÃO COM PRODUÇÃO, ESTOQUE E CUSTOS INDUSTRIAIS
+Esta etapa é essencial, pois a empresa não apenas revende mercadorias: também fabrica seus próprios produtos.
+O sistema deverá aproveitar os recursos existentes de ficha técnica, ordem de produção, consumo de matérias-primas e estoque.
+O fluxo deverá funcionar da seguinte maneira:
+A empresa compra matérias-primas e embalagens.
+Os materiais entram no estoque da unidade responsável.
+A ordem de produção informa os produtos e quantidades que serão fabricados.
+A ficha técnica determina os componentes e quantidades necessários.
+O sistema registra o consumo dos materiais na produção.
+O custo de fabricação é calculado.
+Os produtos acabados entram no estoque pelo custo de produção apurado.
+Quando os produtos acabados forem vendidos, o custo correspondente será reconhecido no CPV da DRE.
+O custo de fabricação deverá considerar, conforme os recursos existentes e os dados disponíveis:
+Matéria-prima.
+Produtos químicos e componentes.
+Embalagens.
+Rótulos, tampas e lacres.
+Mão de obra direta.
+Encargos da mão de obra direta.
+Energia e água utilizadas na fabricação.
+Manutenção e demais custos indiretos de fabricação.
+A apropriação dos custos indiretos deverá utilizar um critério consistente e configurável, evitando atribuições arbitrárias ou duplicidade.
+O sistema deverá distinguir custos diretos e indiretos, sem contabilizar o mesmo valor duas vezes.
+Exemplo de fabricação:
+Uma ordem de produção fabricou 100 unidades de determinado produto de limpeza.
+Custos:
+Matéria-prima: R$ 200,00.
+Embalagens: R$ 50,00.
+Mão de obra direta: R$ 80,00.
+Custos indiretos apropriados: R$ 70,00.
+Custo total de produção: R$ 400,00.
+Custo unitário: R$ 4,00.
+As 100 unidades entrarão no estoque de produtos acabados com custo unitário de R$ 4,00.
+Se posteriormente forem vendidas 30 unidades, o CPV reconhecido será de R$ 120,00.
+As outras 70 unidades continuarão no estoque, com custo de R$ 280,00.
+O sistema deverá seguir a metodologia de custeio já adotada ou disponível no ERP, sem criar um cálculo paralelo incompatível com o controle de estoque.
+
+5. CÁLCULO DA DRE GERENCIAL
+A DRE deverá ser alimentada automaticamente pelos módulos de vendas, estoque, produção e financeiro.
+A metodologia será gerencial e híbrida:
+Receitas: vendas realizadas no período.
+Deduções: devoluções, descontos, cancelamentos e impostos classificados conforme os critérios definidos.
+CMV: custo das mercadorias adquiridas prontas para revenda e efetivamente vendidas.
+CPV: custo dos produtos fabricados e efetivamente vendidos.
+Despesas operacionais e financeiras: pagamentos efetivamente baixados e classificados no período.
+Receitas financeiras: recebimentos efetivamente baixados e classificados no período.
+Exemplo completo de apuração
+Considere os seguintes valores ilustrativos:
+Receita Bruta
+Vendas de produtos fabricados: R$ 12.000,00.
+Vendas de mercadorias para revenda: R$ 8.000,00.
+Receita Bruta: R$ 20.000,00.
+Deduções
+Devoluções: R$ 500,00.
+Descontos: R$ 200,00.
+Impostos pagos e classificados: R$ 1.200,00.
+Total de deduções: R$ 1.900,00.
+Receita Líquida: R$ 18.100,00.
+Custos
+CPV dos produtos fabricados vendidos: R$ 6.500,00.
+CMV das mercadorias para revenda: R$ 4.500,00.
+Total de custos: R$ 11.000,00.
+Lucro Bruto: R$ 7.100,00.
+Despesas operacionais
+Combustível: R$ 350,00.
+Manutenção de veículos: R$ 250,00.
+Fretes terceirizados: R$ 300,00.
+Aluguel: R$ 1.000,00.
+Energia administrativa: R$ 400,00.
+Internet: R$ 150,00.
+Comissões: R$ 300,00.
+Total: R$ 2.750,00.
+Resultado Operacional: R$ 4.350,00.
+Resultado financeiro
+Tarifas bancárias: R$ 80,00.
+Taxas de cartões: R$ 180,00.
+Juros pagos: R$ 40,00.
+Rendimentos financeiros: R$ 20,00.
+Resultado Financeiro: -R$ 280,00.
+Resultado Líquido Gerencial: R$ 4.070,00.
+O relatório deverá apresentar cada etapa e permitir consultar a origem dos valores.
+Os exemplos acima são ilustrativos e deverão servir para validar os cálculos do sistema.
+
+6. MATRIZ, FILIAIS E TRANSFERÊNCIAS INTERNAS
+A empresa possui matriz e mais de uma filial.
+O Plano de Contas deverá ser compartilhado entre as unidades, evitando estruturas diferentes de classificação.
+Cada movimentação deverá identificar a unidade responsável.
+O relatório deverá oferecer:
+DRE consolidada de toda a empresa.
+DRE individual da matriz.
+DRE individual de cada filial.
+Comparação de resultados entre as unidades.
+O estoque deverá respeitar a separação por unidade.
+Quando houver transferência de matéria-prima, produto em fabricação ou produto acabado entre unidades, o sistema deverá tratar isso como transferência interna de estoque, e não como venda ou despesa.
+No relatório consolidado, transferências internas não poderão gerar receitas, custos ou resultados artificiais.
+Quando a produção ocorrer na matriz e o produto acabado for enviado a uma filial, o custo original deverá acompanhar o produto, preservando a rastreabilidade e evitando duplicidade de custos.
+
+7. RELATÓRIO DRE GERENCIAL
+Criar uma tela específica chamada DRE Gerencial.
+Filtros:
+Empresa.
+Matriz ou filial.
+Todas as unidades.
+Período inicial e final.
+Visualização mensal.
+Comparação com período anterior.
+Estrutura de apresentação:
+Receita Bruta.
+Vendas de produtos fabricados.
+Vendas de mercadorias para revenda.
+Outras receitas operacionais.
+(-) Deduções da Receita.
+Devoluções.
+Descontos.
+Impostos.
+Receita Líquida.
+(-) Custos dos Produtos e Mercadorias Vendidos.
+CPV – produtos fabricados.
+CMV – mercadorias para revenda.
+Lucro Bruto.
+(-) Despesas Operacionais.
+Despesas comerciais.
+Despesas de entrega e logística.
+Despesas administrativas.
+Resultado Operacional.
+(-) Despesas Financeiras.
+(+) Receitas Financeiras e Outras Receitas.
+(-) Outras Despesas.
+Resultado Líquido Gerencial.
+Apresentar também:
+Margem bruta.
+Margem operacional.
+Margem líquida.
+Percentuais dos custos e despesas em relação à receita.
+Valores em reais.
+Comparação entre períodos.
+Permitir expandir e recolher grupos e subgrupos.
+Ao clicar em uma conta ou valor, quando tecnicamente possível, permitir consultar os lançamentos que compõem o total, incluindo data, descrição, unidade e valor.
+A apresentação deverá ser profissional, simples e compreensível para empresários sem conhecimento contábil aprofundado.
+
+8. SEPARAÇÃO ENTRE DRE E FLUXO DE CAIXA
+A DRE e o Fluxo de Caixa deverão continuar sendo relatórios independentes.
+Exemplo 1 – Compra de matéria-prima:
+Compra de R$ 2.000,00 de matéria-prima para produção.
+Fluxo de Caixa: saída de R$ 2.000,00 quando pago.
+Estoque: entrada de matéria-prima.
+DRE: não registrar os R$ 2.000,00 como despesa no momento da compra.
+Quando a matéria-prima for consumida, seu custo será incorporado à produção. O CPV será reconhecido quando o produto fabricado for vendido.
+Exemplo 2 – Venda a prazo:
+Venda de R$ 2.000,00 realizada, ainda não recebida.
+DRE: reconhecer a receita no período da venda.
+Fluxo de Caixa: reconhecer o recebimento somente quando o cliente pagar.
+Exemplo 3 – Compra de mercadoria para revenda:
+Compra de R$ 3.000,00.
+Fluxo de Caixa: saída quando paga.
+Estoque: entrada de mercadorias.
+DRE: CMV somente quando os produtos forem vendidos.
+Essa separação deverá evitar duplicidade e permitir que o empresário compreenda a diferença entre faturamento, lucro e disponibilidade financeira.
+
+9. OBSERVAÇÃO SOBRE A METODOLOGIA
+Incluir no relatório uma observação discreta:
+"Esta é uma DRE Gerencial. As receitas são consideradas pelas vendas realizadas, os custos industriais e comerciais são reconhecidos conforme os produtos e mercadorias vendidos, e as despesas e movimentações financeiras seguem os pagamentos e recebimentos efetivamente baixados e classificados no período. Por utilizar critérios gerenciais híbridos, o resultado pode ser diferente de uma demonstração contábil elaborada pelo regime de competência."
+Não apresentar o relatório como substituto da contabilidade oficial ou das obrigações fiscais.
+
+10. REQUISITOS TÉCNICOS E PRESERVAÇÃO DO SISTEMA
+Antes de implementar, analise a estrutura atual do Gestão Fácil ERP.
+Verifique a integração com:
+Firebase Authentication.
+Firestore.
+Empresas e filiais.
+Cadastro de produtos.
+Estoque por empresa.
+Fichas técnicas.
+Ordens de produção.
+Consumo de matérias-primas.
+Custos de produção.
+Produtos acabados.
+Vendas e PDV.
+Vendas externas.
+Contas a Pagar.
+Contas a Receber.
+Baixas financeiras.
+Fluxo de Caixa.
+Entregas e logística.
+Regras obrigatórias:
+Reutilizar estruturas e funcionalidades existentes sempre que possível.
+Não criar módulos duplicados.
+Não apagar ou alterar indevidamente dados existentes.
+Preservar o funcionamento atual do Fluxo de Caixa.
+Respeitar a separação de empresas e filiais.
+Preservar o custo dos produtos durante transferências internas.
+Evitar duplicidade de custos entre produção, estoque e DRE.
+Garantir rastreabilidade dos valores apresentados no relatório.
+Não alterar retroativamente lançamentos históricos quando o Plano de Contas for editado ou uma conta for inativada.
+Manter o layout responsivo para computadores e celulares.
+Evitar consultas desnecessárias ao Firestore e operações que aumentem excessivamente o consumo.
+11. ETAPAS DE EXECUÇÃO
+Primeiro, faça um diagnóstico da estrutura atual e apresente como pretende implementar o projeto.
+Identifique:
+Como o Plano de Contas será estruturado.
+Como serão criados os códigos de lançamento.
+Como o Contas a Pagar será integrado.
+Como vendas de fabricação própria serão separadas das vendas de mercadorias para revenda.
+Como CMV e CPV serão calculados.
+Como os custos industriais serão apropriados.
+Como as transferências entre matriz e filiais serão tratadas.
+Como serão calculados os resultados individuais e consolidados.
+Quais alterações serão necessárias no Firestore.
+Não execute alterações estruturais no banco de dados nem modifique funcionalidades existentes antes de apresentar o diagnóstico e receber minha autorização.
+Após a autorização, implemente o projeto, preservando a compatibilidade com os dados existentes.
+Faça testes com dados fictícios para validar:
+Plano de Contas.
+Códigos de lançamento.
+Compras de matérias-primas.
+Consumo de materiais na produção.
+Custo unitário de fabricação.
+Entrada de produtos acabados.
+Transferências entre unidades.
+CMV e CPV.
+Despesas de entrega.
+DRE individual e consolidada.
+Ausência de duplicidade entre DRE e Fluxo de Caixa.
+RESULTADO FINAL ESPERADO:
+Um Plano de Contas industrial e comercial personalizado para uma empresa fabricante e distribuidora de produtos de limpeza, com matriz e filiais, integrado ao estoque, produção, vendas e financeiro.
+O sistema deverá gerar uma DRE Gerencial confiável, mostrando separadamente o resultado das mercadorias revendidas e dos produtos fabricados, os custos industriais, as despesas comerciais, administrativas e de entrega, permitindo ao empresário compreender o desempenho de cada unidade e da empresa como um todo.
+
+
+AJUSTE NO CONTAS A PAGAR – CLASSIFICAÇÃO OBRIGATÓRIA PELO CÓDIGO DE LANÇAMENTO DO PLANO DE CONTAS
+Preciso implementar um ajuste no módulo Contas a Pagar do Gestão Fácil ERP, integrando obrigatoriamente cada lançamento ao Plano de Contas já definido para a empresa.
+O objetivo é garantir que toda conta a pagar tenha uma classificação gerencial, permitindo que as despesas sejam corretamente identificadas e posteriormente utilizadas na composição da DRE Gerencial.
+1. Código de lançamento obrigatório
+Cada conta analítica do Plano de Contas possui um código curto de três dígitos, chamado Código de Lançamento.
+Esse código deverá ser utilizado obrigatoriamente na classificação das contas a pagar.
+Exemplos:
+101 – Combustível de veículos de entrega.
+102 – Manutenção de veículos.
+103 – Fretes terceirizados.
+104 – Tarifas bancárias.
+105 – Taxas de cartões.
+106 – Matéria-prima consumida.
+107 – Embalagens utilizadas na fabricação.
+108 – Mão de obra direta de produção.
+Os códigos deverão corresponder às contas analíticas cadastradas no Plano de Contas da empresa.
+2. Primeira opção: informar o código na inclusão da conta a pagar
+Na tela de cadastro ou inclusão de uma nova conta a pagar, criar um campo obrigatório denominado:
+Classificação no Plano de Contas – Código de Lançamento
+O usuário poderá:
+Digitar diretamente o código de três dígitos.
+Pesquisar a conta pela descrição.
+Selecionar a conta correspondente em uma lista de opções.
+Ao informar o código, o sistema deverá localizar automaticamente a conta correspondente e apresentar sua descrição e classificação hierárquica.
+Exemplo:
+O usuário está cadastrando uma conta de abastecimento de veículo.
+Ao digitar o código 101, o sistema deverá apresentar:
+Código: 101.
+Conta: Combustível de veículos de entrega.
+Classificação: 4.2.01 – Despesas com entregas e logística.
+O usuário deverá conseguir confirmar a classificação antes de salvar o lançamento.
+3. Segunda opção: informar o código somente na baixa
+Caso o usuário não informe o código no momento da inclusão da conta a pagar, o sistema poderá permitir salvar o lançamento sem essa classificação.
+Entretanto, nesse caso, a classificação deverá ficar com o status:
+PENDENTE DE CLASSIFICAÇÃO
+Quando o usuário acessar a rotina de baixa dessa conta, o sistema deverá exigir o preenchimento do Código de Lançamento antes de concluir a operação.
+O usuário deverá poder digitar o código de três dígitos ou pesquisar a conta pela descrição.
+Após selecionar a conta, o sistema deverá apresentar a classificação completa para conferência.
+Somente depois do preenchimento e da confirmação da classificação o sistema poderá concluir a baixa.
+4. Regra obrigatória de validação
+A classificação pelo Plano de Contas será obrigatória para todas as contas a pagar.
+Regras:
+Nenhuma conta a pagar poderá ser efetivamente baixada sem possuir uma conta analítica vinculada ao Plano de Contas.
+Se o código não for informado na inclusão, a conta poderá permanecer pendente de classificação.
+Na tentativa de baixa de uma conta sem classificação, o sistema deverá solicitar o código antes de prosseguir.
+Não permitir concluir a baixa enquanto o código não for informado e validado.
+Não permitir códigos inexistentes, inválidos, inativos ou que não correspondam a contas analíticas habilitadas para lançamento.
+O código deverá pertencer ao Plano de Contas da empresa responsável pela movimentação.
+O sistema deverá impedir que um código de uma empresa seja utilizado indevidamente em outra empresa.
+Depois de classificada, a conta deverá manter a identificação da conta contábil/gerencial correspondente, mesmo que sua descrição seja alterada futuramente.
+Não permitir que a classificação seja removida de uma conta já baixada sem um procedimento controlado de correção.
+Caso seja necessária uma reclassificação, registrar a alteração para preservar o histórico.
+5. Integração com a DRE Gerencial
+A classificação informada no Contas a Pagar deverá ser utilizada para alimentar a DRE Gerencial conforme os critérios já definidos.
+Exemplos:
+Combustível de entrega
+Código: 101.
+Conta: 4.2.01 – Combustível de veículos de entrega.
+Resultado: integrar as despesas de entrega da unidade correspondente, considerando a data da baixa.
+Taxas de cartões
+Código: 105.
+Conta: 6.1.02 – Taxas de cartões.
+Resultado: integrar as despesas financeiras da DRE.
+Compra de matéria-prima
+Conta: 9.1.02 – Compra de matérias-primas.
+Resultado: registrar a movimentação financeira e a entrada de estoque, sem reconhecer diretamente o valor como despesa na DRE.
+É importante respeitar a natureza de cada conta. Nem toda movimentação do Contas a Pagar representa uma despesa da DRE.
+Os custos de matéria-prima, embalagens e demais componentes de fabricação deverão seguir o fluxo de apropriação à produção e ao estoque de produtos acabados. O CPV será reconhecido quando os produtos fabricados forem vendidos.
+6. Identificação de contas pendentes
+Criar uma identificação visual para as contas a pagar ainda não classificadas.
+Exemplo:
+Classificada: apresentar a descrição da conta e seu código.
+Pendente: apresentar o aviso "Pendente de classificação".
+Se possível, incluir um filtro na listagem do Contas a Pagar para localizar:
+Todas as contas.
+Contas classificadas.
+Contas pendentes de classificação.
+Essa identificação deverá facilitar o controle do usuário e evitar que contas permaneçam esquecidas sem classificação.
+7. Cuidados com a implementação
+Antes de implementar, analise a estrutura atual do Contas a Pagar, do Plano de Contas e do Firestore.
+Reutilize as estruturas existentes e preserve todos os lançamentos já cadastrados.
+Não apague, recrie ou altere indevidamente dados históricos.
+A alteração deverá respeitar as empresas e filiais, as permissões dos usuários e o funcionamento atual do sistema.
+Verifique também como tratar contas antigas que já estejam cadastradas sem classificação, sem modificar automaticamente seus históricos.
+Apresente primeiro o diagnóstico e as alterações necessárias. Aguarde minha autorização antes de realizar mudanças estruturais no banco de dados.
+RESULTADO ESPERADO:
+Toda conta a pagar deverá possuir obrigatoriamente uma classificação no Plano de Contas antes de sua baixa.
+O usuário terá a possibilidade de informar o código de três dígitos já no cadastro da conta ou, caso não o faça, será obrigado a informar esse código no momento da baixa.
+Dessa forma, a classificação gerencial ficará completa e consistente, garantindo que a DRE Gerencial receba as informações corretamente.
