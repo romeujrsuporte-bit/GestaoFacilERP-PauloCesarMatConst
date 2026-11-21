@@ -23,6 +23,7 @@ import {
   Check,
   X,
   ShieldAlert,
+  List,
 } from 'lucide-react';
 import { Database } from '../../services/db';
 import { Product, ProductType, UnitOfMeasure, StockLocation, Company, CompanyPriceOverride, ProductMaxDiscountType } from '../../types';
@@ -102,11 +103,30 @@ export const ProductsView: React.FC = () => {
   const [selectedType, setSelectedType] = useState('todos');
   const [selectedStatus, setSelectedStatus] = useState('todos');
   const [selectedMasterPackFilter, setSelectedMasterPackFilter] = useState<'todos' | 'master_only' | 'unit_only'>('todos');
+  const [showAllProducts, setShowAllProducts] = useState(false);
   const [sortConfig, setSortConfig] = useState<SortConfig<ProductSortKey>>({ key: 'code', direction: 'desc' });
   const tableScrollRef = useRef<HTMLDivElement | null>(null);
 
   const handleSort = (key: ProductSortKey) => {
     setSortConfig((prev) => toggleSortConfig(prev, key));
+    if (tableScrollRef.current) {
+      tableScrollRef.current.scrollTop = 0;
+    }
+  };
+
+  const handleToggleShowAllProducts = () => {
+    if (!showAllProducts) {
+      setShowAllProducts(true);
+      setSearchTerm('');
+      setSelectedFamily('todos');
+      setSelectedType('todos');
+      setSelectedStatus('todos');
+      setSelectedMasterPackFilter('todos');
+      setSortConfig({ key: 'description', direction: 'asc' });
+    } else {
+      setShowAllProducts(false);
+      setSortConfig({ key: 'code', direction: 'desc' });
+    }
     if (tableScrollRef.current) {
       tableScrollRef.current.scrollTop = 0;
     }
@@ -209,6 +229,10 @@ export const ProductsView: React.FC = () => {
       });
     }
 
+    if (showAllProducts) {
+      return baseFilteredProducts;
+    }
+
     // Sem busca ativa: exibe inicialmente apenas os últimos 20 produtos cadastrados em ordem decrescente de código
     return [...baseFilteredProducts]
       .sort(
@@ -218,7 +242,7 @@ export const ProductsView: React.FC = () => {
           compareSortText(a.id, b.id, 'desc')
       )
       .slice(0, 20);
-  }, [baseFilteredProducts, isSearching, isSearchTooShort, trimmedSearch]);
+  }, [baseFilteredProducts, isSearching, isSearchTooShort, trimmedSearch, showAllProducts]);
 
   const sortProductList = (list: Product[]): Product[] => {
     if (!sortConfig.key) return list;
@@ -893,7 +917,7 @@ export const ProductsView: React.FC = () => {
 
       {/* Filtros */}
       <div className="shrink-0 bg-white p-3.5 rounded-xl border border-slate-200 shadow-xs space-y-2.5">
-        <div className="grid grid-cols-1 sm:grid-cols-5 gap-2.5 text-xs">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-2.5 text-xs">
           <div className="relative sm:col-span-2">
             <Search className="absolute left-3 top-2.5 text-slate-400 pointer-events-none" size={16} />
             <input
@@ -953,6 +977,26 @@ export const ProductsView: React.FC = () => {
               <option value="unit_only">Produtos Unitários / Simples</option>
             </select>
           </div>
+
+          <div>
+            <button
+              type="button"
+              onClick={handleToggleShowAllProducts}
+              title={
+                showAllProducts
+                  ? 'Clique para voltar à exibição inicial dos últimos 20 produtos'
+                  : 'Listar todos os produtos cadastrados em ordem crescente de descrição'
+              }
+              className={`w-full h-full min-h-[34px] flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg text-xs font-bold border transition-colors cursor-pointer shadow-2xs ${
+                showAllProducts
+                  ? 'bg-blue-600 hover:bg-blue-700 text-white border-blue-600'
+                  : 'bg-blue-50 hover:bg-blue-100 text-blue-800 border-blue-200'
+              }`}
+            >
+              <List size={15} />
+              <span>Exibir Todos</span>
+            </button>
+          </div>
         </div>
 
         {/* Barra de contexto da listagem / busca */}
@@ -967,23 +1011,39 @@ export const ProductsView: React.FC = () => {
               <strong className="text-blue-700">{sortedProducts.length}</strong> produto(s) encontrado(s)
               {baseFilteredProducts.length > 0 ? ` (de ${baseFilteredProducts.length} no filtro atual)` : ''}.
             </span>
+          ) : showAllProducts ? (
+            <span>
+              Exibindo <strong className="text-blue-700">todos os {sortedProducts.length} produto(s) cadastrados</strong>
+              {sortConfig.key === 'description' && sortConfig.direction === 'asc'
+                ? ' (ordem crescente de descrição)'
+                : ''}
+              .
+            </span>
           ) : (
             <span>
               Exibindo os <strong className="text-slate-800">últimos {sortedProducts.length} produtos cadastrados</strong>
               {sortConfig.key === 'code' && sortConfig.direction === 'desc' ? ' (ordem decrescente de código)' : ''} de{' '}
-              <strong className="text-slate-700">{baseFilteredProducts.length}</strong> produto(s) — digite ao menos <strong className="text-slate-700">3 caracteres</strong> para pesquisar no catálogo completo.
+              <strong className="text-slate-700">{baseFilteredProducts.length}</strong> produto(s) — digite ao menos <strong className="text-slate-700">3 caracteres</strong> para pesquisar ou clique em <strong className="text-blue-700">Exibir Todos</strong>.
             </span>
           )}
 
-          {isSearching && (
+          {isSearching ? (
             <button
               type="button"
               onClick={() => setSearchTerm('')}
               className="text-blue-600 hover:text-blue-800 font-bold hover:underline cursor-pointer"
             >
-              Limpar busca e voltar aos últimos 20
+              {showAllProducts ? 'Limpar busca e exibir todos' : 'Limpar busca e voltar aos últimos 20'}
             </button>
-          )}
+          ) : showAllProducts ? (
+            <button
+              type="button"
+              onClick={handleToggleShowAllProducts}
+              className="text-blue-600 hover:text-blue-800 font-bold hover:underline cursor-pointer"
+            >
+              Voltar aos últimos 20 cadastrados
+            </button>
+          ) : null}
         </div>
       </div>
 
