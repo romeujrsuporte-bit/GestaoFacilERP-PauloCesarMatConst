@@ -168,22 +168,22 @@ function getAdaptivePriceSizesMm(
 ): { currencyMm: number; integerMm: number; centsMm: number } {
   const digits = intPart.replace(/\./g, '').length;
   if (modelId === '30') {
-    if (digits <= 2) return { currencyMm: 2.6, integerMm: 6.6, centsMm: 3.6 };
-    if (digits === 3) return { currencyMm: 2.35, integerMm: 5.8, centsMm: 3.2 };
-    if (digits === 4) return { currencyMm: 2.1, integerMm: 4.9, centsMm: 2.8 };
-    return { currencyMm: 1.9, integerMm: 4.1, centsMm: 2.4 };
+    if (digits <= 2) return { currencyMm: 3.1, integerMm: 9.0, centsMm: 4.8 };
+    if (digits === 3) return { currencyMm: 2.7, integerMm: 7.5, centsMm: 4.0 };
+    if (digits === 4) return { currencyMm: 2.35, integerMm: 6.0, centsMm: 3.3 };
+    return { currencyMm: 2.0, integerMm: 4.9, centsMm: 2.75 };
   }
   if (modelId === '40') {
-    if (digits <= 2) return { currencyMm: 2.2, integerMm: 5.0, centsMm: 2.9 };
-    if (digits === 3) return { currencyMm: 2.0, integerMm: 4.5, centsMm: 2.6 };
-    if (digits === 4) return { currencyMm: 1.85, integerMm: 3.9, centsMm: 2.3 };
-    return { currencyMm: 1.7, integerMm: 3.3, centsMm: 2.0 };
+    if (digits <= 2) return { currencyMm: 2.55, integerMm: 6.4, centsMm: 3.5 };
+    if (digits === 3) return { currencyMm: 2.3, integerMm: 5.6, centsMm: 3.1 };
+    if (digits === 4) return { currencyMm: 2.0, integerMm: 4.7, centsMm: 2.65 };
+    return { currencyMm: 1.8, integerMm: 3.9, centsMm: 2.25 };
   }
   // Modelo 60
-  if (digits <= 2) return { currencyMm: 1.85, integerMm: 3.95, centsMm: 2.35 };
-  if (digits === 3) return { currencyMm: 1.7, integerMm: 3.55, centsMm: 2.1 };
-  if (digits === 4) return { currencyMm: 1.55, integerMm: 3.05, centsMm: 1.85 };
-  return { currencyMm: 1.4, integerMm: 2.6, centsMm: 1.6 };
+  if (digits <= 2) return { currencyMm: 2.15, integerMm: 5.0, centsMm: 2.8 };
+  if (digits === 3) return { currencyMm: 1.95, integerMm: 4.4, centsMm: 2.5 };
+  if (digits === 4) return { currencyMm: 1.75, integerMm: 3.7, centsMm: 2.15 };
+  return { currencyMm: 1.55, integerMm: 3.1, centsMm: 1.85 };
 }
 
 interface BarcodeBlockProps {
@@ -194,35 +194,27 @@ interface BarcodeBlockProps {
 const BarcodeBlock: React.FC<BarcodeBlockProps> = ({ rawBarcode, modelId }) => {
   const encoded = React.useMemo(() => encodeProductBarcode(rawBarcode), [rawBarcode]);
 
+  const svgHeightMm = modelId === '30' ? 10.2 : modelId === '40' ? 8.2 : 6.3;
+  const textFontMm = modelId === '30' ? 2.05 : modelId === '40' ? 1.95 : 1.65;
+  const emptyHeightMm = modelId === '30' ? 12.6 : modelId === '40' ? 10.5 : 8.25;
+
   if (!encoded) {
     return (
       <div
+        aria-hidden="true"
         style={{
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
           width: '100%',
-          height: modelId === '30' ? '9.2mm' : modelId === '40' ? '8.6mm' : '6.6mm',
-          border: '0.2mm dashed #999999',
-          backgroundColor: '#ffffff',
-          color: '#666666',
-          fontSize: modelId === '60' ? '1.5mm' : '1.75mm',
-          fontWeight: 500,
-          letterSpacing: '0.02em',
-          textAlign: 'center',
+          height: `${emptyHeightMm}mm`,
+          backgroundColor: 'transparent',
           boxSizing: 'border-box',
         }}
-      >
-        Sem código de barras
-      </div>
+      />
     );
   }
 
-  const svgHeightMm = modelId === '30' ? 7.6 : modelId === '40' ? 6.8 : 5.1;
-  const textFontMm = modelId === '30' ? 1.85 : modelId === '40' ? 1.8 : 1.5;
   const viewHeight = 40;
-  const regularBarHeight = encoded.format === 'CODE128' ? 38 : 34;
-  const guardBarHeight = 39;
+  const regularBarHeight = encoded.format === 'CODE128' ? 39 : 36;
+  const guardBarHeight = 40;
 
   return (
     <div
@@ -265,7 +257,7 @@ const BarcodeBlock: React.FC<BarcodeBlockProps> = ({ rawBarcode, modelId }) => {
           fontFamily: "'JetBrains Mono', 'Courier New', monospace",
           fontSize: `${textFontMm}mm`,
           lineHeight: 1.05,
-          fontWeight: 600,
+          fontWeight: 700,
           color: '#000000',
           letterSpacing: modelId === '60' ? '0.04em' : '0.08em',
           marginTop: '0.25mm',
@@ -296,7 +288,7 @@ const SingleLabelCard: React.FC<SingleLabelCardProps> = ({ entry, modelId }) => 
   const priceSizes = getAdaptivePriceSizesMm(intPart, modelId);
 
   if (modelId === '30') {
-    // MODELO 1 — 66mm × 28.7mm: Nome em destaque no topo; esquerda Código + Código de Barras; direita Preço grande
+    // MODELO 1 — 66mm × 28.7mm: Barra preta com nome em branco no topo; esquerda Código + Código de Barras; direita Preço grande
     return (
       <div
         style={{
@@ -305,7 +297,7 @@ const SingleLabelCard: React.FC<SingleLabelCardProps> = ({ entry, modelId }) => 
           border: '0.22mm solid #1a1a1a',
           backgroundColor: '#ffffff',
           color: '#000000',
-          padding: '1.35mm 1.7mm 1.1mm 1.7mm',
+          padding: 0,
           boxSizing: 'border-box',
           display: 'flex',
           flexDirection: 'column',
@@ -313,25 +305,38 @@ const SingleLabelCard: React.FC<SingleLabelCardProps> = ({ entry, modelId }) => 
           overflow: 'hidden',
         }}
       >
-        {/* Nome do produto */}
+        {/* Barra de título preta com descrição do produto em branco */}
         <div
           style={{
-            fontSize: `${nameFontMm}mm`,
-            fontWeight: 800,
-            lineHeight: 1.1,
-            color: '#000000',
-            textTransform: 'uppercase',
-            display: '-webkit-box',
-            WebkitLineClamp: 2,
-            WebkitBoxOrient: 'vertical',
-            overflow: 'hidden',
-            wordBreak: 'break-word',
-            minHeight: '5.6mm',
-            borderBottom: '0.18mm solid #d4d4d4',
-            paddingBottom: '0.7mm',
+            backgroundColor: '#000000',
+            color: '#ffffff',
+            padding: '1.05mm 1.6mm',
+            minHeight: '6.6mm',
+            display: 'flex',
+            alignItems: 'center',
+            boxSizing: 'border-box',
+            flexShrink: 0,
+            WebkitPrintColorAdjust: 'exact',
+            printColorAdjust: 'exact',
           }}
         >
-          {displayName}
+          <div
+            style={{
+              fontSize: `${nameFontMm}mm`,
+              fontWeight: 800,
+              lineHeight: 1.1,
+              color: '#ffffff',
+              textTransform: 'uppercase',
+              display: '-webkit-box',
+              WebkitLineClamp: 2,
+              WebkitBoxOrient: 'vertical',
+              overflow: 'hidden',
+              wordBreak: 'break-word',
+              width: '100%',
+            }}
+          >
+            {displayName}
+          </div>
         </div>
 
         {/* Corpo: Código + Barras à esquerda | Preço em destaque à direita */}
@@ -340,29 +345,31 @@ const SingleLabelCard: React.FC<SingleLabelCardProps> = ({ entry, modelId }) => 
             display: 'flex',
             alignItems: 'flex-end',
             justifyContent: 'space-between',
-            gap: '1.8mm',
+            gap: '1.2mm',
             flex: 1,
-            paddingTop: '0.8mm',
+            padding: '0.75mm 1.4mm 0.85mm 1.4mm',
+            boxSizing: 'border-box',
             minHeight: 0,
           }}
         >
           <div
             style={{
-              width: '32.5mm',
+              width: '34.2mm',
               display: 'flex',
               flexDirection: 'column',
               justifyContent: 'space-between',
               height: '100%',
               minWidth: 0,
+              flexShrink: 0,
             }}
           >
             <div
               style={{
                 fontFamily: "'JetBrains Mono', monospace",
-                fontSize: '1.95mm',
+                fontSize: '1.9mm',
                 fontWeight: 700,
                 color: '#262626',
-                lineHeight: 1.1,
+                lineHeight: 1.05,
                 whiteSpace: 'nowrap',
                 overflow: 'hidden',
                 textOverflow: 'ellipsis',
@@ -379,9 +386,9 @@ const SingleLabelCard: React.FC<SingleLabelCardProps> = ({ entry, modelId }) => 
               display: 'flex',
               flexDirection: 'column',
               alignItems: 'flex-end',
-              justifyContent: 'center',
+              justifyContent: 'flex-end',
               minWidth: 0,
-              paddingBottom: '0.6mm',
+              paddingBottom: '0.45mm',
             }}
           >
             <div
@@ -391,7 +398,7 @@ const SingleLabelCard: React.FC<SingleLabelCardProps> = ({ entry, modelId }) => 
                 justifyContent: 'flex-end',
                 color: '#000000',
                 fontVariantNumeric: 'tabular-nums',
-                lineHeight: 0.95,
+                lineHeight: 0.92,
                 whiteSpace: 'nowrap',
               }}
             >
@@ -399,7 +406,7 @@ const SingleLabelCard: React.FC<SingleLabelCardProps> = ({ entry, modelId }) => 
                 style={{
                   fontSize: `${priceSizes.currencyMm}mm`,
                   fontWeight: 800,
-                  marginRight: '0.6mm',
+                  marginRight: '0.5mm',
                   color: '#171717',
                 }}
               >
@@ -430,7 +437,7 @@ const SingleLabelCard: React.FC<SingleLabelCardProps> = ({ entry, modelId }) => 
   }
 
   // MODELO 2 (50mm × 28.7mm) e MODELO 3 (40mm × 23.9mm):
-  // Nome no topo | Linha central com Código à esquerda e Preço em destaque à direita | Código de barras em largura total na base
+  // Barra preta com nome em branco no topo | Linha central com Código à esquerda e Preço em destaque à direita | Código de barras em largura total na base
   const isCompact = modelId === '60';
 
   return (
@@ -441,7 +448,7 @@ const SingleLabelCard: React.FC<SingleLabelCardProps> = ({ entry, modelId }) => 
         border: '0.22mm solid #1a1a1a',
         backgroundColor: '#ffffff',
         color: '#000000',
-        padding: isCompact ? '0.9mm 1.1mm 0.75mm 1.1mm' : '1.15mm 1.35mm 0.95mm 1.35mm',
+        padding: 0,
         boxSizing: 'border-box',
         display: 'flex',
         flexDirection: 'column',
@@ -449,96 +456,123 @@ const SingleLabelCard: React.FC<SingleLabelCardProps> = ({ entry, modelId }) => 
         overflow: 'hidden',
       }}
     >
-      {/* Nome do produto */}
+      {/* Barra de título preta com descrição do produto em branco */}
       <div
         style={{
-          fontSize: `${nameFontMm}mm`,
-          fontWeight: 800,
-          lineHeight: 1.08,
-          color: '#000000',
-          textTransform: 'uppercase',
-          display: '-webkit-box',
-          WebkitLineClamp: 2,
-          WebkitBoxOrient: 'vertical',
-          overflow: 'hidden',
-          wordBreak: 'break-word',
-          borderBottom: '0.16mm solid #d4d4d4',
-          paddingBottom: isCompact ? '0.4mm' : '0.55mm',
-        }}
-      >
-        {displayName}
-      </div>
-
-      {/* Linha intermediária: Código interno + Preço */}
-      <div
-        style={{
+          backgroundColor: '#000000',
+          color: '#ffffff',
+          padding: isCompact ? '0.65mm 1.0mm' : '0.85mm 1.25mm',
+          minHeight: isCompact ? '4.6mm' : '5.8mm',
           display: 'flex',
-          alignItems: 'baseline',
-          justifyContent: 'space-between',
-          gap: '1mm',
-          padding: isCompact ? '0.35mm 0' : '0.5mm 0',
+          alignItems: 'center',
+          boxSizing: 'border-box',
+          flexShrink: 0,
+          WebkitPrintColorAdjust: 'exact',
+          printColorAdjust: 'exact',
         }}
       >
         <div
           style={{
-            fontFamily: "'JetBrains Mono', monospace",
-            fontSize: isCompact ? '1.55mm' : '1.8mm',
-            fontWeight: 700,
-            color: '#262626',
-            lineHeight: 1.05,
-            whiteSpace: 'nowrap',
+            fontSize: `${nameFontMm}mm`,
+            fontWeight: 800,
+            lineHeight: 1.08,
+            color: '#ffffff',
+            textTransform: 'uppercase',
+            display: '-webkit-box',
+            WebkitLineClamp: 2,
+            WebkitBoxOrient: 'vertical',
             overflow: 'hidden',
-            textOverflow: 'ellipsis',
-            maxWidth: isCompact ? '14mm' : '17mm',
+            wordBreak: 'break-word',
+            width: '100%',
           }}
         >
-          {isCompact ? `Cód:${displayCode}` : `CÓD: ${displayCode}`}
+          {displayName}
         </div>
+      </div>
 
+      {/* Corpo da etiqueta */}
+      <div
+        style={{
+          flex: 1,
+          display: 'flex',
+          flexDirection: 'column',
+          justifyContent: 'space-between',
+          padding: isCompact ? '0.35mm 1.0mm 0.55mm 1.0mm' : '0.45mm 1.25mm 0.7mm 1.25mm',
+          boxSizing: 'border-box',
+          minHeight: 0,
+        }}
+      >
+        {/* Linha intermediária: Código interno + Preço */}
         <div
           style={{
             display: 'flex',
             alignItems: 'baseline',
-            justifyContent: 'flex-end',
-            color: '#000000',
-            fontVariantNumeric: 'tabular-nums',
-            lineHeight: 0.95,
-            whiteSpace: 'nowrap',
-            flexShrink: 0,
+            justifyContent: 'space-between',
+            gap: '0.8mm',
+            padding: isCompact ? '0.2mm 0' : '0.3mm 0',
           }}
         >
-          <span
+          <div
             style={{
-              fontSize: `${priceSizes.currencyMm}mm`,
-              fontWeight: 800,
-              marginRight: '0.45mm',
-              color: '#171717',
+              fontFamily: "'JetBrains Mono', monospace",
+              fontSize: isCompact ? '1.5mm' : '1.75mm',
+              fontWeight: 700,
+              color: '#262626',
+              lineHeight: 1.05,
+              whiteSpace: 'nowrap',
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              maxWidth: isCompact ? '12.5mm' : '15.5mm',
             }}
           >
-            R$
-          </span>
-          <span
-            style={{
-              fontSize: `${priceSizes.integerMm}mm`,
-              fontWeight: 900,
-              letterSpacing: '-0.03em',
-            }}
-          >
-            {intPart}
-          </span>
-          <span
-            style={{
-              fontSize: `${priceSizes.centsMm}mm`,
-              fontWeight: 900,
-            }}
-          >
-            ,{decPart}
-          </span>
-        </div>
-      </div>
+            {isCompact ? `Cód:${displayCode}` : `CÓD: ${displayCode}`}
+          </div>
 
-      {/* Base: Código de barras com largura total para máxima legibilidade pelo leitor */}
-      <BarcodeBlock rawBarcode={product.barcode} modelId={modelId} />
+          <div
+            style={{
+              display: 'flex',
+              alignItems: 'baseline',
+              justifyContent: 'flex-end',
+              color: '#000000',
+              fontVariantNumeric: 'tabular-nums',
+              lineHeight: 0.92,
+              whiteSpace: 'nowrap',
+              flexShrink: 0,
+            }}
+          >
+            <span
+              style={{
+                fontSize: `${priceSizes.currencyMm}mm`,
+                fontWeight: 800,
+                marginRight: '0.4mm',
+                color: '#171717',
+              }}
+            >
+              R$
+            </span>
+            <span
+              style={{
+                fontSize: `${priceSizes.integerMm}mm`,
+                fontWeight: 900,
+                letterSpacing: '-0.03em',
+              }}
+            >
+              {intPart}
+            </span>
+            <span
+              style={{
+                fontSize: `${priceSizes.centsMm}mm`,
+                fontWeight: 900,
+              }}
+            >
+              ,{decPart}
+            </span>
+          </div>
+        </div>
+
+        {/* Base: Código de barras com largura total para máxima legibilidade pelo leitor */}
+        <BarcodeBlock rawBarcode={product.barcode} modelId={modelId} />
+      </div>
     </div>
   );
 };
@@ -695,6 +729,8 @@ export const ProductLabelsPrintDocument: React.FC<ProductLabelsPrintDocumentProp
           }
           body.printing-product-labels #printable-product-labels * {
             visibility: visible !important;
+            -webkit-print-color-adjust: exact !important;
+            print-color-adjust: exact !important;
           }
           body.printing-product-labels .label-a4-page {
             box-shadow: none !important;
