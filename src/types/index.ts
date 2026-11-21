@@ -141,8 +141,48 @@ export interface Product {
   masterPackUnits?: number;
   masterPackPackagingType?: 'caixa' | 'pacote' | 'fardo' | 'display' | 'kit' | 'outro';
 
+  // CONTROLE DE DESCONTO MÁXIMO PERMITIDO POR PRODUTO
+  maxDiscountEnabled?: boolean; // Ativa ou desativa o limite individual de desconto para este produto
+  maxDiscountType?: ProductMaxDiscountType; // Tipo de limite: Percentual (%) ou Valor monetário (R$)
+  maxDiscountValue?: number; // Limite máximo permitido (% ou R$ por unidade; 0 = nenhum desconto livre)
+
   // TABELA DE PREÇOS E PARÂMETROS INDIVIDUAIS POR EMPRESA (MATRIZ E FILIAIS)
   companyPrices?: Record<string, CompanyPriceOverride>;
+}
+
+export type ProductMaxDiscountType = 'percent' | 'value';
+
+export interface DiscountAuthorizationRecord {
+  id: string;
+  operationId: string;
+  orderId?: string;
+  orderNumber?: string;
+  origin: OrderOrigin | 'edicao_pedido';
+  productId: string;
+  productCode: string;
+  productDescription: string;
+  referenceUnitPrice: number;
+  quantity: number;
+  grossLineValue: number;
+  limitType: ProductMaxDiscountType;
+  maxDiscountConfigured: number;
+  maxDiscountPercentAllowed: number;
+  maxDiscountValueAllowed: number;
+  requestedDiscountPercent: number;
+  requestedDiscountValue: number;
+  appliedDiscountPercent: number;
+  appliedDiscountValue: number;
+  excessPercent: number;
+  excessValue: number;
+  reason?: 'desconto_item' | 'desconto_global' | 'preco_manual' | 'combinado';
+  sellerUserId: string;
+  sellerUserName: string;
+  sellerUserLogin?: string;
+  authorizerUserId: string;
+  authorizerUserName: string;
+  authorizerUserLogin: string;
+  authorizerRole: 'admin' | 'gerente';
+  authorizedAt: string;
 }
 
 export interface CompanyPriceOverride {
@@ -339,6 +379,8 @@ export interface OrderItem {
   masterPackAssociatedProductId?: string;
   masterPackAssociatedProductCode?: string;
   returnedQuantity?: number; // Quantidade deste item já devolvida em devoluções anteriores
+  referenceUnitPrice?: number; // Preço de tabela de referência na inclusão (para controle de alteração manual de preço)
+  discountAuthorization?: DiscountAuthorizationRecord; // Autorização específica vinculada a este item nesta operação
 }
 
 export interface PaymentInstallment {
@@ -393,6 +435,7 @@ export interface Order {
   deliveryManifestName?: string;
   preManifestStatus?: OrderStatus;
   preManifestDeliveryStatus?: 'pendente' | 'em_romaneio' | 'em_transito' | 'entregue' | 'nao_entregue';
+  discountAuthorizations?: DiscountAuthorizationRecord[]; // Registro auditável de autorizações de desconto excedente
   createdAt: string;
   updatedAt: string;
 }

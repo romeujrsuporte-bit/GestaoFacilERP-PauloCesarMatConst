@@ -28,6 +28,7 @@ import {
   DEFAULT_ROLE_FINANCIAL_PERMISSIONS,
 } from "./db";
 import { User, UserRole } from "../types";
+import { AuthorizerProfileInfo, canUserAuthorizeProductDiscount } from "./discountControl";
 
 const env = (import.meta as any).env || {};
 
@@ -768,6 +769,182 @@ export async function loginWithSystemCredentials(
   );
 
   return targetUser;
+}
+
+export interface DiscountAuthorizerVerificationResult {
+  ok: boolean;
+  errorCode?: 'INVALID_CREDENTIALS' | 'UNAUTHORIZED_ROLE' | 'AUTH_FAILED';
+  message: string;
+  authorizer?: AuthorizerProfileInfo;
+}
+
+/**
+ * Autentica um usuário autorizador (Administrador Acesso Total ou Gerente Geral)
+ * utilizando uma instância secundária e temporária do Firebase Authentication + Firestore,
+ * sem encerrar nem alterar a sessão do vendedor/caixa atualmente logado e sem armazenar senhas.
+ */
+export async function verifyDiscountAuthorizerCredentials(
+  loginOrEmail: string,
+  passwordInput: string
+): Promise<DiscountAuthorizerVerificationResult> {
+  const cleanIdentifier = (loginOrEmail || '').trim().toLowerCase().replace(/^@/, '');
+  const cleanPassword = (passwordInput || '').trim();
+
+  if (!cleanIdentifier || !cleanPassword) {
+    return {
+      ok: false,
+      errorCode: 'INVALID_CREDENTIALS',
+      message: 'Informe usuário (ou e-mail) e senha do autorizador.',
+    };
+  }
+
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+    return {
+      ok: false,
+      errorCode: 'AUTH_FAILED',
+      message: 'Falha na autenticação: sem conexão com a internet para validar as credenciais no Firebase Authentication.',
+    };
+  }
+
+  const localUsers = Database.getState().users || [];
+  const localMatchedUser = localUsers.find((u) => {
+    const uLogin = (u.login || '').trim().toLowerCase().replace(/^@/, '');
+    const uEmail = (u.email || '').trim().toLowerCase();
+    return uLogin === cleanIdentifier || uEmail === cleanIdentifier;
+  });
+
+  const fbEmail = resolveUserFirebaseEmail(cleanIdentifier, localMatchedUser);
+  const fbPassword = formatFirebaseAuthPassword(cleanPassword);
+
+  const secondaryAppName = `erp-discount-auth-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+  let secondaryApp: FirebaseApp | null = null;
+  let authedUid = '';
+  let authedEmail = fbEmail;
+  let authedDisplayName = '';
+  let firestoreProfile: Partial<UserProfileDoc> | null = null;
+
+  try {
+    secondaryApp = initializeApp(firebaseConfig, secondaryAppName);
+    const secondaryAuth = getAuth(secondaryApp);
+    const secondaryDb =
+      configuredDatabaseId && configuredDatabaseId !== '(default)'
+        ? getFirestore(secondaryApp, configuredDatabaseId)
+        : getFirestore(secondaryApp);
+
+    try {
+      const cred = await signInWithEmailAndPassword(secondaryAuth, fbEmail, fbPassword);
+      if (!cred.user?.uid) {
+        return {
+          ok: false,
+          errorCode: 'AUTH_FAILED',
+          message: 'Falha na autenticação: não foi possível confirmar a identidade do autorizador.',
+        };
+      }
+      authedUid = cred.user.uid;
+      authedEmail = (cred.user.email || fbEmail).trim().toLowerCase();
+      authedDisplayName = cred.user.displayName || '';
+
+      try {
+        const snap = await getDoc(doc(secondaryDb, 'users', authedUid));
+        if (snap.exists()) {
+          firestoreProfile = snap.data() as Partial<UserProfileDoc>;
+        }
+      } catch (profileErr) {
+        console.warn('Aviso ao consultar perfil /users/{uid} do autorizador:', profileErr);
+      }
+
+      await signOut(secondaryAuth);
+    } catch (authErr: any) {
+      const code = authErr?.code || '';
+      if (
+        code === 'auth/user-not-found' ||
+        code === 'auth/invalid-credential' ||
+        code === 'auth/wrong-password' ||
+        code === 'auth/invalid-email'
+      ) {
+        return {
+          ok: false,
+          errorCode: 'INVALID_CREDENTIALS',
+          message: 'Usuário ou senha inválidos.',
+        };
+      }
+      if (code === 'auth/too-many-requests') {
+        return {
+          ok: false,
+          errorCode: 'AUTH_FAILED',
+          message: 'Falha na autenticação: muitas tentativas consecutivas. Aguarde alguns instantes e tente novamente.',
+        };
+      }
+      if (code === 'auth/network-request-failed') {
+        return {
+          ok: false,
+          errorCode: 'AUTH_FAILED',
+          message: 'Falha na autenticação: erro de rede ao contatar o Firebase Authentication.',
+        };
+      }
+      return {
+        ok: false,
+        errorCode: 'AUTH_FAILED',
+        message: 'Falha na autenticação. Verifique a conexão e tente novamente.',
+      };
+    }
+  } catch {
+    return {
+      ok: false,
+      errorCode: 'AUTH_FAILED',
+      message: 'Falha na autenticação ao inicializar a verificação segura.',
+    };
+  } finally {
+    if (secondaryApp) {
+      try {
+        await deleteApp(secondaryApp);
+      } catch {
+        // ignore cleanup error
+      }
+    }
+  }
+
+  // Localiza o cadastro completo no ERP pelo UID, e-mail autenticado ou login
+  const matchedErpUser =
+    localUsers.find((u) => u.firebaseUid && u.firebaseUid === authedUid) ||
+    localUsers.find((u) => (u.email || '').trim().toLowerCase() === authedEmail) ||
+    localMatchedUser ||
+    null;
+
+  // Validação estrita de perfil e permissões reais (nunca confia no nome/texto exibido)
+  const isPermitted = canUserAuthorizeProductDiscount(
+    matchedErpUser,
+    firestoreProfile,
+    authedEmail
+  );
+
+  if (!isPermitted) {
+    return {
+      ok: false,
+      errorCode: 'UNAUTHORIZED_ROLE',
+      message:
+        'Usuário sem permissão para autorizar. Somente Administrador (Acesso Total) ou Gerente Geral ativos podem liberar descontos acima do limite.',
+    };
+  }
+
+  const effectiveRole: 'admin' | 'gerente' =
+    authedEmail === MASTER_ADMIN_EMAIL.toLowerCase() ||
+    matchedErpUser?.role === 'admin' ||
+    firestoreProfile?.role === 'admin'
+      ? 'admin'
+      : 'gerente';
+
+  return {
+    ok: true,
+    message: 'Autorização concedida.',
+    authorizer: {
+      id: matchedErpUser?.id || firestoreProfile?.erpUserId || authedUid,
+      name: matchedErpUser?.name || firestoreProfile?.name || authedDisplayName || cleanIdentifier,
+      login: matchedErpUser?.login || firestoreProfile?.login || cleanIdentifier,
+      email: authedEmail,
+      role: effectiveRole,
+    },
+  };
 }
 
 /**

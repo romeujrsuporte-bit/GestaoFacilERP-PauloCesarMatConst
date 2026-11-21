@@ -1514,33 +1514,137 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ initialTab = 'empres
 
       {/* ABA 3: LOGS DE AUDITORIA */}
       {activeTab === 'auditoria' && (
-        <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-xs space-y-3">
-          <div className="pb-2 border-b border-slate-100">
-            <h3 className="font-bold text-sm text-slate-800">Trilha de Auditoria do Sistema</h3>
-            <p className="text-xs text-slate-500">
-              Histórico rastreável de todas as ações sensíveis: vendas, cancelamentos, abertura/fechamento de caixa, compras e precificação.
-            </p>
-          </div>
-
-          <div className="divide-y divide-slate-100 text-xs max-h-96 overflow-y-auto">
-            {dbState.auditLogs.length === 0 ? (
-              <div className="py-8 text-center text-slate-400">
-                Nenhum registro de auditoria encontrado.
-              </div>
-            ) : (
-              dbState.auditLogs.map((log) => (
-                <div key={log.id} className="py-2.5">
-                  <div className="flex justify-between items-center text-[11px]">
-                    <span className="font-mono font-bold text-blue-700">{log.action}</span>
-                    <span className="text-slate-400">{new Date(log.timestamp).toLocaleString('pt-BR')}</span>
+        <div className="space-y-4">
+          {/* Painel de Auditoria: Autorizações de Desconto Acima do Limite */}
+          {(() => {
+            const discountAuthRecords = Database.getAllDiscountAuthorizations();
+            return (
+              <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-xs space-y-3">
+                <div className="pb-2 border-b border-slate-100 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                  <div>
+                    <h3 className="font-bold text-sm text-slate-800 flex items-center gap-1.5">
+                      <ShieldCheck size={16} className="text-amber-600" />
+                      <span>Autorizações de Desconto Excedente por Produto</span>
+                    </h3>
+                    <p className="text-xs text-slate-500">
+                      Registro administrativo rastreável de todas as exceções liberadas por Administrador ou Gerente Geral (sem armazenamento de senhas).
+                    </p>
                   </div>
-                  <div className="font-medium text-slate-800 mt-0.5">{log.details}</div>
-                  <div className="text-[10px] text-slate-400 mt-0.5">
-                    Usuário: {log.userName} • Módulo: {log.module}
-                  </div>
+                  <span className="text-[11px] font-bold px-2.5 py-1 rounded-lg bg-amber-50 text-amber-800 border border-amber-200 self-start sm:self-auto">
+                    {discountAuthRecords.length} registro{discountAuthRecords.length === 1 ? '' : 's'}
+                  </span>
                 </div>
-              ))
-            )}
+
+                {discountAuthRecords.length === 0 ? (
+                  <div className="py-6 text-center text-xs text-slate-400">
+                    Nenhuma autorização de desconto acima do limite do produto registrada até o momento.
+                  </div>
+                ) : (
+                  <div className="divide-y divide-slate-100 text-xs max-h-96 overflow-y-auto">
+                    {discountAuthRecords.map((rec) => (
+                      <div key={`${rec.orderId || ''}-${rec.operationId}`} className="py-3 space-y-1">
+                        <div className="flex flex-wrap items-center justify-between gap-2 text-[11px]">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="font-mono font-bold text-rose-700 bg-rose-50 px-1.5 py-0.5 rounded border border-rose-200">
+                              {rec.orderNumber || rec.orderId || 'Venda'}
+                            </span>
+                            <span className="font-mono text-[10px] text-slate-500">
+                              {rec.operationId}
+                            </span>
+                            <span className="text-[10px] font-bold uppercase px-1.5 py-0.5 rounded bg-slate-100 text-slate-600">
+                              {rec.origin === 'pdv'
+                                ? 'PDV Balcão'
+                                : rec.origin === 'externa_celular'
+                                ? 'Venda Mobile'
+                                : rec.origin === 'edicao_pedido'
+                                ? 'Edição de Pedido'
+                                : 'Pedido de Venda'}
+                            </span>
+                          </div>
+                          <span className="text-slate-400">
+                            {new Date(rec.authorizedAt).toLocaleString('pt-BR')}
+                          </span>
+                        </div>
+
+                        <div className="font-bold text-slate-800">
+                          <span className="font-mono text-blue-700 mr-1">[{rec.productCode}]</span>
+                          {rec.productDescription}
+                          <span className="font-normal text-slate-500 ml-1.5">
+                            (Qtd: {rec.quantity} • Ref.: {formatCurrency(rec.referenceUnitPrice)})
+                          </span>
+                        </div>
+
+                        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-slate-600">
+                          <span>
+                            Limite máx.:{' '}
+                            <strong className="text-emerald-700 font-mono">
+                              {rec.limitType === 'value'
+                                ? `${formatCurrency(rec.maxDiscountConfigured)}/un (${formatCurrency(rec.maxDiscountValueAllowed)})`
+                                : `${rec.maxDiscountConfigured}% (${formatCurrency(rec.maxDiscountValueAllowed)})`}
+                            </strong>
+                          </span>
+                          <span>
+                            Solicitado:{' '}
+                            <strong className="text-rose-700 font-mono">
+                              {rec.requestedDiscountPercent.toFixed(2)}% ({formatCurrency(rec.requestedDiscountValue)})
+                            </strong>
+                          </span>
+                          <span>
+                            Aplicado:{' '}
+                            <strong className="text-slate-900 font-mono">
+                              {rec.appliedDiscountPercent.toFixed(2)}% ({formatCurrency(rec.appliedDiscountValue)})
+                            </strong>
+                          </span>
+                        </div>
+
+                        <div className="text-[10px] text-slate-500 flex flex-wrap gap-x-3 gap-y-0.5">
+                          <span>
+                            Vendedor: <strong className="text-slate-700">{rec.sellerUserName}</strong>
+                          </span>
+                          <span>
+                            Autorizador:{' '}
+                            <strong className="text-blue-700">
+                              {rec.authorizerUserName} (@{rec.authorizerUserLogin} —{' '}
+                              {rec.authorizerRole === 'admin' ? 'Administrador (Acesso Total)' : 'Gerente Geral'})
+                            </strong>
+                          </span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          })()}
+
+          <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-xs space-y-3">
+            <div className="pb-2 border-b border-slate-100">
+              <h3 className="font-bold text-sm text-slate-800">Trilha de Auditoria do Sistema</h3>
+              <p className="text-xs text-slate-500">
+                Histórico rastreável de todas as ações sensíveis: vendas, cancelamentos, autorizações de desconto, abertura/fechamento de caixa, compras e precificação.
+              </p>
+            </div>
+
+            <div className="divide-y divide-slate-100 text-xs max-h-96 overflow-y-auto">
+              {dbState.auditLogs.length === 0 ? (
+                <div className="py-8 text-center text-slate-400">
+                  Nenhum registro de auditoria encontrado.
+                </div>
+              ) : (
+                dbState.auditLogs.map((log) => (
+                  <div key={log.id} className="py-2.5">
+                    <div className="flex justify-between items-center text-[11px]">
+                      <span className="font-mono font-bold text-blue-700">{log.action}</span>
+                      <span className="text-slate-400">{new Date(log.timestamp).toLocaleString('pt-BR')}</span>
+                    </div>
+                    <div className="font-medium text-slate-800 mt-0.5">{log.details}</div>
+                    <div className="text-[10px] text-slate-400 mt-0.5">
+                      Usuário: {log.userName} • Módulo: {log.module}
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
           </div>
         </div>
       )}

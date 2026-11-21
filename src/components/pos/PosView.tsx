@@ -41,7 +41,7 @@ import {
   Ticket,
 } from 'lucide-react';
 import { Database } from '../../services/db';
-import { Product, Customer, Order, OrderItem, CashRegister } from '../../types';
+import { Product, Customer, Order, OrderItem, CashRegister, DiscountAuthorizationRecord } from '../../types';
 import { StockEngine } from '../../services/stockEngine';
 import { formatCurrency, formatQuantity } from '../../services/pricingEngine';
 import { ReceiptModal } from '../common/ReceiptModal';
@@ -59,6 +59,15 @@ import {
   dismissSaleAlert,
   clearProductSaleAlerts,
 } from '../common/SaleObservationAlerts';
+import { DiscountAuthorizationModal } from '../common/DiscountAuthorizationModal';
+import {
+  DiscountViolationDetails,
+  clearSaleSessionAuthorizations,
+  evaluateItemMaxDiscount,
+  generateSaleSessionId,
+  revokeDiscountAuthorization,
+  validateOrderDiscounts,
+} from '../../services/discountControl';
 
 export interface PosViewProps {
   isSidebarMinimized?: boolean;
@@ -217,6 +226,15 @@ export const PosView: React.FC<PosViewProps> = ({
   const [cancellingOrderId, setCancellingOrderId] = useState<string | null>(null);
   const [cancelReason, setCancelReason] = useState('');
 
+  // Controle de sessão e autorização obrigatória para desconto máximo por produto
+  const saleSessionIdRef = useRef<string>(generateSaleSessionId('PDV'));
+  const [discountAuthPrompt, setDiscountAuthPrompt] = useState<{
+    violation: DiscountViolationDetails;
+    queuePosition?: { current: number; total: number };
+    onAuthorized: (record: DiscountAuthorizationRecord) => void;
+    onReduceToLimit?: () => void;
+  } | null>(null);
+
   // Modal de Desconto por Produto
   const [showItemDiscountModal, setShowItemDiscountModal] = useState<boolean>(false);
   const [discountingItemId, setDiscountingItemId] = useState<string | null>(null);
@@ -245,6 +263,51 @@ export const PosView: React.FC<PosViewProps> = ({
     }, 50);
   };
 
+  const commitItemDiscountUpdate = (
+    productId: string,
+    finalPercent: number,
+    finalValue: number,
+    authorization?: DiscountAuthorizationRecord | null
+  ) => {
+    const roundedPercent = Math.round(finalPercent * 100) / 100;
+    const roundedValue = Math.round(finalValue * 100) / 100;
+
+    setCart((prev) =>
+      prev.map((i) => {
+        if (i.productId !== productId) return i;
+        const gross = i.quantity * i.unitPrice;
+        const nextTotal = Math.max(0, Math.round((gross - roundedValue) * 100) / 100);
+        if (
+          i.discountAuthorization?.operationId &&
+          i.discountAuthorization.operationId !== authorization?.operationId
+        ) {
+          revokeDiscountAuthorization(i.discountAuthorization.operationId);
+        }
+        return {
+          ...i,
+          discountPercent: roundedPercent,
+          discountValue: roundedValue,
+          totalPrice: nextTotal,
+          discountAuthorization: authorization || undefined,
+        };
+      })
+    );
+
+    if (lastAddedItem && lastAddedItem.productId === productId) {
+      const gross = lastAddedItem.quantity * lastAddedItem.unitPrice;
+      setLastAddedItem({
+        ...lastAddedItem,
+        discountPercent: roundedPercent,
+        discountValue: roundedValue,
+        totalPrice: Math.max(0, Math.round((gross - roundedValue) * 100) / 100),
+        discountAuthorization: authorization || undefined,
+      });
+    }
+
+    setShowItemDiscountModal(false);
+    setTimeout(() => barcodeInputRef.current?.focus(), 50);
+  };
+
   const handleApplyItemDiscount = () => {
     if (!discountingItemId) return;
     const targetItem = cart.find((i) => i.productId === discountingItemId);
@@ -253,26 +316,29 @@ export const PosView: React.FC<PosViewProps> = ({
       return;
     }
 
+    const product = dbState.products.find((p) => p.id === targetItem.productId);
     const gross = targetItem.quantity * targetItem.unitPrice;
     const rawNum = Math.max(0, parseFloat(itemDiscountInput.replace(',', '.')) || 0);
     const maxPercent = currentUser.permissions.maxDiscountPercent;
 
     let finalPercent = 0;
     let finalValue = 0;
+    let explicitPercentRequested: number | undefined;
 
     if (rawNum <= 0) {
       finalPercent = 0;
       finalValue = 0;
     } else if (itemDiscountType === 'percent') {
-      if (rawNum > maxPercent) {
+      if (!product?.maxDiscountEnabled && rawNum > maxPercent) {
         alert(`O desconto informado (${rawNum}%) excede o limite máximo permitido de ${maxPercent}% para seu perfil.`);
         return;
       }
       finalPercent = Math.min(100, rawNum);
       finalValue = (gross * finalPercent) / 100;
+      explicitPercentRequested = finalPercent;
     } else {
       const maxVal = (gross * maxPercent) / 100;
-      if (rawNum > maxVal) {
+      if (!product?.maxDiscountEnabled && rawNum > maxVal) {
         alert(`O desconto informado (${formatCurrency(rawNum)}) excede o limite máximo permitido de ${maxPercent}% (${formatCurrency(maxVal)}).`);
         return;
       }
@@ -280,63 +346,66 @@ export const PosView: React.FC<PosViewProps> = ({
       finalPercent = gross > 0 ? (finalValue / gross) * 100 : 0;
     }
 
-    const finalTotal = Math.max(0, gross - finalValue);
-
-    setCart((prev) =>
-      prev.map((i) =>
-        i.productId === discountingItemId
-          ? {
-              ...i,
-              discountPercent: Math.round(finalPercent * 100) / 100,
-              discountValue: Math.round(finalValue * 100) / 100,
-              totalPrice: Math.round(finalTotal * 100) / 100,
-            }
-          : i
-      )
-    );
-
-    if (lastAddedItem && lastAddedItem.productId === discountingItemId) {
-      setLastAddedItem({
-        ...lastAddedItem,
-        discountPercent: Math.round(finalPercent * 100) / 100,
-        discountValue: Math.round(finalValue * 100) / 100,
-        totalPrice: Math.round(finalTotal * 100) / 100,
+    if (product?.maxDiscountEnabled) {
+      const evaluation = evaluateItemMaxDiscount({
+        product,
+        companyId: currentCompany.id,
+        origin: 'pdv',
+        quantity: targetItem.quantity,
+        unitPrice: targetItem.unitPrice,
+        referenceUnitPrice: targetItem.referenceUnitPrice,
+        itemDiscountValue: finalValue,
+        itemDiscountPercent: finalPercent,
+        explicitPercentRequested,
+        existingAuthorization: targetItem.discountAuthorization || null,
+        saleSessionId: saleSessionIdRef.current,
+        users: dbState.users,
       });
+
+      if (evaluation.requiresAuthorization && evaluation.violation) {
+        setDiscountAuthPrompt({
+          violation: evaluation.violation,
+          onAuthorized: (record) => {
+            setDiscountAuthPrompt(null);
+            commitItemDiscountUpdate(targetItem.productId, finalPercent, finalValue, record);
+            toast.success(
+              `Desconto autorizado por ${record.authorizerUserName} para "${product.description}".`,
+              'Autorização Concedida'
+            );
+          },
+          onReduceToLimit: () => {
+            setDiscountAuthPrompt(null);
+            commitItemDiscountUpdate(
+              targetItem.productId,
+              evaluation.maxDiscountPercentAllowed,
+              evaluation.maxDiscountValueAllowed,
+              null
+            );
+            toast.info(
+              `Desconto ajustado para o limite permitido do produto (${evaluation.maxDiscountPercentAllowed.toFixed(2)}% / ${formatCurrency(evaluation.maxDiscountValueAllowed)}).`,
+              'Desconto Ajustado ao Limite'
+            );
+          },
+        });
+        return;
+      }
+
+      if (evaluation.exceeded && evaluation.authorized && targetItem.discountAuthorization) {
+        commitItemDiscountUpdate(targetItem.productId, finalPercent, finalValue, targetItem.discountAuthorization);
+        return;
+      }
+
+      // Dentro do limite: remove eventual autorização anterior
+      commitItemDiscountUpdate(targetItem.productId, finalPercent, finalValue, null);
+      return;
     }
 
-    setShowItemDiscountModal(false);
-    setTimeout(() => barcodeInputRef.current?.focus(), 50);
+    commitItemDiscountUpdate(targetItem.productId, finalPercent, finalValue, null);
   };
 
   const handleRemoveItemDiscount = () => {
     if (!discountingItemId) return;
-    setCart((prev) =>
-      prev.map((i) => {
-        if (i.productId === discountingItemId) {
-          const gross = i.quantity * i.unitPrice;
-          return {
-            ...i,
-            discountPercent: 0,
-            discountValue: 0,
-            totalPrice: gross,
-          };
-        }
-        return i;
-      })
-    );
-
-    if (lastAddedItem && lastAddedItem.productId === discountingItemId) {
-      const gross = lastAddedItem.quantity * lastAddedItem.unitPrice;
-      setLastAddedItem({
-        ...lastAddedItem,
-        discountPercent: 0,
-        discountValue: 0,
-        totalPrice: gross,
-      });
-    }
-
-    setShowItemDiscountModal(false);
-    setTimeout(() => barcodeInputRef.current?.focus(), 50);
+    commitItemDiscountUpdate(discountingItemId, 0, 0, null);
   };
 
   // Modal de Quantidade Fracionada [F12] (até 3 casas decimais com recálculo automático do Total Líquido)
@@ -414,6 +483,9 @@ export const PosView: React.FC<PosViewProps> = ({
       setCart((prev) =>
         prev.map((item) => {
           if (item.productId === fractionalProductId) {
+            if (item.discountAuthorization?.operationId && Math.abs(item.quantity - roundedQty) > 0.0005) {
+              revokeDiscountAuthorization(item.discountAuthorization.operationId);
+            }
             const gross = roundedQty * item.unitPrice;
             const discVal = (gross * (item.discountPercent || 0)) / 100;
             return {
@@ -421,6 +493,8 @@ export const PosView: React.FC<PosViewProps> = ({
               quantity: roundedQty,
               discountValue: Math.round(discVal * 100) / 100,
               totalPrice: Math.round((gross - discVal) * 100) / 100,
+              discountAuthorization:
+                Math.abs(item.quantity - roundedQty) > 0.0005 ? undefined : item.discountAuthorization,
             };
           }
           return item;
@@ -434,6 +508,10 @@ export const PosView: React.FC<PosViewProps> = ({
           quantity: roundedQty,
           discountValue: Math.round(discVal * 100) / 100,
           totalPrice: Math.round((gross - discVal) * 100) / 100,
+          discountAuthorization:
+            Math.abs(lastAddedItem.quantity - roundedQty) > 0.0005
+              ? undefined
+              : lastAddedItem.discountAuthorization,
         });
       }
     } else {
@@ -650,6 +728,9 @@ export const PosView: React.FC<PosViewProps> = ({
     let affectedItem: OrderItem;
 
     if (existingInCart) {
+      if (existingInCart.discountAuthorization?.operationId) {
+        revokeDiscountAuthorization(existingInCart.discountAuthorization.operationId);
+      }
       const newQty = existingInCart.quantity + quantityToAdd;
       const newGross = newQty * existingInCart.unitPrice;
       const newDiscVal = (newGross * (existingInCart.discountPercent || 0)) / 100;
@@ -658,6 +739,7 @@ export const PosView: React.FC<PosViewProps> = ({
         quantity: newQty,
         discountValue: Math.round(newDiscVal * 100) / 100,
         totalPrice: Math.round((newGross - newDiscVal) * 100) / 100,
+        discountAuthorization: undefined,
       };
       updatedCart = cart.map((item) => (item.productId === product.id ? affectedItem : item));
     } else {
@@ -672,6 +754,7 @@ export const PosView: React.FC<PosViewProps> = ({
         unit: product.unit,
         quantity: quantityToAdd,
         unitPrice: effectivePrice,
+        referenceUnitPrice: effectivePrice,
         discountPercent: 0,
         discountValue: 0,
         totalPrice: quantityToAdd * effectivePrice,
@@ -765,12 +848,19 @@ export const PosView: React.FC<PosViewProps> = ({
         .map((item) => {
           if (item.productId === productId) {
             const newQty = item.quantity + delta;
-            if (newQty <= 0) return null;
+            if (newQty <= 0) {
+              revokeDiscountAuthorization(item.discountAuthorization?.operationId);
+              return null;
+            }
 
             const bal = StockEngine.getBalance(dbState.stockBalances, productId, selectedLocationId);
             if (newQty > bal.quantity) {
               alert(`Quantidade solicitada (${newQty}) excede o saldo disponível (${bal.quantity}).`);
               return item;
+            }
+
+            if (item.discountAuthorization?.operationId) {
+              revokeDiscountAuthorization(item.discountAuthorization.operationId);
             }
 
             const gross = newQty * item.unitPrice;
@@ -780,6 +870,7 @@ export const PosView: React.FC<PosViewProps> = ({
               quantity: newQty,
               discountValue: Math.round(discVal * 100) / 100,
               totalPrice: Math.round((gross - discVal) * 100) / 100,
+              discountAuthorization: undefined,
             };
           }
           return item;
@@ -798,6 +889,9 @@ export const PosView: React.FC<PosViewProps> = ({
     setCart((prev) =>
       prev.map((item) => {
         if (item.productId === productId) {
+          if (item.discountAuthorization?.operationId && Math.abs(item.quantity - qty) > 0.0005) {
+            revokeDiscountAuthorization(item.discountAuthorization.operationId);
+          }
           const gross = qty * item.unitPrice;
           const discVal = (gross * (item.discountPercent || 0)) / 100;
           return {
@@ -805,6 +899,8 @@ export const PosView: React.FC<PosViewProps> = ({
             quantity: qty,
             discountValue: Math.round(discVal * 100) / 100,
             totalPrice: Math.round((gross - discVal) * 100) / 100,
+            discountAuthorization:
+              Math.abs(item.quantity - qty) > 0.0005 ? undefined : item.discountAuthorization,
           };
         }
         return item;
@@ -813,12 +909,18 @@ export const PosView: React.FC<PosViewProps> = ({
   };
 
   const handleRemoveFromCart = (productId: string) => {
+    const removed = cart.find((i) => i.productId === productId);
+    if (removed?.discountAuthorization?.operationId) {
+      revokeDiscountAuthorization(removed.discountAuthorization.operationId);
+    }
     setCart(cart.filter((i) => i.productId !== productId));
   };
 
   const handleClearCart = () => {
     if (cart.length === 0) return;
     if (window.confirm('Deseja realmente limpar todos os itens da venda atual?')) {
+      clearSaleSessionAuthorizations(saleSessionIdRef.current);
+      saleSessionIdRef.current = generateSaleSessionId('PDV');
       setCart([]);
       setDiscountInput('');
       setReceivedAmount('');
@@ -909,7 +1011,7 @@ export const PosView: React.FC<PosViewProps> = ({
   // Atalhos de teclado
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (saleObservationAlerts.length > 0 || showPriceLookupModal || showProductLookupModal || showReceiptModal || showOpenRegisterModal || cancellingOrderId || showQuickCustomerModal || showSaleConfirmationModal) {
+      if (discountAuthPrompt || saleObservationAlerts.length > 0 || showPriceLookupModal || showProductLookupModal || showReceiptModal || showOpenRegisterModal || cancellingOrderId || showQuickCustomerModal || showSaleConfirmationModal) {
         return;
       }
 
@@ -1024,7 +1126,8 @@ export const PosView: React.FC<PosViewProps> = ({
     dbState,
     quantityInput,
     barcodeInput,
-    saleObservationAlerts.length
+    saleObservationAlerts.length,
+    discountAuthPrompt
   ]);
 
   // Atalhos de teclado para o modal de finalização de venda
@@ -1121,6 +1224,96 @@ export const PosView: React.FC<PosViewProps> = ({
     }
   };
 
+  const validateCartAndPromptAuthorizations = (
+    itemsToCheck: OrderItem[],
+    globalDiscountToCheck: number,
+    onAllValid: () => void
+  ) => {
+    const validation = validateOrderDiscounts({
+      items: itemsToCheck,
+      products: dbState.products,
+      companyId: currentCompany.id,
+      origin: 'pdv',
+      globalOrderDiscountValue: globalDiscountToCheck,
+      saleSessionId: saleSessionIdRef.current,
+      users: dbState.users,
+    });
+
+    if (validation.valid) {
+      onAllValid();
+      return;
+    }
+
+    const totalViolations = validation.violations.length;
+    const first = validation.violations[0];
+
+    setDiscountAuthPrompt({
+      violation: first.violation,
+      queuePosition: totalViolations > 1 ? { current: 1, total: totalViolations } : undefined,
+      onAuthorized: (record) => {
+        const nextCart = itemsToCheck.map((it, idx) => {
+          if (idx !== first.itemIndex) return it;
+          if (it.discountAuthorization?.operationId && it.discountAuthorization.operationId !== record.operationId) {
+            revokeDiscountAuthorization(it.discountAuthorization.operationId);
+          }
+          return { ...it, discountAuthorization: record };
+        });
+        setCart(nextCart);
+        setDiscountAuthPrompt(null);
+        toast.success(
+          `Desconto autorizado por ${record.authorizerUserName} para "${first.violation.productDescription}".`,
+          'Autorização Concedida'
+        );
+        validateCartAndPromptAuthorizations(nextCart, globalDiscountToCheck, onAllValid);
+      },
+      onReduceToLimit: () => {
+        const targetItem = itemsToCheck[first.itemIndex];
+        const gross = targetItem.quantity * targetItem.unitPrice;
+        const maxValAllowed = first.violation.maxDiscountValueAllowed;
+        const clampedItemDisc = Math.min(targetItem.discountValue || 0, maxValAllowed);
+        const clampedItemPct = gross > 0 ? (clampedItemDisc / gross) * 100 : 0;
+
+        if (targetItem.discountAuthorization?.operationId) {
+          revokeDiscountAuthorization(targetItem.discountAuthorization.operationId);
+        }
+
+        const nextCart = itemsToCheck.map((it, idx) =>
+          idx === first.itemIndex
+            ? {
+                ...it,
+                discountValue: Math.round(clampedItemDisc * 100) / 100,
+                discountPercent: Math.round(clampedItemPct * 100) / 100,
+                totalPrice: Math.max(0, Math.round((gross - clampedItemDisc) * 100) / 100),
+                discountAuthorization: undefined,
+              }
+            : it
+        );
+
+        let nextGlobalDiscount = globalDiscountToCheck;
+        if (first.violation.reason === 'desconto_global' || first.violation.reason === 'combinado') {
+          const nextSubtotalAfterItems = nextCart.reduce((s, it) => s + it.totalPrice, 0);
+          const nextLineNet = nextCart[first.itemIndex].totalPrice;
+          const remainingHeadroom = Math.max(0, maxValAllowed - clampedItemDisc);
+          const maxGlobalAllowed =
+            nextLineNet > 0 && nextSubtotalAfterItems > 0
+              ? Math.floor(((remainingHeadroom * nextSubtotalAfterItems) / nextLineNet) * 100) / 100
+              : 0;
+          nextGlobalDiscount = Math.max(0, Math.min(globalDiscountToCheck, maxGlobalAllowed));
+          setDiscountType('value');
+          localStorage.setItem('omni_discount_type', 'value');
+          setDiscountInput(nextGlobalDiscount > 0 ? nextGlobalDiscount.toFixed(2).replace('.', ',') : '');
+        }
+
+        setCart(nextCart);
+        setDiscountAuthPrompt(null);
+        toast.info(
+          `Desconto reduzido para o limite permitido de "${first.violation.productDescription}".`,
+          'Desconto Ajustado ao Limite'
+        );
+      },
+    });
+  };
+
   // Pré-finalizar venda no PDV Balcão (Validação de caixa/carrinho e abertura da tela de finalização de pagamento)
   const handlePreFinalizeSale = () => {
     if (!activeCashRegister) {
@@ -1141,13 +1334,15 @@ export const PosView: React.FC<PosViewProps> = ({
       return;
     }
 
-    // Se Dinheiro já estava selecionado, sugere o valor exato
-    if (paymentMethod === 'dinheiro' && (!receivedAmount || numericReceived === 0)) {
-      setReceivedAmount(total.toFixed(2).replace('.', ','));
-    }
-
-    // Abre a tela de finalização para selecionar forma e prazo de pagamento
-    setShowSaleConfirmationModal(true);
+    // Valida limite máximo de desconto por produto (incluindo rateio do desconto geral [F4])
+    validateCartAndPromptAuthorizations(cart, discountVal, () => {
+      // Se Dinheiro já estava selecionado, sugere o valor exato
+      if (paymentMethod === 'dinheiro' && (!receivedAmount || numericReceived === 0)) {
+        setReceivedAmount(total.toFixed(2).replace('.', ','));
+      }
+      // Abre a tela de finalização para selecionar forma e prazo de pagamento
+      setShowSaleConfirmationModal(true);
+    });
   };
 
   // Finalizar Venda Efetivamente (gravação no banco após confirmação do usuário)
@@ -1179,42 +1374,6 @@ export const PosView: React.FC<PosViewProps> = ({
     const nowIso = new Date().toISOString();
 
     try {
-      let currentBalances = [...dbState.stockBalances];
-      const movements = [];
-
-      for (const item of cart) {
-        const loc = locations.find((l) => l.id === selectedLocationId) ||
-          locations.find((l) => l.id === 'loc-comercial') ||
-          locations[0] ||
-          { id: 'loc-comercial', name: 'Comercial' };
-
-        const { updatedBalances, createdMovement } = StockEngine.applyMovement(
-          currentBalances,
-          {
-            companyId: currentCompany.id,
-            productId: item.productId,
-            productCode: item.productCode,
-            productDescription: item.description,
-            locationId: loc.id,
-            locationName: loc.name,
-            type: 'saida_venda',
-            quantity: item.quantity,
-            unitCost: item.unitCost,
-            totalCost: item.unitCost * item.quantity,
-            originDocType: 'venda',
-            originDocId: orderNumber,
-            date: nowIso,
-            userId: currentUser.id,
-            userName: currentUser.name,
-            notes: `Venda no PDV Balcão ${orderNumber} (${currentCompany.tradeName || currentCompany.name})`,
-          },
-          { allowNegativeStock: Database.canSellNegativeStock() }
-        );
-
-        currentBalances = updatedBalances;
-        movements.push(createdMovement);
-      }
-
       const boletoAccounts = Database.getBoletoAccounts(currentCompany.id);
       const targetBoletoAccount = paymentMethod === 'boleto'
         ? boletoAccounts.find((a) => a.id === selectedBoletoAccountId) || boletoAccounts[0] || Database.getBoletoAccounts()[0]
@@ -1251,6 +1410,53 @@ export const PosView: React.FC<PosViewProps> = ({
         updatedAt: nowIso,
       };
 
+      // Bloqueio obrigatório na camada de persistência contra burla de desconto máximo por produto
+      const validatedDiscountAuths = Database.validateOrderDiscountsForPersistence(newOrder, {
+        saleSessionId: saleSessionIdRef.current,
+        globalOrderDiscountValue: discountVal,
+      });
+
+      let currentBalances = [...dbState.stockBalances];
+      const movements = [];
+
+      for (const item of cart) {
+        const loc = locations.find((l) => l.id === selectedLocationId) ||
+          locations.find((l) => l.id === 'loc-comercial') ||
+          locations[0] ||
+          { id: 'loc-comercial', name: 'Comercial' };
+
+        const { updatedBalances, createdMovement } = StockEngine.applyMovement(
+          currentBalances,
+          {
+            companyId: currentCompany.id,
+            productId: item.productId,
+            productCode: item.productCode,
+            productDescription: item.description,
+            locationId: loc.id,
+            locationName: loc.name,
+            type: 'saida_venda',
+            quantity: item.quantity,
+            unitCost: item.unitCost,
+            totalCost: item.unitCost * item.quantity,
+            originDocType: 'venda',
+            originDocId: orderNumber,
+            date: nowIso,
+            userId: currentUser.id,
+            userName: currentUser.name,
+            notes: `Venda no PDV Balcão ${orderNumber} (${currentCompany.tradeName || currentCompany.name})`,
+          },
+          { allowNegativeStock: Database.canSellNegativeStock() }
+        );
+
+        currentBalances = updatedBalances;
+        movements.push(createdMovement);
+      }
+
+      const finalizedOrder = Database.finalizeOrderDiscountAuthorizations(newOrder, validatedDiscountAuths, {
+        saleSessionId: saleSessionIdRef.current,
+        skipPersist: true,
+      });
+
       const cashMovementType =
         paymentMethod === 'dinheiro'
           ? 'venda_dinheiro'
@@ -1270,10 +1476,10 @@ export const PosView: React.FC<PosViewProps> = ({
                 id: 'MOV-' + Date.now(),
                 type: cashMovementType as any,
                 amount: total,
-                description: `Venda ${orderNumber} - ${newOrder.customerName}`,
+                description: `Venda ${orderNumber} - ${finalizedOrder.customerName}`,
                 timestamp: nowIso,
                 userId: currentUser.id,
-                orderId: newOrder.id,
+                orderId: finalizedOrder.id,
               },
             ],
           };
@@ -1292,10 +1498,10 @@ export const PosView: React.FC<PosViewProps> = ({
           updatedReceivables.push({
             id: 'REC-' + Date.now() + '-' + i,
             companyId: currentCompany.id,
-            orderId: newOrder.id,
-            orderNumber: newOrder.number,
+            orderId: finalizedOrder.id,
+            orderNumber: finalizedOrder.number,
             customerId: selectedCustomerId,
-            customerName: newOrder.customerName,
+            customerName: finalizedOrder.customerName,
             docNumber: `${orderNumber}/${i}`,
             installmentNumber: i,
             totalInstallments: installments,
@@ -1319,7 +1525,7 @@ export const PosView: React.FC<PosViewProps> = ({
       const state = Database.getState();
       state.stockBalances = currentBalances;
       state.stockMovements = [...movements, ...state.stockMovements];
-      state.orders = [newOrder, ...state.orders];
+      state.orders = [finalizedOrder, ...state.orders];
       state.cashRegisters = updatedCashRegisters;
       state.accountsReceivable = updatedReceivables;
       Database.persist();
@@ -1327,11 +1533,14 @@ export const PosView: React.FC<PosViewProps> = ({
       Database.addAuditLog(
         'FINALIZAR_VENDA_PDV',
         'VENDAS',
-        newOrder.id,
+        finalizedOrder.id,
         `Venda PDV ${orderNumber} finalizada com sucesso. Total: ${formatCurrency(total)} via ${paymentMethod}`
       );
 
-      setLastFinishedOrder(newOrder);
+      // Inicia nova sessão limpa para próxima venda (nenhuma autorização anterior permanece ativa)
+      saleSessionIdRef.current = generateSaleSessionId('PDV');
+
+      setLastFinishedOrder(finalizedOrder);
       setShowReceiptModal(true);
       setCart([]);
       setDiscountInput('');
@@ -3636,6 +3845,18 @@ export const PosView: React.FC<PosViewProps> = ({
         selectedLocationId={selectedLocationId}
         selectedLocationName={locations.find((l) => l.id === selectedLocationId)?.name || 'Comercial'}
         onAfterClose={() => barcodeInputRef.current?.focus()}
+      />
+
+      {/* MODAL BLOQUEANTE: AUTORIZAÇÃO DE DESCONTO MÁXIMO EXCEDIDO */}
+      <DiscountAuthorizationModal
+        isOpen={Boolean(discountAuthPrompt)}
+        violation={discountAuthPrompt?.violation || null}
+        seller={currentUser}
+        saleSessionId={saleSessionIdRef.current}
+        queuePosition={discountAuthPrompt?.queuePosition}
+        onAuthorized={(record) => discountAuthPrompt?.onAuthorized(record)}
+        onReduceToLimit={discountAuthPrompt?.onReduceToLimit}
+        onCancel={() => setDiscountAuthPrompt(null)}
       />
     </div>
   );

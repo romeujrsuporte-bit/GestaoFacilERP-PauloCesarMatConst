@@ -32,7 +32,7 @@ import {
   Tag,
 } from 'lucide-react';
 import { Database } from '../../services/db';
-import { Product, Customer, Order, OrderItem } from '../../types';
+import { Product, Customer, Order, OrderItem, DiscountAuthorizationRecord } from '../../types';
 import { StockEngine } from '../../services/stockEngine';
 import { formatCurrency, formatQuantity } from '../../services/pricingEngine';
 import { ReceiptModal } from '../common/ReceiptModal';
@@ -49,6 +49,15 @@ import {
   syncCustomerSaleAlert,
   dismissSaleAlert,
 } from '../common/SaleObservationAlerts';
+import { DiscountAuthorizationModal } from '../common/DiscountAuthorizationModal';
+import {
+  DiscountViolationDetails,
+  clearSaleSessionAuthorizations,
+  evaluateItemMaxDiscount,
+  generateSaleSessionId,
+  revokeDiscountAuthorization,
+  validateOrderDiscounts,
+} from '../../services/discountControl';
 
 interface ExternalSalesViewProps {
   onStartReturn?: (orderId: string) => void;
@@ -80,6 +89,15 @@ export const ExternalSalesView: React.FC<ExternalSalesViewProps> = ({
 
   // Tipo de documento: Venda direta ou Orçamento comercial
   const [docType, setDocType] = useState<'venda' | 'orcamento'>('venda');
+
+  // Sessão ativa e modal bloqueante de autorização para desconto máximo por produto
+  const saleSessionIdRef = useRef<string>(generateSaleSessionId('MOB'));
+  const [discountAuthPrompt, setDiscountAuthPrompt] = useState<{
+    violation: DiscountViolationDetails;
+    queuePosition?: { current: number; total: number };
+    onAuthorized: (record: DiscountAuthorizationRecord) => void;
+    onReduceToLimit?: () => void;
+  } | null>(null);
 
   // Conectividade
   const [isOnline, setIsOnline] = useState(navigator.onLine);
@@ -269,6 +287,10 @@ export const ExternalSalesView: React.FC<ExternalSalesViewProps> = ({
 
   const recalculateCartItem = (item: OrderItem, newQty: number): OrderItem => {
     const cleanQty = Math.round(newQty * 1000) / 1000;
+    const qtyChanged = Math.abs(item.quantity - cleanQty) > 0.0005;
+    if (qtyChanged && item.discountAuthorization?.operationId) {
+      revokeDiscountAuthorization(item.discountAuthorization.operationId);
+    }
     const gross = cleanQty * item.unitPrice;
     const disc = (gross * (item.discountPercent || 0)) / 100;
     const add = (gross * (item.additionPercent || 0)) / 100;
@@ -278,6 +300,7 @@ export const ExternalSalesView: React.FC<ExternalSalesViewProps> = ({
       discountValue: Math.round(disc * 100) / 100,
       additionValue: Math.round(add * 100) / 100,
       totalPrice: Math.round((gross + add - disc) * 100) / 100,
+      discountAuthorization: qtyChanged ? undefined : item.discountAuthorization,
     };
   };
 
@@ -325,6 +348,7 @@ export const ExternalSalesView: React.FC<ExternalSalesViewProps> = ({
         unit: product.unit,
         quantity: qtyToAdd,
         unitPrice: effectivePrice,
+        referenceUnitPrice: effectivePrice,
         discountPercent: 0,
         discountValue: 0,
         additionPercent: 0,
@@ -436,6 +460,10 @@ export const ExternalSalesView: React.FC<ExternalSalesViewProps> = ({
   };
 
   const handleRemoveItem = (productId: string) => {
+    const removed = cart.find((i) => i.productId === productId);
+    if (removed?.discountAuthorization?.operationId) {
+      revokeDiscountAuthorization(removed.discountAuthorization.operationId);
+    }
     setCart((prev) => prev.filter((i) => i.productId !== productId));
     setCartQtyDrafts((prev) => {
       if (!(productId in prev)) return prev;
@@ -485,28 +513,31 @@ export const ExternalSalesView: React.FC<ExternalSalesViewProps> = ({
     const target = cart.find((i) => i.productId === adjustingItemId);
     if (!target) return;
 
+    const product = dbState.products.find((p) => p.id === target.productId);
     const gross = target.quantity * target.unitPrice;
-    const rawVal = parseFloat(itemAdjustmentInput.replace(',', '.')) || 0;
+    const rawVal = Math.max(0, parseFloat(itemAdjustmentInput.replace(',', '.')) || 0);
     const maxPercent = currentUser.permissions.maxDiscountPercent;
 
     let appliedDiscountPercent = 0;
     let appliedDiscountValue = 0;
     let appliedAdditionPercent = 0;
     let appliedAdditionValue = 0;
+    let explicitPercentRequested: number | undefined;
 
     if (rawVal <= 0) {
       // Zerado
     } else if (itemAdjustmentMode === 'desconto') {
       if (itemAdjustmentType === 'percent') {
-        if (rawVal > maxPercent) {
+        if (!product?.maxDiscountEnabled && rawVal > maxPercent) {
           toast.error(`O desconto informado (${rawVal}%) excede o limite máximo permitido de ${maxPercent}%.`, 'Limite Excedido');
           return;
         }
         appliedDiscountPercent = Math.min(100, rawVal);
         appliedDiscountValue = (gross * appliedDiscountPercent) / 100;
+        explicitPercentRequested = appliedDiscountPercent;
       } else {
         const maxVal = (gross * maxPercent) / 100;
-        if (rawVal > maxVal) {
+        if (!product?.maxDiscountEnabled && rawVal > maxVal) {
           toast.error(`O desconto informado (${formatCurrency(rawVal)}) excede o limite permitido de ${maxPercent}%.`, 'Limite Excedido');
           return;
         }
@@ -524,23 +555,106 @@ export const ExternalSalesView: React.FC<ExternalSalesViewProps> = ({
       }
     }
 
-    const net = Math.max(0, gross + appliedAdditionValue - appliedDiscountValue);
+    const commitItemAdjustment = (
+      discPct: number,
+      discVal: number,
+      addPct: number,
+      addVal: number,
+      authorization?: DiscountAuthorizationRecord | null
+    ) => {
+      const roundedDiscPct = Math.round(discPct * 100) / 100;
+      const roundedDiscVal = Math.round(discVal * 100) / 100;
+      const roundedAddPct = Math.round(addPct * 100) / 100;
+      const roundedAddVal = Math.round(addVal * 100) / 100;
+      const net = Math.max(0, gross + roundedAddVal - roundedDiscVal);
 
-    setCart((prev) =>
-      prev.map((i) =>
-        i.productId === adjustingItemId
-          ? {
-              ...i,
-              discountPercent: Math.round(appliedDiscountPercent * 100) / 100,
-              discountValue: Math.round(appliedDiscountValue * 100) / 100,
-              additionPercent: Math.round(appliedAdditionPercent * 100) / 100,
-              additionValue: Math.round(appliedAdditionValue * 100) / 100,
-              totalPrice: Math.round(net * 100) / 100,
-            }
-          : i
-      )
+      setCart((prev) =>
+        prev.map((i) => {
+          if (i.productId !== adjustingItemId) return i;
+          if (
+            i.discountAuthorization?.operationId &&
+            i.discountAuthorization.operationId !== authorization?.operationId
+          ) {
+            revokeDiscountAuthorization(i.discountAuthorization.operationId);
+          }
+          return {
+            ...i,
+            discountPercent: roundedDiscPct,
+            discountValue: roundedDiscVal,
+            additionPercent: roundedAddPct,
+            additionValue: roundedAddVal,
+            totalPrice: Math.round(net * 100) / 100,
+            discountAuthorization: authorization || undefined,
+          };
+        })
+      );
+      setShowItemAdjustmentModal(false);
+    };
+
+    if (product?.maxDiscountEnabled && itemAdjustmentMode === 'desconto') {
+      const evaluation = evaluateItemMaxDiscount({
+        product,
+        companyId: currentCompany.id,
+        origin: 'externa_celular',
+        quantity: target.quantity,
+        unitPrice: target.unitPrice,
+        referenceUnitPrice: target.referenceUnitPrice,
+        itemDiscountValue: appliedDiscountValue,
+        itemDiscountPercent: appliedDiscountPercent,
+        explicitPercentRequested,
+        existingAuthorization: target.discountAuthorization || null,
+        saleSessionId: saleSessionIdRef.current,
+        users: dbState.users,
+      });
+
+      if (evaluation.requiresAuthorization && evaluation.violation) {
+        setDiscountAuthPrompt({
+          violation: evaluation.violation,
+          onAuthorized: (record) => {
+            setDiscountAuthPrompt(null);
+            commitItemAdjustment(appliedDiscountPercent, appliedDiscountValue, 0, 0, record);
+            toast.success(
+              `Desconto autorizado por ${record.authorizerUserName} para "${product.description}".`,
+              'Autorização Concedida'
+            );
+          },
+          onReduceToLimit: () => {
+            setDiscountAuthPrompt(null);
+            commitItemAdjustment(
+              evaluation.maxDiscountPercentAllowed,
+              evaluation.maxDiscountValueAllowed,
+              0,
+              0,
+              null
+            );
+            toast.info(
+              `Desconto ajustado para o limite permitido do produto (${evaluation.maxDiscountPercentAllowed.toFixed(2)}% / ${formatCurrency(evaluation.maxDiscountValueAllowed)}).`,
+              'Desconto Ajustado ao Limite'
+            );
+          },
+        });
+        return;
+      }
+
+      if (evaluation.exceeded && evaluation.authorized && target.discountAuthorization) {
+        commitItemAdjustment(
+          appliedDiscountPercent,
+          appliedDiscountValue,
+          0,
+          0,
+          target.discountAuthorization
+        );
+        return;
+      }
+    }
+
+    commitItemAdjustment(
+      appliedDiscountPercent,
+      appliedDiscountValue,
+      appliedAdditionPercent,
+      appliedAdditionValue,
+      null
     );
-    setShowItemAdjustmentModal(false);
   };
 
   // ----------------------------------------------------
@@ -597,6 +711,97 @@ export const ExternalSalesView: React.FC<ExternalSalesViewProps> = ({
   const [finishedOrder, setFinishedOrder] = useState<Order | null>(null);
   const [showReceiptModal, setShowReceiptModal] = useState<boolean>(false);
 
+  const validateMobileCartAndPromptAuthorizations = (
+    itemsToCheck: OrderItem[],
+    globalDiscountToCheck: number,
+    onAllValid: () => void
+  ) => {
+    const validation = validateOrderDiscounts({
+      items: itemsToCheck,
+      products: dbState.products,
+      companyId: currentCompany.id,
+      origin: 'externa_celular',
+      globalOrderDiscountValue: globalDiscountToCheck,
+      saleSessionId: saleSessionIdRef.current,
+      users: dbState.users,
+    });
+
+    if (validation.valid) {
+      onAllValid();
+      return;
+    }
+
+    const totalViolations = validation.violations.length;
+    const first = validation.violations[0];
+
+    setDiscountAuthPrompt({
+      violation: first.violation,
+      queuePosition: totalViolations > 1 ? { current: 1, total: totalViolations } : undefined,
+      onAuthorized: (record) => {
+        const nextCart = itemsToCheck.map((it, idx) => {
+          if (idx !== first.itemIndex) return it;
+          if (it.discountAuthorization?.operationId && it.discountAuthorization.operationId !== record.operationId) {
+            revokeDiscountAuthorization(it.discountAuthorization.operationId);
+          }
+          return { ...it, discountAuthorization: record };
+        });
+        setCart(nextCart);
+        setDiscountAuthPrompt(null);
+        toast.success(
+          `Desconto autorizado por ${record.authorizerUserName} para "${first.violation.productDescription}".`,
+          'Autorização Concedida'
+        );
+        validateMobileCartAndPromptAuthorizations(nextCart, globalDiscountToCheck, onAllValid);
+      },
+      onReduceToLimit: () => {
+        const targetItem = itemsToCheck[first.itemIndex];
+        const gross = targetItem.quantity * targetItem.unitPrice;
+        const addVal = targetItem.additionValue || 0;
+        const maxValAllowed = first.violation.maxDiscountValueAllowed;
+        const clampedItemDisc = Math.min(targetItem.discountValue || 0, maxValAllowed);
+        const clampedItemPct = gross > 0 ? (clampedItemDisc / gross) * 100 : 0;
+
+        if (targetItem.discountAuthorization?.operationId) {
+          revokeDiscountAuthorization(targetItem.discountAuthorization.operationId);
+        }
+
+        const nextCart = itemsToCheck.map((it, idx) =>
+          idx === first.itemIndex
+            ? {
+                ...it,
+                discountValue: Math.round(clampedItemDisc * 100) / 100,
+                discountPercent: Math.round(clampedItemPct * 100) / 100,
+                totalPrice: Math.max(0, Math.round((gross + addVal - clampedItemDisc) * 100) / 100),
+                discountAuthorization: undefined,
+              }
+            : it
+        );
+
+        let nextGlobalDiscount = globalDiscountToCheck;
+        if (first.violation.reason === 'desconto_global' || first.violation.reason === 'combinado') {
+          const nextSubtotalAfterItems = nextCart.reduce((s, it) => s + it.totalPrice, 0);
+          const nextLineNet = nextCart[first.itemIndex].totalPrice;
+          const remainingHeadroom = Math.max(0, maxValAllowed - clampedItemDisc);
+          const maxGlobalAllowed =
+            nextLineNet > 0 && nextSubtotalAfterItems > 0
+              ? Math.floor(((remainingHeadroom * nextSubtotalAfterItems) / nextLineNet) * 100) / 100
+              : 0;
+          nextGlobalDiscount = Math.max(0, Math.min(globalDiscountToCheck, maxGlobalAllowed));
+          setGlobalAdjustmentMode('desconto');
+          setDiscountType('value');
+          setDiscountInput(nextGlobalDiscount > 0 ? nextGlobalDiscount.toFixed(2).replace('.', ',') : '');
+        }
+
+        setCart(nextCart);
+        setDiscountAuthPrompt(null);
+        toast.info(
+          `Desconto reduzido para o limite permitido de "${first.violation.productDescription}".`,
+          'Desconto Ajustado ao Limite'
+        );
+      },
+    });
+  };
+
   const handlePreFinalizeOrder = () => {
     if (cart.length === 0) {
       toast.warning('Adicione produtos ao pedido antes de finalizar.', 'Carrinho Vazio');
@@ -615,7 +820,9 @@ export const ExternalSalesView: React.FC<ExternalSalesViewProps> = ({
       return;
     }
 
-    setShowSaleConfirmationModal(true);
+    validateMobileCartAndPromptAuthorizations(cart, globalDiscountVal, () => {
+      setShowSaleConfirmationModal(true);
+    });
   };
 
   const handleFinalizeOrder = () => {
@@ -630,38 +837,6 @@ export const ExternalSalesView: React.FC<ExternalSalesViewProps> = ({
     const nowIso = new Date().toISOString();
 
     try {
-      let currentBalances = [...dbState.stockBalances];
-      const movements = [];
-
-      if (docType === 'venda') {
-        for (const item of cart) {
-          const { updatedBalances, createdMovement } = StockEngine.applyMovement(
-            currentBalances,
-            {
-              companyId: currentCompany.id,
-              productId: item.productId,
-              productCode: item.productCode,
-              productDescription: item.description,
-              locationId: commercialLocation.id,
-              locationName: commercialLocationName,
-              type: 'saida_venda',
-              quantity: item.quantity,
-              unitCost: item.unitCost,
-              totalCost: item.unitCost * item.quantity,
-              originDocType: 'venda',
-              originDocId: orderNumber,
-              date: nowIso,
-              userId: currentUser.id,
-              userName: currentUser.name,
-              notes: `Venda Mobile ${orderNumber} - Saída Estoque Comercial`,
-            },
-            { allowNegativeStock: Database.canSellNegativeStock() }
-          );
-          currentBalances = updatedBalances;
-          movements.push(createdMovement);
-        }
-      }
-
       const boletoAccounts = Database.getBoletoAccounts(currentCompany.id);
       const targetBoletoAccount = paymentMethod === 'boleto'
         ? boletoAccounts.find((a) => a.id === selectedBoletoAccountId) || boletoAccounts[0] || Database.getBoletoAccounts()[0]
@@ -707,6 +882,49 @@ export const ExternalSalesView: React.FC<ExternalSalesViewProps> = ({
         updatedAt: nowIso,
       };
 
+      // Bloqueio obrigatório na camada de persistência contra burla de desconto máximo por produto
+      const validatedDiscountAuths = Database.validateOrderDiscountsForPersistence(newOrder, {
+        saleSessionId: saleSessionIdRef.current,
+        globalOrderDiscountValue: globalDiscountVal,
+      });
+
+      let currentBalances = [...dbState.stockBalances];
+      const movements = [];
+
+      if (docType === 'venda') {
+        for (const item of cart) {
+          const { updatedBalances, createdMovement } = StockEngine.applyMovement(
+            currentBalances,
+            {
+              companyId: currentCompany.id,
+              productId: item.productId,
+              productCode: item.productCode,
+              productDescription: item.description,
+              locationId: commercialLocation.id,
+              locationName: commercialLocationName,
+              type: 'saida_venda',
+              quantity: item.quantity,
+              unitCost: item.unitCost,
+              totalCost: item.unitCost * item.quantity,
+              originDocType: 'venda',
+              originDocId: orderNumber,
+              date: nowIso,
+              userId: currentUser.id,
+              userName: currentUser.name,
+              notes: `Venda Mobile ${orderNumber} - Saída Estoque Comercial`,
+            },
+            { allowNegativeStock: Database.canSellNegativeStock() }
+          );
+          currentBalances = updatedBalances;
+          movements.push(createdMovement);
+        }
+      }
+
+      const finalizedOrder = Database.finalizeOrderDiscountAuthorizations(newOrder, validatedDiscountAuths, {
+        saleSessionId: saleSessionIdRef.current,
+        skipPersist: true,
+      });
+
       let updatedReceivables = [...dbState.accountsReceivable];
       if (docType === 'venda' && (paymentMethod === 'boleto' || installments > 1)) {
         const valParcela = Number((cartTotal / installments).toFixed(2));
@@ -717,10 +935,10 @@ export const ExternalSalesView: React.FC<ExternalSalesViewProps> = ({
           updatedReceivables.push({
             id: 'REC-' + Date.now() + '-' + i,
             companyId: currentCompany.id,
-            orderId: newOrder.id,
-            orderNumber: newOrder.number,
-            customerId: newOrder.customerId,
-            customerName: newOrder.customerName,
+            orderId: finalizedOrder.id,
+            orderNumber: finalizedOrder.number,
+            customerId: finalizedOrder.customerId,
+            customerName: finalizedOrder.customerName,
             docNumber: `${orderNumber}/${i}`,
             installmentNumber: i,
             totalInstallments: installments,
@@ -744,23 +962,26 @@ export const ExternalSalesView: React.FC<ExternalSalesViewProps> = ({
       const state = Database.getState();
       state.stockBalances = currentBalances;
       state.stockMovements = [...movements, ...state.stockMovements];
-      state.orders = [newOrder, ...state.orders];
+      state.orders = [finalizedOrder, ...state.orders];
       state.accountsReceivable = updatedReceivables;
       Database.persist();
 
       Database.addAuditLog(
         'PEDIDO_EXTERNO_EMITIDO',
         'VENDAS_EXTERNAS',
-        newOrder.id,
-        `${docType === 'orcamento' ? 'Orçamento' : 'Venda'} ${orderNumber} criada por ${currentUser.name} para ${newOrder.customerName}. Total: ${formatCurrency(cartTotal)}`
+        finalizedOrder.id,
+        `${docType === 'orcamento' ? 'Orçamento' : 'Venda'} ${orderNumber} criada por ${currentUser.name} para ${finalizedOrder.customerName}. Total: ${formatCurrency(cartTotal)}`
       );
+
+      // Renova a sessão para impedir reutilização de autorizações em vendas futuras
+      saleSessionIdRef.current = generateSaleSessionId('MOB');
 
       toast.success(
         `${docType === 'orcamento' ? 'Orçamento' : 'Venda'} ${orderNumber} emitido com sucesso!`,
         'Documento Emitido'
       );
 
-      setFinishedOrder(newOrder);
+      setFinishedOrder(finalizedOrder);
       setShowReceiptModal(true);
       setCart([]);
       setDiscountInput('');
@@ -2108,6 +2329,18 @@ export const ExternalSalesView: React.FC<ExternalSalesViewProps> = ({
         selectedLocationId={commercialLocation.id}
         selectedLocationName={commercialLocationName}
         onAfterClose={() => priceLookupBtnRef.current?.focus()}
+      />
+
+      {/* MODAL BLOQUEANTE: AUTORIZAÇÃO DE DESCONTO MÁXIMO EXCEDIDO */}
+      <DiscountAuthorizationModal
+        isOpen={Boolean(discountAuthPrompt)}
+        violation={discountAuthPrompt?.violation || null}
+        seller={currentUser}
+        saleSessionId={saleSessionIdRef.current}
+        queuePosition={discountAuthPrompt?.queuePosition}
+        onAuthorized={(record) => discountAuthPrompt?.onAuthorized(record)}
+        onReduceToLimit={discountAuthPrompt?.onReduceToLimit}
+        onCancel={() => setDiscountAuthPrompt(null)}
       />
     </div>
   );

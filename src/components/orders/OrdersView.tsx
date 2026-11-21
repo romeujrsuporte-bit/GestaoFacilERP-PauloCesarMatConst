@@ -51,7 +51,7 @@ import {
 } from 'lucide-react';
 import { Database } from '../../services/db';
 import { FirebaseSyncService } from '../../services/firebaseSync';
-import { Order, OrderType, OrderOrigin, OrderStatus, Product, Customer, OrderItem } from '../../types';
+import { Order, OrderType, OrderOrigin, OrderStatus, Product, Customer, OrderItem, DiscountAuthorizationRecord } from '../../types';
 import { StockEngine } from '../../services/stockEngine';
 import { formatCurrency, formatQuantity } from '../../services/pricingEngine';
 import { ReceiptModal } from '../common/ReceiptModal';
@@ -70,6 +70,15 @@ import {
   dismissSaleAlert,
   clearProductSaleAlerts,
 } from '../common/SaleObservationAlerts';
+import { DiscountAuthorizationModal } from '../common/DiscountAuthorizationModal';
+import {
+  DiscountViolationDetails,
+  clearSaleSessionAuthorizations,
+  evaluateItemMaxDiscount,
+  generateSaleSessionId,
+  revokeDiscountAuthorization,
+  validateOrderDiscounts,
+} from '../../services/discountControl';
 
 interface OrdersViewProps {
   initialMode?: 'novo_pedido' | 'historico';
@@ -116,6 +125,15 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
 
   // Tipo de documento na emissão: 'venda' | 'orcamento'
   const [docType, setDocType] = useState<'venda' | 'orcamento'>(initialDocType);
+
+  // Sessão ativa e modal bloqueante de autorização para desconto máximo por produto
+  const saleSessionIdRef = useRef<string>(generateSaleSessionId('PED'));
+  const [discountAuthPrompt, setDiscountAuthPrompt] = useState<{
+    violation: DiscountViolationDetails;
+    queuePosition?: { current: number; total: number };
+    onAuthorized: (record: DiscountAuthorizationRecord) => void;
+    onReduceToLimit?: () => void;
+  } | null>(null);
 
   // ==========================================
   // ESTADO DA EMISSÃO DE NOVO PEDIDO / ORÇAMENTO
@@ -530,6 +548,9 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
     }
 
     if (existing) {
+      if (existing.discountAuthorization?.operationId) {
+        revokeDiscountAuthorization(existing.discountAuthorization.operationId);
+      }
       const newQty = existing.quantity + qty;
       const newGross = newQty * existing.unitPrice;
       const newDiscVal = (newGross * (existing.discountPercent || 0)) / 100;
@@ -541,6 +562,7 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
                 quantity: newQty,
                 discountValue: Math.round(newDiscVal * 100) / 100,
                 totalPrice: Math.round((newGross - newDiscVal) * 100) / 100,
+                discountAuthorization: undefined,
               }
             : i
         )
@@ -557,6 +579,7 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
         unit: product.unit,
         quantity: qty,
         unitPrice: effectivePrice,
+        referenceUnitPrice: effectivePrice,
         discountPercent: 0,
         discountValue: 0,
         totalPrice: qty * effectivePrice,
@@ -641,22 +664,24 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
 
     const effectivePrice = StockEngine.getProductPriceForCompany(product, currentCompany.id);
     const effectiveCost = StockEngine.getProductCostForCompany(product, currentCompany.id);
-    const rawVal = parseFloat(fastItemAdjustmentInput.replace(',', '.')) || 0;
+    const rawVal = Math.max(0, parseFloat(fastItemAdjustmentInput.replace(',', '.')) || 0);
     const grossItem = qty * effectivePrice;
     let itemDiscVal = 0;
     let itemDiscPercent = 0;
     let itemAddVal = 0;
     let itemAddPercent = 0;
+    let explicitPercentRequested: number | undefined;
 
     if (rawVal > 0) {
       if (fastItemAdjustmentMode === 'desconto') {
         const maxPercent = currentUser.permissions.maxDiscountPercent;
         if (fastItemAdjustmentType === 'percent') {
-          itemDiscPercent = Math.min(maxPercent, rawVal);
+          itemDiscPercent = product.maxDiscountEnabled ? Math.min(100, rawVal) : Math.min(maxPercent, rawVal);
           itemDiscVal = (grossItem * itemDiscPercent) / 100;
+          explicitPercentRequested = itemDiscPercent;
         } else {
           const maxVal = (grossItem * maxPercent) / 100;
-          itemDiscVal = Math.min(maxVal, rawVal);
+          itemDiscVal = product.maxDiscountEnabled ? Math.min(grossItem, rawVal) : Math.min(maxVal, rawVal);
           itemDiscPercent = grossItem > 0 ? (itemDiscVal / grossItem) * 100 : 0;
         }
       } else {
@@ -671,77 +696,142 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
       }
     }
 
-    const netTotal = Math.max(0, grossItem + itemAddVal - itemDiscVal);
+    const commitFastItemInsert = (
+      finalTotalDiscVal: number,
+      finalTotalDiscPct: number,
+      authorization?: DiscountAuthorizationRecord | null
+    ) => {
+      if (existing) {
+        if (
+          existing.discountAuthorization?.operationId &&
+          existing.discountAuthorization.operationId !== authorization?.operationId
+        ) {
+          revokeDiscountAuthorization(existing.discountAuthorization.operationId);
+        }
+        const newQty = existing.quantity + qty;
+        const newGross = newQty * existing.unitPrice;
+        const combinedAddVal = (existing.additionValue || 0) + itemAddVal;
+        const combinedAddPercent = newGross > 0 ? (combinedAddVal / newGross) * 100 : 0;
+        const roundedDiscVal = Math.round(finalTotalDiscVal * 100) / 100;
+        const roundedDiscPct = Math.round(finalTotalDiscPct * 100) / 100;
 
-    if (existing) {
-      const newQty = existing.quantity + qty;
-      const newGross = newQty * existing.unitPrice;
-      const combinedDiscVal = (existing.discountValue || 0) + itemDiscVal;
-      const combinedDiscPercent = newGross > 0 ? (combinedDiscVal / newGross) * 100 : 0;
-      const combinedAddVal = (existing.additionValue || 0) + itemAddVal;
-      const combinedAddPercent = newGross > 0 ? (combinedAddVal / newGross) * 100 : 0;
-      setCart((prev) =>
-        prev.map((i) =>
-          i.productId === product.id
-            ? {
-                ...i,
-                quantity: newQty,
-                discountValue: Math.round(combinedDiscVal * 100) / 100,
-                discountPercent: Math.round(combinedDiscPercent * 100) / 100,
-                additionValue: Math.round(combinedAddVal * 100) / 100,
-                additionPercent: Math.round(combinedAddPercent * 100) / 100,
-                totalPrice: Math.round((newGross + combinedAddVal - combinedDiscVal) * 100) / 100,
-              }
-            : i
-        )
-      );
-    } else {
-      const newItem: OrderItem = {
-        id: 'ITEM-' + Date.now() + '-' + Math.random().toString(36).substring(2, 5),
-        productId: product.id,
-        productCode: product.code,
-        description: product.description,
-        unit: product.unit,
-        quantity: qty,
-        unitPrice: effectivePrice,
-        discountPercent: Math.round(itemDiscPercent * 100) / 100,
-        discountValue: Math.round(itemDiscVal * 100) / 100,
-        additionPercent: Math.round(itemAddPercent * 100) / 100,
-        additionValue: Math.round(itemAddVal * 100) / 100,
-        totalPrice: Math.round(netTotal * 100) / 100,
-        unitCost: effectiveCost,
-        locationId: selectedLocationId,
-        isMasterPack: product.isMasterPack,
-        masterPackUnits: product.masterPackUnits,
-        masterPackAssociatedProductId: product.masterPackAssociatedProductId,
-        masterPackAssociatedProductCode: product.masterPackAssociatedProductCode,
-      };
-      setCart((prev) => [...prev, newItem]);
+        setCart((prev) =>
+          prev.map((i) =>
+            i.productId === product.id
+              ? {
+                  ...i,
+                  quantity: newQty,
+                  discountValue: roundedDiscVal,
+                  discountPercent: roundedDiscPct,
+                  additionValue: Math.round(combinedAddVal * 100) / 100,
+                  additionPercent: Math.round(combinedAddPercent * 100) / 100,
+                  totalPrice: Math.max(0, Math.round((newGross + combinedAddVal - roundedDiscVal) * 100) / 100),
+                  discountAuthorization: authorization || undefined,
+                }
+              : i
+          )
+        );
+      } else {
+        const roundedDiscVal = Math.round(finalTotalDiscVal * 100) / 100;
+        const roundedDiscPct = Math.round(finalTotalDiscPct * 100) / 100;
+        const netTotal = Math.max(0, grossItem + itemAddVal - roundedDiscVal);
+        const newItem: OrderItem = {
+          id: 'ITEM-' + Date.now() + '-' + Math.random().toString(36).substring(2, 5),
+          productId: product.id,
+          productCode: product.code,
+          description: product.description,
+          unit: product.unit,
+          quantity: qty,
+          unitPrice: effectivePrice,
+          referenceUnitPrice: effectivePrice,
+          discountPercent: roundedDiscPct,
+          discountValue: roundedDiscVal,
+          additionPercent: Math.round(itemAddPercent * 100) / 100,
+          additionValue: Math.round(itemAddVal * 100) / 100,
+          totalPrice: Math.round(netTotal * 100) / 100,
+          unitCost: effectiveCost,
+          locationId: selectedLocationId,
+          isMasterPack: product.isMasterPack,
+          masterPackUnits: product.masterPackUnits,
+          masterPackAssociatedProductId: product.masterPackAssociatedProductId,
+          masterPackAssociatedProductCode: product.masterPackAssociatedProductCode,
+          discountAuthorization: authorization || undefined,
+        };
+        setCart((prev) => [...prev, newItem]);
+      }
+
+      setProductFeedback({
+        type: stock.quantity < requestedTotal ? 'warning' : 'success',
+        text: `✓ +${formatQuantity(qty)} ${product.unit}: "${product.description}" incluído no pedido!`,
+      });
+
+      const alreadyAlertedOnSelect = !forcedProduct && lastAlertedFastProductIdRef.current === product.id;
+      lastAlertedFastProductIdRef.current = '';
+      const prodObsAlert = alreadyAlertedOnSelect ? null : getProductSaleAlert(product);
+      if (prodObsAlert) {
+        setSaleObservationAlerts((prev) => upsertSaleAlert(prev, prodObsAlert));
+      }
+
+      // Limpa campos da barra rápida para o próximo produto
+      setFastSelectedProductId('');
+      setFastProductSearchTerm('');
+      setFastItemQtyInput('1');
+      setFastItemAdjustmentInput('');
+
+      if (!prodObsAlert) {
+        setTimeout(() => {
+          fastProductInputRef.current?.focus();
+        }, 20);
+      }
+    };
+
+    const resultQty = existing ? existing.quantity + qty : qty;
+    const resultUnitPrice = existing ? existing.unitPrice : effectivePrice;
+    const resultGross = resultQty * resultUnitPrice;
+    const resultDiscVal = existing ? (existing.discountValue || 0) + itemDiscVal : itemDiscVal;
+    const resultDiscPct = resultGross > 0 ? (resultDiscVal / resultGross) * 100 : 0;
+
+    if (product.maxDiscountEnabled && (resultDiscVal > 0 || (explicitPercentRequested && explicitPercentRequested > 0))) {
+      const evaluation = evaluateItemMaxDiscount({
+        product,
+        companyId: currentCompany.id,
+        origin: 'pedidos_venda',
+        quantity: resultQty,
+        unitPrice: resultUnitPrice,
+        referenceUnitPrice: existing?.referenceUnitPrice ?? effectivePrice,
+        itemDiscountValue: resultDiscVal,
+        itemDiscountPercent: resultDiscPct,
+        explicitPercentRequested: existing ? undefined : explicitPercentRequested,
+        existingAuthorization: null,
+        saleSessionId: saleSessionIdRef.current,
+        users: dbState.users,
+      });
+
+      if (evaluation.requiresAuthorization && evaluation.violation) {
+        setDiscountAuthPrompt({
+          violation: evaluation.violation,
+          onAuthorized: (record) => {
+            setDiscountAuthPrompt(null);
+            commitFastItemInsert(resultDiscVal, resultDiscPct, record);
+            toast.success(
+              `Desconto autorizado por ${record.authorizerUserName} para "${product.description}".`,
+              'Autorização Concedida'
+            );
+          },
+          onReduceToLimit: () => {
+            setDiscountAuthPrompt(null);
+            commitFastItemInsert(evaluation.maxDiscountValueAllowed, evaluation.maxDiscountPercentAllowed, null);
+            toast.info(
+              `Desconto ajustado para o limite permitido do produto (${evaluation.maxDiscountPercentAllowed.toFixed(2)}% / ${formatCurrency(evaluation.maxDiscountValueAllowed)}).`,
+              'Desconto Ajustado ao Limite'
+            );
+          },
+        });
+        return;
+      }
     }
 
-    setProductFeedback({
-      type: stock.quantity < requestedTotal ? 'warning' : 'success',
-      text: `✓ +${formatQuantity(qty)} ${product.unit}: "${product.description}" incluído no pedido!`,
-    });
-
-    const alreadyAlertedOnSelect = !forcedProduct && lastAlertedFastProductIdRef.current === product.id;
-    lastAlertedFastProductIdRef.current = '';
-    const prodObsAlert = alreadyAlertedOnSelect ? null : getProductSaleAlert(product);
-    if (prodObsAlert) {
-      setSaleObservationAlerts((prev) => upsertSaleAlert(prev, prodObsAlert));
-    }
-
-    // Limpa campos da barra rápida para o próximo produto
-    setFastSelectedProductId('');
-    setFastProductSearchTerm('');
-    setFastItemQtyInput('1');
-    setFastItemAdjustmentInput('');
-
-    if (!prodObsAlert) {
-      setTimeout(() => {
-        fastProductInputRef.current?.focus();
-      }, 20);
-    }
+    commitFastItemInsert(resultDiscVal, resultDiscPct, null);
   };
 
   // Processa leitura de código de barras ou digitação do código/nome do produto
@@ -796,7 +886,13 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
         .map((item) => {
           if (item.productId === productId) {
             const newQty = item.quantity + delta;
-            if (newQty <= 0) return null;
+            if (newQty <= 0) {
+              revokeDiscountAuthorization(item.discountAuthorization?.operationId);
+              return null;
+            }
+            if (item.discountAuthorization?.operationId) {
+              revokeDiscountAuthorization(item.discountAuthorization.operationId);
+            }
             const gross = newQty * item.unitPrice;
             const discVal = (gross * (item.discountPercent || 0)) / 100;
             const addVal = (gross * (item.additionPercent || 0)) / 100;
@@ -806,6 +902,7 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
               discountValue: Math.round(discVal * 100) / 100,
               additionValue: Math.round(addVal * 100) / 100,
               totalPrice: Math.round((gross + addVal - discVal) * 100) / 100,
+              discountAuthorization: undefined,
             };
           }
           return item;
@@ -820,6 +917,9 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
     setCart((prev) =>
       prev.map((item) => {
         if (item.productId === productId) {
+          if (item.discountAuthorization?.operationId && Math.abs(item.quantity - newQty) > 0.0005) {
+            revokeDiscountAuthorization(item.discountAuthorization.operationId);
+          }
           const gross = newQty * item.unitPrice;
           const discVal = (gross * (item.discountPercent || 0)) / 100;
           const addVal = (gross * (item.additionPercent || 0)) / 100;
@@ -829,6 +929,8 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
             discountValue: Math.round(discVal * 100) / 100,
             additionValue: Math.round(addVal * 100) / 100,
             totalPrice: Math.round((gross + addVal - discVal) * 100) / 100,
+            discountAuthorization:
+              Math.abs(item.quantity - newQty) > 0.0005 ? undefined : item.discountAuthorization,
           };
         }
         return item;
@@ -837,6 +939,10 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
   };
 
   const handleRemoveItem = (productId: string) => {
+    const removed = cart.find((i) => i.productId === productId);
+    if (removed?.discountAuthorization?.operationId) {
+      revokeDiscountAuthorization(removed.discountAuthorization.operationId);
+    }
     setCart((prev) => prev.filter((i) => i.productId !== productId));
   };
 
@@ -874,28 +980,31 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
     const target = cart.find((i) => i.productId === discountingItemId);
     if (!target) return;
 
+    const product = dbState.products.find((p) => p.id === target.productId);
     const gross = target.quantity * target.unitPrice;
-    const rawVal = parseFloat(itemDiscountInput.replace(',', '.')) || 0;
+    const rawVal = Math.max(0, parseFloat(itemDiscountInput.replace(',', '.')) || 0);
     const maxPercent = currentUser.permissions.maxDiscountPercent;
 
     let appliedDiscountPercent = 0;
     let appliedDiscountValue = 0;
     let appliedAdditionPercent = 0;
     let appliedAdditionValue = 0;
+    let explicitPercentRequested: number | undefined;
 
     if (rawVal <= 0) {
       // Zerado
     } else if (itemAdjustmentMode === 'desconto') {
       if (itemDiscountType === 'percent') {
-        if (rawVal > maxPercent) {
+        if (!product?.maxDiscountEnabled && rawVal > maxPercent) {
           alert(`O desconto informado (${rawVal}%) excede o limite máximo permitido de ${maxPercent}% para seu perfil.`);
           return;
         }
         appliedDiscountPercent = Math.min(100, rawVal);
         appliedDiscountValue = (gross * appliedDiscountPercent) / 100;
+        explicitPercentRequested = appliedDiscountPercent;
       } else {
         const maxVal = (gross * maxPercent) / 100;
-        if (rawVal > maxVal) {
+        if (!product?.maxDiscountEnabled && rawVal > maxVal) {
           alert(`O desconto informado (${formatCurrency(rawVal)}) excede o limite máximo permitido de ${maxPercent}% (${formatCurrency(maxVal)}).`);
           return;
         }
@@ -913,23 +1022,106 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
       }
     }
 
-    const net = Math.max(0, gross + appliedAdditionValue - appliedDiscountValue);
+    const commitItemAdjustment = (
+      discPct: number,
+      discVal: number,
+      addPct: number,
+      addVal: number,
+      authorization?: DiscountAuthorizationRecord | null
+    ) => {
+      const roundedDiscPct = Math.round(discPct * 100) / 100;
+      const roundedDiscVal = Math.round(discVal * 100) / 100;
+      const roundedAddPct = Math.round(addPct * 100) / 100;
+      const roundedAddVal = Math.round(addVal * 100) / 100;
+      const net = Math.max(0, gross + roundedAddVal - roundedDiscVal);
 
-    setCart((prev) =>
-      prev.map((i) =>
-        i.productId === discountingItemId
-          ? {
-              ...i,
-              discountPercent: Math.round(appliedDiscountPercent * 100) / 100,
-              discountValue: Math.round(appliedDiscountValue * 100) / 100,
-              additionPercent: Math.round(appliedAdditionPercent * 100) / 100,
-              additionValue: Math.round(appliedAdditionValue * 100) / 100,
-              totalPrice: Math.round(net * 100) / 100,
-            }
-          : i
-      )
+      setCart((prev) =>
+        prev.map((i) => {
+          if (i.productId !== discountingItemId) return i;
+          if (
+            i.discountAuthorization?.operationId &&
+            i.discountAuthorization.operationId !== authorization?.operationId
+          ) {
+            revokeDiscountAuthorization(i.discountAuthorization.operationId);
+          }
+          return {
+            ...i,
+            discountPercent: roundedDiscPct,
+            discountValue: roundedDiscVal,
+            additionPercent: roundedAddPct,
+            additionValue: roundedAddVal,
+            totalPrice: Math.round(net * 100) / 100,
+            discountAuthorization: authorization || undefined,
+          };
+        })
+      );
+      setShowItemDiscountModal(false);
+    };
+
+    if (product?.maxDiscountEnabled && itemAdjustmentMode === 'desconto') {
+      const evaluation = evaluateItemMaxDiscount({
+        product,
+        companyId: currentCompany.id,
+        origin: 'pedidos_venda',
+        quantity: target.quantity,
+        unitPrice: target.unitPrice,
+        referenceUnitPrice: target.referenceUnitPrice,
+        itemDiscountValue: appliedDiscountValue,
+        itemDiscountPercent: appliedDiscountPercent,
+        explicitPercentRequested,
+        existingAuthorization: target.discountAuthorization || null,
+        saleSessionId: saleSessionIdRef.current,
+        users: dbState.users,
+      });
+
+      if (evaluation.requiresAuthorization && evaluation.violation) {
+        setDiscountAuthPrompt({
+          violation: evaluation.violation,
+          onAuthorized: (record) => {
+            setDiscountAuthPrompt(null);
+            commitItemAdjustment(appliedDiscountPercent, appliedDiscountValue, 0, 0, record);
+            toast.success(
+              `Desconto autorizado por ${record.authorizerUserName} para "${product.description}".`,
+              'Autorização Concedida'
+            );
+          },
+          onReduceToLimit: () => {
+            setDiscountAuthPrompt(null);
+            commitItemAdjustment(
+              evaluation.maxDiscountPercentAllowed,
+              evaluation.maxDiscountValueAllowed,
+              0,
+              0,
+              null
+            );
+            toast.info(
+              `Desconto ajustado para o limite permitido do produto (${evaluation.maxDiscountPercentAllowed.toFixed(2)}% / ${formatCurrency(evaluation.maxDiscountValueAllowed)}).`,
+              'Desconto Ajustado ao Limite'
+            );
+          },
+        });
+        return;
+      }
+
+      if (evaluation.exceeded && evaluation.authorized && target.discountAuthorization) {
+        commitItemAdjustment(
+          appliedDiscountPercent,
+          appliedDiscountValue,
+          0,
+          0,
+          target.discountAuthorization
+        );
+        return;
+      }
+    }
+
+    commitItemAdjustment(
+      appliedDiscountPercent,
+      appliedDiscountValue,
+      appliedAdditionPercent,
+      appliedAdditionValue,
+      null
     );
-    setShowItemDiscountModal(false);
   };
 
   // Cadastro rápido de cliente
@@ -969,6 +1161,96 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
     alert(`Cliente "${newCust.name}" cadastrado com sucesso e selecionado no pedido!`);
   };
 
+  const validateOrderCartAndPromptAuthorizations = (
+    itemsToCheck: OrderItem[],
+    globalDiscountToCheck: number,
+    onAllValid: () => void
+  ) => {
+    const validation = validateOrderDiscounts({
+      items: itemsToCheck,
+      products: dbState.products,
+      companyId: currentCompany.id,
+      origin: 'pedidos_venda',
+      globalOrderDiscountValue: globalDiscountToCheck,
+      saleSessionId: saleSessionIdRef.current,
+      users: dbState.users,
+    });
+
+    if (validation.valid) {
+      onAllValid();
+      return;
+    }
+
+    const totalViolations = validation.violations.length;
+    const first = validation.violations[0];
+
+    setDiscountAuthPrompt({
+      violation: first.violation,
+      queuePosition: totalViolations > 1 ? { current: 1, total: totalViolations } : undefined,
+      onAuthorized: (record) => {
+        const nextCart = itemsToCheck.map((it, idx) => {
+          if (idx !== first.itemIndex) return it;
+          if (it.discountAuthorization?.operationId && it.discountAuthorization.operationId !== record.operationId) {
+            revokeDiscountAuthorization(it.discountAuthorization.operationId);
+          }
+          return { ...it, discountAuthorization: record };
+        });
+        setCart(nextCart);
+        setDiscountAuthPrompt(null);
+        toast.success(
+          `Desconto autorizado por ${record.authorizerUserName} para "${first.violation.productDescription}".`,
+          'Autorização Concedida'
+        );
+        validateOrderCartAndPromptAuthorizations(nextCart, globalDiscountToCheck, onAllValid);
+      },
+      onReduceToLimit: () => {
+        const targetItem = itemsToCheck[first.itemIndex];
+        const gross = targetItem.quantity * targetItem.unitPrice;
+        const addVal = targetItem.additionValue || 0;
+        const maxValAllowed = first.violation.maxDiscountValueAllowed;
+        const clampedItemDisc = Math.min(targetItem.discountValue || 0, maxValAllowed);
+        const clampedItemPct = gross > 0 ? (clampedItemDisc / gross) * 100 : 0;
+
+        if (targetItem.discountAuthorization?.operationId) {
+          revokeDiscountAuthorization(targetItem.discountAuthorization.operationId);
+        }
+
+        const nextCart = itemsToCheck.map((it, idx) =>
+          idx === first.itemIndex
+            ? {
+                ...it,
+                discountValue: Math.round(clampedItemDisc * 100) / 100,
+                discountPercent: Math.round(clampedItemPct * 100) / 100,
+                totalPrice: Math.max(0, Math.round((gross + addVal - clampedItemDisc) * 100) / 100),
+                discountAuthorization: undefined,
+              }
+            : it
+        );
+
+        let nextGlobalDiscount = globalDiscountToCheck;
+        if (first.violation.reason === 'desconto_global' || first.violation.reason === 'combinado') {
+          const nextSubtotalAfterItems = nextCart.reduce((s, it) => s + it.totalPrice, 0);
+          const nextLineNet = nextCart[first.itemIndex].totalPrice;
+          const remainingHeadroom = Math.max(0, maxValAllowed - clampedItemDisc);
+          const maxGlobalAllowed =
+            nextLineNet > 0 && nextSubtotalAfterItems > 0
+              ? Math.floor(((remainingHeadroom * nextSubtotalAfterItems) / nextLineNet) * 100) / 100
+              : 0;
+          nextGlobalDiscount = Math.max(0, Math.min(globalDiscountToCheck, maxGlobalAllowed));
+          setDiscountType('value');
+          setDiscountInput(nextGlobalDiscount > 0 ? nextGlobalDiscount.toFixed(2).replace('.', ',') : '');
+        }
+
+        setCart(nextCart);
+        setDiscountAuthPrompt(null);
+        toast.info(
+          `Desconto reduzido para o limite permitido de "${first.violation.productDescription}".`,
+          'Desconto Ajustado ao Limite'
+        );
+      },
+    });
+  };
+
   // Pré-finalizar pedido (validação obrigatória de cliente, forma e prazo de pagamento e abertura da tela de confirmação)
   const handlePreFinalizeOrder = () => {
     if (cart.length === 0) {
@@ -998,7 +1280,9 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
       return;
     }
 
-    setShowSaleConfirmationModal(true);
+    validateOrderCartAndPromptAuthorizations(cart, orderDiscountVal, () => {
+      setShowSaleConfirmationModal(true);
+    });
   };
 
   // FINALIZAR PEDIDO DE VENDA OU ORÇAMENTO COMERCIAL (após confirmação na tela)
@@ -1031,48 +1315,7 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
     const orderNumber = `${prefix}-${now.getFullYear()}-${String(dbState.orders.length + 1).padStart(5, '0')}`;
 
     try {
-      let currentBalances = [...dbState.stockBalances];
-      const movements = [];
-
-      // 1. Se for VENDA, baixar estoque unificado compartilhado
-      if (docType === 'venda') {
-        const loc = locations.find((l) => l.id === selectedLocationId) ||
-          locations.find((l) => l.id === 'loc-comercial') ||
-          locations[0] ||
-          { id: 'loc-comercial', name: 'Comercial' };
-
-        for (const item of cart) {
-          const targetLocId = item.locationId || loc.id || 'loc-comercial';
-          const targetLocName = (item.locationId ? locations.find((l) => l.id === item.locationId)?.name : null) || loc.name || 'Comercial';
-
-          const { updatedBalances, createdMovement } = StockEngine.applyMovement(
-            currentBalances,
-            {
-              companyId: currentCompany.id,
-              productId: item.productId,
-              productCode: item.productCode,
-              productDescription: item.description,
-              locationId: targetLocId,
-              locationName: targetLocName,
-              type: 'saida_venda',
-              quantity: item.quantity,
-              unitCost: item.unitCost,
-              totalCost: item.unitCost * item.quantity,
-              originDocType: 'venda',
-              originDocId: orderNumber,
-              date: nowIso,
-              userId: currentUser.id,
-              userName: currentUser.name,
-              notes: `Venda ${orderNumber} por ${currentUser.name} (${currentCompany.tradeName || currentCompany.name})`,
-            },
-            { allowNegativeStock: Database.canSellNegativeStock() }
-          );
-          currentBalances = updatedBalances;
-          movements.push(createdMovement);
-        }
-      }
-
-      // 2. Criar objeto do pedido
+      // 1. Criar objeto do pedido e validar limites de desconto na camada de persistência
       const boletoAccounts = Database.getBoletoAccounts(currentCompany.id);
       const targetBoletoAccount = paymentMethod === 'boleto'
         ? boletoAccounts.find((a) => a.id === selectedBoletoAccountId) || boletoAccounts[0] || Database.getBoletoAccounts()[0]
@@ -1125,6 +1368,57 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
         updatedAt: nowIso,
       };
 
+      const validatedDiscountAuths = Database.validateOrderDiscountsForPersistence(newOrder, {
+        saleSessionId: saleSessionIdRef.current,
+        globalOrderDiscountValue: orderDiscountVal,
+      });
+
+      let currentBalances = [...dbState.stockBalances];
+      const movements = [];
+
+      // 2. Se for VENDA, baixar estoque unificado compartilhado
+      if (docType === 'venda') {
+        const loc = locations.find((l) => l.id === selectedLocationId) ||
+          locations.find((l) => l.id === 'loc-comercial') ||
+          locations[0] ||
+          { id: 'loc-comercial', name: 'Comercial' };
+
+        for (const item of cart) {
+          const targetLocId = item.locationId || loc.id || 'loc-comercial';
+          const targetLocName = (item.locationId ? locations.find((l) => l.id === item.locationId)?.name : null) || loc.name || 'Comercial';
+
+          const { updatedBalances, createdMovement } = StockEngine.applyMovement(
+            currentBalances,
+            {
+              companyId: currentCompany.id,
+              productId: item.productId,
+              productCode: item.productCode,
+              productDescription: item.description,
+              locationId: targetLocId,
+              locationName: targetLocName,
+              type: 'saida_venda',
+              quantity: item.quantity,
+              unitCost: item.unitCost,
+              totalCost: item.unitCost * item.quantity,
+              originDocType: 'venda',
+              originDocId: orderNumber,
+              date: nowIso,
+              userId: currentUser.id,
+              userName: currentUser.name,
+              notes: `Venda ${orderNumber} por ${currentUser.name} (${currentCompany.tradeName || currentCompany.name})`,
+            },
+            { allowNegativeStock: Database.canSellNegativeStock() }
+          );
+          currentBalances = updatedBalances;
+          movements.push(createdMovement);
+        }
+      }
+
+      const finalizedOrder = Database.finalizeOrderDiscountAuthorizations(newOrder, validatedDiscountAuths, {
+        saleSessionId: saleSessionIdRef.current,
+        skipPersist: true,
+      });
+
       // 3. Se for venda a prazo / cartão / boleto, gerar Contas a Receber
       let updatedReceivables = [...dbState.accountsReceivable];
       if (docType === 'venda' && (paymentMethod === 'boleto' || paymentMethod === 'crediario' || installments > 1)) {
@@ -1136,10 +1430,10 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
           updatedReceivables.push({
             id: 'REC-' + Date.now() + '-' + i,
             companyId: currentCompany.id,
-            orderId: newOrder.id,
-            orderNumber: newOrder.number,
+            orderId: finalizedOrder.id,
+            orderNumber: finalizedOrder.number,
             customerId: selectedCustomerId,
-            customerName: newOrder.customerName,
+            customerName: finalizedOrder.customerName,
             docNumber: `${orderNumber}/${i}`,
             installmentNumber: i,
             totalInstallments: installments,
@@ -1164,16 +1458,19 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
       const state = Database.getState();
       state.stockBalances = currentBalances;
       state.stockMovements = [...movements, ...state.stockMovements];
-      state.orders = [newOrder, ...state.orders];
+      state.orders = [finalizedOrder, ...state.orders];
       state.accountsReceivable = updatedReceivables;
       Database.persist();
 
       Database.addAuditLog(
         'PEDIDO_EMITIDO',
         'VENDAS',
-        newOrder.id,
-        `${docType === 'orcamento' ? 'Orçamento' : 'Pedido de Venda'} ${orderNumber} emitido por ${currentUser.name} para ${newOrder.customerName}. Total: ${formatCurrency(orderTotal)}`
+        finalizedOrder.id,
+        `${docType === 'orcamento' ? 'Orçamento' : 'Pedido de Venda'} ${orderNumber} emitido por ${currentUser.name} para ${finalizedOrder.customerName}. Total: ${formatCurrency(orderTotal)}`
       );
+
+      // Renova a sessão para impedir reutilização de autorizações em pedidos futuros
+      saleSessionIdRef.current = generateSaleSessionId('PED');
 
       toast.success(
         `${docType === 'orcamento' ? 'Orçamento' : 'Pedido de Venda'} ${orderNumber} emitido com sucesso!`,
@@ -1196,7 +1493,7 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
       lastObservationCustomerSigRef.current = '';
 
       // Open receipt modal
-      setSelectedOrder(newOrder);
+      setSelectedOrder(finalizedOrder);
       setShowReceiptModal(true);
     } catch (e) {
       alert('Erro ao finalizar pedido: ' + (e as Error).message);
@@ -1217,6 +1514,7 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
 
       // Se qualquer modal estiver aberto, não aciona o atalho
       if (
+        discountAuthPrompt ||
         saleObservationAlerts.length > 0 ||
         showPriceLookupModal ||
         showReceiptModal ||
@@ -1265,7 +1563,8 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
     activeTab,
     paymentMethod,
     paymentTerms,
-    saleObservationAlerts.length
+    saleObservationAlerts.length,
+    discountAuthPrompt
   ]);
 
   // CONVERTER ORÇAMENTO EM VENDA (Abre modal in-app de confirmação)
@@ -2310,7 +2609,10 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
                   if (rawVal > 0) {
                     if (fastItemAdjustmentMode === 'desconto') {
                       if (fastItemAdjustmentType === 'percent') {
-                        calculatedDisc = (grossItem * Math.min(currentUser.permissions.maxDiscountPercent, rawVal)) / 100;
+                        const effectivePct = selProd.maxDiscountEnabled
+                          ? Math.min(100, rawVal)
+                          : Math.min(currentUser.permissions.maxDiscountPercent, rawVal);
+                        calculatedDisc = (grossItem * effectivePct) / 100;
                       } else {
                         calculatedDisc = Math.min(grossItem, rawVal);
                       }
@@ -2487,6 +2789,8 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
                     type="button"
                     onClick={() => {
                       if (window.confirm('Deseja limpar todos os itens deste pedido?')) {
+                        clearSaleSessionAuthorizations(saleSessionIdRef.current);
+                        saleSessionIdRef.current = generateSaleSessionId('PED');
                         setCart([]);
                         setSaleObservationAlerts((prev) => clearProductSaleAlerts(prev));
                       }
@@ -4287,6 +4591,18 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
             priceLookupBtnRef.current?.focus();
           }
         }}
+      />
+
+      {/* MODAL BLOQUEANTE: AUTORIZAÇÃO DE DESCONTO MÁXIMO EXCEDIDO */}
+      <DiscountAuthorizationModal
+        isOpen={Boolean(discountAuthPrompt)}
+        violation={discountAuthPrompt?.violation || null}
+        seller={currentUser}
+        saleSessionId={saleSessionIdRef.current}
+        queuePosition={discountAuthPrompt?.queuePosition}
+        onAuthorized={(record) => discountAuthPrompt?.onAuthorized(record)}
+        onReduceToLimit={discountAuthPrompt?.onReduceToLimit}
+        onCancel={() => setDiscountAuthPrompt(null)}
       />
     </div>
   );

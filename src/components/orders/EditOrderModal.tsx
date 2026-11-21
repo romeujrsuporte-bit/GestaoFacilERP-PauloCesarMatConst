@@ -14,10 +14,11 @@ import {
   Check,
   Barcode
 } from 'lucide-react';
-import { Order, OrderItem, Product, Customer } from '../../types';
+import { Order, OrderItem, Product, Customer, DiscountAuthorizationRecord } from '../../types';
 import { Database } from '../../services/db';
 import { StockEngine } from '../../services/stockEngine';
 import { formatCurrency } from '../../services/pricingEngine';
+import { toast } from '../../services/toast';
 import { CustomerSearchCombobox } from './CustomerSearchCombobox';
 import {
   SaleObservationAlerts,
@@ -27,6 +28,15 @@ import {
   syncCustomerSaleAlert,
   dismissSaleAlert,
 } from '../common/SaleObservationAlerts';
+import { DiscountAuthorizationModal } from '../common/DiscountAuthorizationModal';
+import {
+  DiscountViolationDetails,
+  clearSaleSessionAuthorizations,
+  evaluateItemMaxDiscount,
+  generateSaleSessionId,
+  revokeDiscountAuthorization,
+  validateOrderDiscounts,
+} from '../../services/discountControl';
 
 interface EditOrderModalProps {
   isOpen: boolean;
@@ -68,10 +78,28 @@ export const EditOrderModal: React.FC<EditOrderModalProps> = ({
   const [addUnitPrice, setAddUnitPrice] = useState<string>('0');
   const [saleObservationAlerts, setSaleObservationAlerts] = useState<SaleObservationAlertItem[]>([]);
   const lastAlertedProductIdRef = useRef<string>('');
+  const saleSessionIdRef = useRef<string>(generateSaleSessionId('EDIT'));
+  const [discountAuthPrompt, setDiscountAuthPrompt] = useState<{
+    violation: DiscountViolationDetails;
+    queuePosition?: { current: number; total: number };
+    onAuthorized: (record: DiscountAuthorizationRecord) => void;
+    onReduceToLimit?: () => void;
+  } | null>(null);
+
+  const handleCloseSafely = () => {
+    clearSaleSessionAuthorizations(saleSessionIdRef.current);
+    saleSessionIdRef.current = generateSaleSessionId('EDIT');
+    setDiscountAuthPrompt(null);
+    onClose();
+  };
 
   useEffect(() => {
+    clearSaleSessionAuthorizations(saleSessionIdRef.current);
+    saleSessionIdRef.current = generateSaleSessionId('EDIT');
+    setDiscountAuthPrompt(null);
+
     if (order) {
-      setItems([...order.items]);
+      setItems(order.items.map((it) => ({ ...it })));
       setSelectedCustomerId(order.customerId || '');
       setCustomerName(order.customerName || '');
       setCustomerPhone(order.customerPhone || '');
@@ -139,47 +167,111 @@ export const EditOrderModal: React.FC<EditOrderModalProps> = ({
 
     const effPrice = StockEngine.getProductPriceForCompany(prod, targetCompanyId);
     const qty = Math.max(0.001, parseFloat(addQuantity.replace(',', '.')) || 1);
-    const price = Math.max(0, parseFloat(addUnitPrice.replace(',', '.')) || effPrice);
+    const parsedPrice = parseFloat(addUnitPrice.replace(',', '.'));
+    const price = Number.isFinite(parsedPrice) && parsedPrice >= 0 ? parsedPrice : effPrice;
 
-    // Se já estiver na lista, apenas incrementa a quantidade
     const existingIndex = items.findIndex((i) => i.productId === prod.id);
-    if (existingIndex >= 0) {
-      const updated = [...items];
-      updated[existingIndex].quantity += qty;
-      updated[existingIndex].totalPrice = updated[existingIndex].quantity * updated[existingIndex].unitPrice;
-      setItems(updated);
-    } else {
-      const newItem: OrderItem = {
-        id: 'ITEM-' + Date.now() + '-' + Math.random().toString(36).substr(2, 4),
-        productId: prod.id,
-        productCode: prod.code,
-        description: prod.description,
-        unit: prod.unit,
-        quantity: qty,
-        unitPrice: price,
-        discountPercent: 0,
-        discountValue: 0,
-        totalPrice: qty * price,
-        unitCost: prod.costPrice,
-        locationId: prod.defaultLocationId || 'loc-comercial',
-      };
-      setItems([...items, newItem]);
-    }
+    const commitAdd = (finalUnitPrice: number, authorization?: DiscountAuthorizationRecord | null) => {
+      if (existingIndex >= 0) {
+        const updated = items.map((it, idx) => {
+          if (idx !== existingIndex) return it;
+          if (
+            it.discountAuthorization?.operationId &&
+            it.discountAuthorization.operationId !== authorization?.operationId
+          ) {
+            revokeDiscountAuthorization(it.discountAuthorization.operationId);
+          }
+          const nextQty = it.quantity + qty;
+          return {
+            ...it,
+            quantity: nextQty,
+            unitPrice: finalUnitPrice,
+            referenceUnitPrice: it.referenceUnitPrice ?? effPrice,
+            totalPrice: Math.round(nextQty * finalUnitPrice * 100) / 100,
+            discountAuthorization: authorization || undefined,
+          };
+        });
+        setItems(updated);
+      } else {
+        const newItem: OrderItem = {
+          id: 'ITEM-' + Date.now() + '-' + Math.random().toString(36).substr(2, 4),
+          productId: prod.id,
+          productCode: prod.code,
+          description: prod.description,
+          unit: prod.unit,
+          quantity: qty,
+          unitPrice: finalUnitPrice,
+          referenceUnitPrice: effPrice,
+          discountPercent: 0,
+          discountValue: 0,
+          totalPrice: Math.round(qty * finalUnitPrice * 100) / 100,
+          unitCost: prod.costPrice,
+          locationId: prod.defaultLocationId || 'loc-comercial',
+          discountAuthorization: authorization || undefined,
+        };
+        setItems([...items, newItem]);
+      }
 
-    const alreadyAlertedOnSelect = lastAlertedProductIdRef.current === prod.id;
-    lastAlertedProductIdRef.current = '';
-    if (!alreadyAlertedOnSelect) {
-      const prodObsAlert = getProductSaleAlert(prod);
-      if (prodObsAlert) {
-        setSaleObservationAlerts((prev) => upsertSaleAlert(prev, prodObsAlert));
+      const alreadyAlertedOnSelect = lastAlertedProductIdRef.current === prod.id;
+      lastAlertedProductIdRef.current = '';
+      if (!alreadyAlertedOnSelect) {
+        const prodObsAlert = getProductSaleAlert(prod);
+        if (prodObsAlert) {
+          setSaleObservationAlerts((prev) => upsertSaleAlert(prev, prodObsAlert));
+        }
+      }
+
+      // Reset campos de inclusão
+      setSelectedProductId('');
+      setAddQuantity('1');
+      setAddUnitPrice('0');
+      setAddSearch('');
+    };
+
+    const resultQty = existingIndex >= 0 ? items[existingIndex].quantity + qty : qty;
+    if (prod.maxDiscountEnabled && price < effPrice) {
+      const evaluation = evaluateItemMaxDiscount({
+        product: prod,
+        companyId: targetCompanyId,
+        origin: 'edicao_pedido',
+        quantity: resultQty,
+        unitPrice: price,
+        referenceUnitPrice: effPrice,
+        existingAuthorization: null,
+        saleSessionId: saleSessionIdRef.current,
+        users: dbState.users,
+      });
+
+      if (evaluation.requiresAuthorization && evaluation.violation) {
+        setDiscountAuthPrompt({
+          violation: evaluation.violation,
+          onAuthorized: (record) => {
+            setDiscountAuthPrompt(null);
+            commitAdd(price, record);
+            toast.success(
+              `Preço reduzido autorizado por ${record.authorizerUserName} para "${prod.description}".`,
+              'Autorização Concedida'
+            );
+          },
+          onReduceToLimit: () => {
+            setDiscountAuthPrompt(null);
+            const maxUnitDiscount = resultQty > 0 ? evaluation.maxDiscountValueAllowed / resultQty : 0;
+            const minAllowedUnitPrice = Math.min(
+              effPrice,
+              Math.ceil(Math.max(0, effPrice - maxUnitDiscount) * 100) / 100
+            );
+            commitAdd(minAllowedUnitPrice, null);
+            toast.info(
+              `Preço unitário ajustado para o mínimo permitido (${formatCurrency(minAllowedUnitPrice)}).`,
+              'Preço Ajustado ao Limite'
+            );
+          },
+        });
+        return;
       }
     }
 
-    // Reset campos de inclusão
-    setSelectedProductId('');
-    setAddQuantity('1');
-    setAddUnitPrice('0');
-    setAddSearch('');
+    commitAdd(price, null);
   };
 
   const handleRemoveItem = (index: number) => {
@@ -187,23 +279,49 @@ export const EditOrderModal: React.FC<EditOrderModalProps> = ({
       alert('O pedido não pode ficar sem nenhum produto.');
       return;
     }
+    const removed = items[index];
+    if (removed?.discountAuthorization?.operationId) {
+      revokeDiscountAuthorization(removed.discountAuthorization.operationId);
+    }
     setItems(items.filter((_, idx) => idx !== index));
   };
 
   const handleUpdateItemQuantity = (index: number, newQty: number) => {
     if (newQty <= 0) return;
-    const updated = [...items];
-    updated[index].quantity = newQty;
-    updated[index].totalPrice = newQty * updated[index].unitPrice;
-    setItems(updated);
+    setItems((prev) =>
+      prev.map((it, idx) => {
+        if (idx !== index) return it;
+        if (it.discountAuthorization?.operationId && Math.abs(it.quantity - newQty) > 0.0005) {
+          revokeDiscountAuthorization(it.discountAuthorization.operationId);
+        }
+        return {
+          ...it,
+          quantity: newQty,
+          totalPrice: Math.round(newQty * it.unitPrice * 100) / 100,
+          discountAuthorization:
+            Math.abs(it.quantity - newQty) > 0.0005 ? undefined : it.discountAuthorization,
+        };
+      })
+    );
   };
 
   const handleUpdateItemPrice = (index: number, newPriceStr: string) => {
-    const val = parseFloat(newPriceStr.replace(',', '.')) || 0;
-    const updated = [...items];
-    updated[index].unitPrice = val;
-    updated[index].totalPrice = updated[index].quantity * val;
-    setItems(updated);
+    const val = Math.max(0, parseFloat(newPriceStr.replace(',', '.')) || 0);
+    setItems((prev) =>
+      prev.map((it, idx) => {
+        if (idx !== index) return it;
+        if (it.discountAuthorization?.operationId && Math.abs(it.unitPrice - val) > 0.005) {
+          revokeDiscountAuthorization(it.discountAuthorization.operationId);
+        }
+        return {
+          ...it,
+          unitPrice: val,
+          totalPrice: Math.round(it.quantity * val * 100) / 100,
+          discountAuthorization:
+            Math.abs(it.unitPrice - val) > 0.005 ? undefined : it.discountAuthorization,
+        };
+      })
+    );
   };
 
   const handleCustomerChange = (custId: string) => {
@@ -239,30 +357,44 @@ export const EditOrderModal: React.FC<EditOrderModalProps> = ({
   const effectiveDiscountPercent = subtotal > 0 ? (discountVal / subtotal) * 100 : 0;
   const finalTotal = Math.max(0, subtotal - discountVal);
 
-  const handleSave = () => {
+  const commitSaveOrder = (itemsToSave: OrderItem[], globalDiscountToSave: number) => {
     if (!order) return;
-
-    if (items.length === 0) {
-      alert('O pedido deve conter pelo menos um item.');
-      return;
-    }
-
-    if (!customerName.trim()) {
-      alert('Informe o nome do cliente.');
-      return;
-    }
-
-    if (discountVal > maxAllowedVal + 0.01) {
-      alert(
-        `Desconto não autorizado! Seu perfil permite no máximo ${maxAllowedPercent}% (${formatCurrency(maxAllowedVal)}).`
-      );
-      return;
-    }
 
     const nowIso = new Date().toISOString();
     const state = Database.getState();
+    const saveSubtotal = itemsToSave.reduce((sum, item) => sum + item.quantity * item.unitPrice, 0);
+    const saveFinalTotal = Math.max(0, saveSubtotal - globalDiscountToSave);
 
     try {
+      const targetBoletoAccount = paymentMethod === 'boleto'
+        ? Database.getBoletoAccounts().find((a) => a.id === bankAccountId) || Database.getBoletoAccounts()[0]
+        : undefined;
+
+      const updatedOrderDraft: Order = {
+        ...order,
+        customerId: selectedCustomerId || undefined,
+        customerName,
+        customerPhone: customerPhone || undefined,
+        customerCpfCnpj: customerCpfCnpj || undefined,
+        paymentMethod,
+        bankAccountId: targetBoletoAccount?.id,
+        bankAccountName: targetBoletoAccount?.name,
+        installmentsCount,
+        items: itemsToSave,
+        subtotal: saveSubtotal,
+        discountTotal: globalDiscountToSave,
+        total: saveFinalTotal,
+        notes: `${notes || ''} [Editado por ${currentUser.name} em ${new Date().toLocaleString('pt-BR')}]`,
+        updatedAt: nowIso,
+      };
+
+      // Validação obrigatória na camada de persistência antes de alterar estoque ou financeiro
+      const validatedDiscountAuths = Database.validateOrderDiscountsForPersistence(updatedOrderDraft, {
+        saleSessionId: saleSessionIdRef.current,
+        existingOrder: order,
+        globalOrderDiscountValue: globalDiscountToSave,
+      });
+
       // 1. Reajuste de Estoque (se o pedido original já baixou estoque)
       if (order.stockDeducted) {
         let currentBalances = [...state.stockBalances];
@@ -295,7 +427,7 @@ export const EditOrderModal: React.FC<EditOrderModalProps> = ({
         }
 
         // B: Aplica as novas saídas com os itens editados
-        for (const newItem of items) {
+        for (const newItem of itemsToSave) {
           const locId = newItem.locationId || 'loc-comercial';
           const loc = state.stockLocations.find((l) => l.id === locId) || state.stockLocations[0];
           const { updatedBalances, createdMovement } = StockEngine.applyMovement(currentBalances, {
@@ -325,13 +457,9 @@ export const EditOrderModal: React.FC<EditOrderModalProps> = ({
       }
 
       // 2. Reajuste de Títulos a Receber (se aplicável)
-      const targetBoletoAccount = paymentMethod === 'boleto'
-        ? Database.getBoletoAccounts().find((a) => a.id === bankAccountId) || Database.getBoletoAccounts()[0]
-        : undefined;
-
       if (state.accountsReceivable) {
         const newInstCount = Math.max(1, installmentsCount);
-        const valParcela = Number((finalTotal / newInstCount).toFixed(2));
+        const valParcela = Number((saveFinalTotal / newInstCount).toFixed(2));
 
         state.accountsReceivable = state.accountsReceivable.map((r) => {
           if (r.orderId === order.id) {
@@ -351,24 +479,16 @@ export const EditOrderModal: React.FC<EditOrderModalProps> = ({
         });
       }
 
-      // 3. Salvar Pedido com os novos dados
-      const updatedOrder: Order = {
-        ...order,
-        customerId: selectedCustomerId || undefined,
-        customerName,
-        customerPhone: customerPhone || undefined,
-        customerCpfCnpj: customerCpfCnpj || undefined,
-        paymentMethod,
-        bankAccountId: targetBoletoAccount?.id,
-        bankAccountName: targetBoletoAccount?.name,
-        installmentsCount,
-        items,
-        subtotal,
-        discountTotal: discountVal,
-        total: finalTotal,
-        notes: `${notes || ''} [Editado por ${currentUser.name} em ${new Date().toLocaleString('pt-BR')}]`,
-        updatedAt: nowIso,
-      };
+      // 3. Finalizar autorizações e salvar pedido
+      const updatedOrder = Database.finalizeOrderDiscountAuthorizations(
+        updatedOrderDraft,
+        validatedDiscountAuths,
+        {
+          saleSessionId: saleSessionIdRef.current,
+          existingOrder: order,
+          skipPersist: true,
+        }
+      );
 
       state.orders = state.orders.map((o) => (o.id === order.id ? updatedOrder : o));
       Database.persist();
@@ -377,14 +497,142 @@ export const EditOrderModal: React.FC<EditOrderModalProps> = ({
         'EDITAR_PEDIDO',
         'VENDAS',
         order.id,
-        `Pedido/Orçamento ${order.number} editado por ${currentUser.name}. Novo total: ${formatCurrency(finalTotal)}`
+        `Pedido/Orçamento ${order.number} editado por ${currentUser.name}. Novo total: ${formatCurrency(saveFinalTotal)}`
       );
 
+      saleSessionIdRef.current = generateSaleSessionId('EDIT');
       onSaved(updatedOrder);
       onClose();
     } catch (err) {
       alert('Erro ao salvar alterações do pedido: ' + (err as Error).message);
     }
+  };
+
+  const validateEditOrderAndPromptAuthorizations = (
+    itemsToCheck: OrderItem[],
+    globalDiscountToCheck: number
+  ) => {
+    if (!order) return;
+
+    const validation = validateOrderDiscounts({
+      items: itemsToCheck,
+      products: dbState.products,
+      companyId: targetCompanyId,
+      origin: 'edicao_pedido',
+      globalOrderDiscountValue: globalDiscountToCheck,
+      saleSessionId: saleSessionIdRef.current,
+      existingOrder: order,
+      users: dbState.users,
+    });
+
+    if (validation.valid) {
+      commitSaveOrder(itemsToCheck, globalDiscountToCheck);
+      return;
+    }
+
+    const totalViolations = validation.violations.length;
+    const first = validation.violations[0];
+
+    setDiscountAuthPrompt({
+      violation: first.violation,
+      queuePosition: totalViolations > 1 ? { current: 1, total: totalViolations } : undefined,
+      onAuthorized: (record) => {
+        const nextItems = itemsToCheck.map((it, idx) => {
+          if (idx !== first.itemIndex) return it;
+          if (it.discountAuthorization?.operationId && it.discountAuthorization.operationId !== record.operationId) {
+            revokeDiscountAuthorization(it.discountAuthorization.operationId);
+          }
+          return { ...it, discountAuthorization: record };
+        });
+        setItems(nextItems);
+        setDiscountAuthPrompt(null);
+        toast.success(
+          `Desconto autorizado por ${record.authorizerUserName} para "${first.violation.productDescription}".`,
+          'Autorização Concedida'
+        );
+        validateEditOrderAndPromptAuthorizations(nextItems, globalDiscountToCheck);
+      },
+      onReduceToLimit: () => {
+        const targetItem = itemsToCheck[first.itemIndex];
+        const refPrice = first.violation.referenceUnitPrice;
+        const maxValAllowed = first.violation.maxDiscountValueAllowed;
+        const maxPerUnit = targetItem.quantity > 0 ? maxValAllowed / targetItem.quantity : 0;
+
+        if (targetItem.discountAuthorization?.operationId) {
+          revokeDiscountAuthorization(targetItem.discountAuthorization.operationId);
+        }
+
+        const minUnitPriceAllowed = Math.min(
+          refPrice,
+          Math.ceil(Math.max(0, refPrice - maxPerUnit) * 100) / 100
+        );
+        const nextUnitPrice =
+          targetItem.unitPrice < minUnitPriceAllowed ? minUnitPriceAllowed : targetItem.unitPrice;
+        const manualUsedTotal = Math.max(0, (refPrice - nextUnitPrice) * targetItem.quantity);
+        const remainingAfterPrice = Math.max(0, maxValAllowed - manualUsedTotal);
+        const clampedItemDisc = Math.min(targetItem.discountValue || 0, remainingAfterPrice);
+        const grossLine = targetItem.quantity * nextUnitPrice;
+        const clampedItemPct = grossLine > 0 ? (clampedItemDisc / grossLine) * 100 : 0;
+
+        const nextItems = itemsToCheck.map((it, idx) =>
+          idx === first.itemIndex
+            ? {
+                ...it,
+                unitPrice: nextUnitPrice,
+                referenceUnitPrice: refPrice,
+                discountValue: Math.round(clampedItemDisc * 100) / 100,
+                discountPercent: Math.round(clampedItemPct * 100) / 100,
+                totalPrice: Math.max(0, Math.round((grossLine - clampedItemDisc) * 100) / 100),
+                discountAuthorization: undefined,
+              }
+            : it
+        );
+
+        if (first.violation.reason === 'desconto_global' || first.violation.reason === 'combinado') {
+          const nextSubtotal = nextItems.reduce((s, it) => s + it.totalPrice, 0);
+          const nextLineNet = nextItems[first.itemIndex].totalPrice;
+          const remainingForGlobal = Math.max(0, maxValAllowed - manualUsedTotal - clampedItemDisc);
+          const maxGlobalAllowed =
+            nextLineNet > 0 && nextSubtotal > 0
+              ? Math.floor(((remainingForGlobal * nextSubtotal) / nextLineNet) * 100) / 100
+              : 0;
+          const safeGlobal = Math.max(0, Math.min(globalDiscountToCheck, maxGlobalAllowed));
+          setDiscountType('value');
+          localStorage.setItem('omni_discount_type', 'value');
+          setDiscountInput(safeGlobal > 0 ? safeGlobal.toFixed(2).replace('.', ',') : '');
+        }
+
+        setItems(nextItems);
+        setDiscountAuthPrompt(null);
+        toast.info(
+          `Preço/desconto ajustado para o limite permitido de "${first.violation.productDescription}".`,
+          'Ajustado ao Limite'
+        );
+      },
+    });
+  };
+
+  const handleSave = () => {
+    if (!order) return;
+
+    if (items.length === 0) {
+      alert('O pedido deve conter pelo menos um item.');
+      return;
+    }
+
+    if (!customerName.trim()) {
+      alert('Informe o nome do cliente.');
+      return;
+    }
+
+    if (discountVal > maxAllowedVal + 0.01) {
+      alert(
+        `Desconto não autorizado! Seu perfil permite no máximo ${maxAllowedPercent}% (${formatCurrency(maxAllowedVal)}).`
+      );
+      return;
+    }
+
+    validateEditOrderAndPromptAuthorizations(items, discountVal);
   };
 
   if (!isOpen || !order) return null;
@@ -421,7 +669,7 @@ export const EditOrderModal: React.FC<EditOrderModalProps> = ({
 
           <button
             type="button"
-            onClick={onClose}
+            onClick={handleCloseSafely}
             className="text-slate-400 hover:text-slate-600 p-1.5 rounded-lg hover:bg-slate-200/60 cursor-pointer"
           >
             <X size={20} />
@@ -814,7 +1062,7 @@ export const EditOrderModal: React.FC<EditOrderModalProps> = ({
           <div className="flex items-center gap-2 w-full sm:w-auto justify-end">
             <button
               type="button"
-              onClick={onClose}
+              onClick={handleCloseSafely}
               className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold text-xs rounded-xl transition-colors cursor-pointer"
             >
               Cancelar
@@ -831,6 +1079,18 @@ export const EditOrderModal: React.FC<EditOrderModalProps> = ({
           </div>
         </div>
       </div>
+
+      {/* MODAL BLOQUEANTE: AUTORIZAÇÃO DE DESCONTO MÁXIMO EXCEDIDO */}
+      <DiscountAuthorizationModal
+        isOpen={Boolean(discountAuthPrompt)}
+        violation={discountAuthPrompt?.violation || null}
+        seller={currentUser}
+        saleSessionId={saleSessionIdRef.current}
+        queuePosition={discountAuthPrompt?.queuePosition}
+        onAuthorized={(record) => discountAuthPrompt?.onAuthorized(record)}
+        onReduceToLimit={discountAuthPrompt?.onReduceToLimit}
+        onCancel={() => setDiscountAuthPrompt(null)}
+      />
     </div>
   );
 };

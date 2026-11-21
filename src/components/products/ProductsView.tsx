@@ -22,14 +22,16 @@ import {
   ArrowLeftRight,
   Check,
   X,
+  ShieldAlert,
 } from 'lucide-react';
 import { Database } from '../../services/db';
-import { Product, ProductType, UnitOfMeasure, StockLocation, Company, CompanyPriceOverride } from '../../types';
+import { Product, ProductType, UnitOfMeasure, StockLocation, Company, CompanyPriceOverride, ProductMaxDiscountType } from '../../types';
 import { StockEngine } from '../../services/stockEngine';
 import { formatCurrency, formatQuantity } from '../../services/pricingEngine';
 import { ExcelService, ImportPreview } from '../../services/excelService';
 import { FirebaseSyncService } from '../../services/firebaseSync';
 import { toast } from '../../services/toast';
+import { formatProductMaxDiscountLabel } from '../../services/discountControl';
 import { SortableTh, SortConfig, toggleSortConfig, compareSortValues, compareSortText } from '../common/SortableHeader';
 
 type ProductSortKey =
@@ -154,9 +156,13 @@ export const ProductsView: React.FC = () => {
     masterPackAssociatedProductDescription: '',
     masterPackUnits: 10,
     masterPackPackagingType: 'caixa',
+    maxDiscountEnabled: false,
+    maxDiscountType: 'percent',
+    maxDiscountValue: 0,
   });
   const [costPriceInput, setCostPriceInput] = useState('0,00');
   const [salePriceInput, setSalePriceInput] = useState('0,00');
+  const [maxDiscountInput, setMaxDiscountInput] = useState('0,00');
 
   const locations = dbState.stockLocations.filter((l) => l.companyId === currentCompany.id);
 
@@ -299,9 +305,13 @@ export const ProductsView: React.FC = () => {
       masterPackAssociatedProductDescription: '',
       masterPackUnits: 10,
       masterPackPackagingType: 'caixa',
+      maxDiscountEnabled: false,
+      maxDiscountType: 'percent',
+      maxDiscountValue: 0,
     });
     setCostPriceInput(formatDecimalPtBr(0));
     setSalePriceInput(formatDecimalPtBr(0));
+    setMaxDiscountInput(formatDecimalPtBr(0));
     setIsModalOpen(true);
   };
 
@@ -336,9 +346,13 @@ export const ProductsView: React.FC = () => {
       masterPackAssociatedProductDescription: defaultAssoc?.description || '',
       masterPackUnits: 10,
       masterPackPackagingType: 'caixa',
+      maxDiscountEnabled: false,
+      maxDiscountType: 'percent',
+      maxDiscountValue: 0,
     });
     setCostPriceInput(formatDecimalPtBr(initialCost));
     setSalePriceInput(formatDecimalPtBr(initialSale));
+    setMaxDiscountInput(formatDecimalPtBr(0));
     setIsModalOpen(true);
   };
 
@@ -371,14 +385,19 @@ export const ProductsView: React.FC = () => {
       masterPackAssociatedProductDescription: product.description,
       masterPackUnits: units,
       masterPackPackagingType: 'caixa',
+      maxDiscountEnabled: false,
+      maxDiscountType: 'percent',
+      maxDiscountValue: 0,
     });
     setCostPriceInput(formatDecimalPtBr(initialCost));
     setSalePriceInput(formatDecimalPtBr(initialSale));
+    setMaxDiscountInput(formatDecimalPtBr(0));
     setIsModalOpen(true);
   };
 
   const handleOpenEdit = (product: Product) => {
     setEditingProduct(product);
+    const savedMaxDiscVal = Number(product.maxDiscountValue ?? 0);
     setFormData({
       ...product,
       referenceCode: product.referenceCode || '',
@@ -390,9 +409,13 @@ export const ProductsView: React.FC = () => {
       masterPackAssociatedProductDescription: product.masterPackAssociatedProductDescription || '',
       masterPackUnits: product.masterPackUnits || 10,
       masterPackPackagingType: product.masterPackPackagingType || 'caixa',
+      maxDiscountEnabled: !!product.maxDiscountEnabled,
+      maxDiscountType: product.maxDiscountType === 'value' ? 'value' : 'percent',
+      maxDiscountValue: Number.isFinite(savedMaxDiscVal) && savedMaxDiscVal >= 0 ? savedMaxDiscVal : 0,
     });
     setCostPriceInput(formatDecimalPtBr(Number(product.costPrice || 0)));
     setSalePriceInput(formatDecimalPtBr(Number(product.salePrice || 0)));
+    setMaxDiscountInput(formatDecimalPtBr(Number.isFinite(savedMaxDiscVal) && savedMaxDiscVal >= 0 ? savedMaxDiscVal : 0));
     setIsModalOpen(true);
   };
 
@@ -419,6 +442,33 @@ export const ProductsView: React.FC = () => {
         return;
       }
     }
+
+    // Validações do controle de desconto máximo por produto
+    const maxDiscEnabled = !!formData.maxDiscountEnabled;
+    const maxDiscType: ProductMaxDiscountType = formData.maxDiscountType === 'value' ? 'value' : 'percent';
+    const rawMaxDiscVal = Number(formData.maxDiscountValue ?? 0);
+    if (maxDiscEnabled) {
+      if (!Number.isFinite(rawMaxDiscVal) || rawMaxDiscVal < 0) {
+        alert('O Desconto Máximo Permitido deve ser um valor numérico maior ou igual a zero.');
+        return;
+      }
+      if (maxDiscType === 'percent' && rawMaxDiscVal > 100) {
+        alert('O Desconto Máximo Percentual não pode ultrapassar 100%.');
+        return;
+      }
+    }
+
+    const maxDiscountData = maxDiscEnabled
+      ? {
+          maxDiscountEnabled: true,
+          maxDiscountType: maxDiscType,
+          maxDiscountValue: Number(rawMaxDiscVal.toFixed(2)),
+        }
+      : {
+          maxDiscountEnabled: false,
+          maxDiscountType: maxDiscType,
+          maxDiscountValue: Number(Math.max(0, rawMaxDiscVal).toFixed(2)),
+        };
 
     // Verificar unicidade do código
     const existingWithCode = dbState.products.find(
@@ -451,6 +501,7 @@ export const ProductsView: React.FC = () => {
               ...p,
               ...formData,
               ...masterPackData,
+              ...maxDiscountData,
               referenceCode: (formData.referenceCode || '').trim(),
               costPrice: Number(formData.costPrice || 0),
               salePrice: Number(formData.salePrice || 0),
@@ -483,6 +534,7 @@ export const ProductsView: React.FC = () => {
         showSaleAlert: !!formData.showSaleAlert,
         companyPrices: formData.companyPrices || {},
         ...masterPackData,
+        ...maxDiscountData,
       };
       state.products.unshift(newProd);
 
@@ -1024,6 +1076,15 @@ export const ProductsView: React.FC = () => {
                               Aviso na venda
                             </span>
                           )}
+                          {p.maxDiscountEnabled && (
+                            <span
+                              title={`Controle de desconto máximo ativo: ${formatProductMaxDiscountLabel(p)} (acima disso exige autorização de Administrador ou Gerente Geral)`}
+                              className="inline-flex items-center gap-1 text-[10px] bg-rose-50 text-rose-800 font-bold px-1.5 py-0.5 rounded-full border border-rose-300"
+                            >
+                              <ShieldAlert size={11} className="text-rose-600" />
+                              Desc. máx: {formatProductMaxDiscountLabel(p)}
+                            </span>
+                          )}
                           {p.isMasterPack && (
                             <span className="inline-flex items-center gap-1 text-[10px] bg-amber-100 text-amber-900 font-extrabold px-2 py-0.5 rounded-full border border-amber-300 shadow-2xs">
                               <Boxes size={12} className="text-amber-700" />
@@ -1523,6 +1584,149 @@ export const ProductsView: React.FC = () => {
                     </tbody>
                   </table>
                 </div>
+              </div>
+
+              {/* SEÇÃO ESPECIAL: CONTROLE DE DESCONTO MÁXIMO POR PRODUTO */}
+              <div className="sm:col-span-3 bg-gradient-to-br from-rose-50/70 via-white to-rose-50/40 border border-rose-200 rounded-xl p-4 space-y-3 shadow-2xs">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-2 border-b border-rose-100">
+                  <div className="flex items-center gap-2.5">
+                    <div className="w-8 h-8 rounded-lg bg-rose-600 text-white flex items-center justify-center shrink-0 shadow-xs">
+                      <ShieldAlert size={18} />
+                    </div>
+                    <div>
+                      <h4 className="text-xs font-black text-rose-950 uppercase tracking-wide">
+                        Controlar Desconto Máximo
+                      </h4>
+                      <p className="text-[11px] text-slate-600">
+                        Proteja a margem deste produto exigindo autorização de Administrador (Acesso Total) ou Gerente Geral quando o desconto ultrapassar o limite.
+                      </p>
+                    </div>
+                  </div>
+
+                  <label className="flex items-center gap-2 cursor-pointer bg-white px-3 py-1.5 rounded-lg border border-rose-300 shadow-2xs hover:bg-rose-50 transition-colors shrink-0">
+                    <input
+                      type="checkbox"
+                      checked={!!formData.maxDiscountEnabled}
+                      onChange={(e) => {
+                        const checked = e.target.checked;
+                        setFormData({
+                          ...formData,
+                          maxDiscountEnabled: checked,
+                          maxDiscountType: formData.maxDiscountType || 'percent',
+                          maxDiscountValue: formData.maxDiscountValue ?? 0,
+                        });
+                      }}
+                      className="w-4 h-4 text-rose-600 rounded accent-rose-600 cursor-pointer"
+                    />
+                    <span className="text-xs font-bold text-rose-950 select-none">
+                      {formData.maxDiscountEnabled ? '✓ Controle Ativado' : 'Ativar Controle'}
+                    </span>
+                  </label>
+                </div>
+
+                {formData.maxDiscountEnabled ? (
+                  <div className="space-y-2.5">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <div>
+                        <label className="block font-bold text-slate-700 mb-1">
+                          Tipo de limite *
+                        </label>
+                        <select
+                          value={formData.maxDiscountType || 'percent'}
+                          onChange={(e) => {
+                            const nextType = e.target.value as ProductMaxDiscountType;
+                            const currentVal = Number(formData.maxDiscountValue ?? 0);
+                            const adjustedVal = nextType === 'percent' && currentVal > 100 ? 100 : currentVal;
+                            setFormData({
+                              ...formData,
+                              maxDiscountType: nextType,
+                              maxDiscountValue: adjustedVal,
+                            });
+                            setMaxDiscountInput(formatDecimalPtBr(adjustedVal));
+                          }}
+                          className="w-full px-3 py-2 bg-white border border-rose-300 rounded-lg text-xs font-bold text-slate-800 focus:outline-hidden focus:ring-2 focus:ring-rose-500"
+                        >
+                          <option value="percent">Percentual (%)</option>
+                          <option value="value">Valor monetário (R$)</option>
+                        </select>
+                      </div>
+
+                      <div>
+                        <label className="block font-bold text-slate-700 mb-1">
+                          Desconto máximo permitido ({formData.maxDiscountType === 'value' ? 'R$ por unidade' : '%'}) *
+                        </label>
+                        <div className="relative">
+                          {formData.maxDiscountType === 'value' && (
+                            <span className="absolute left-3 top-2 text-xs font-bold text-slate-500">R$</span>
+                          )}
+                          <input
+                            type="text"
+                            inputMode="decimal"
+                            placeholder="0,00"
+                            value={maxDiscountInput}
+                            onFocus={(e) => {
+                              setMaxDiscountInput(formatEditableDecimalPtBr(Number(formData.maxDiscountValue ?? 0)));
+                              const input = e.currentTarget;
+                              requestAnimationFrame(() => input.select());
+                            }}
+                            onChange={(e) => {
+                              const sanitized = sanitizeCurrencyInput(e.target.value);
+                              const numeric = parseDecimalPtBr(sanitized);
+                              const capped = formData.maxDiscountType === 'percent' ? Math.min(100, numeric) : numeric;
+                              setMaxDiscountInput(sanitized);
+                              setFormData({ ...formData, maxDiscountValue: capped });
+                            }}
+                            onBlur={() => {
+                              const numeric = parseDecimalPtBr(maxDiscountInput);
+                              const capped = formData.maxDiscountType === 'percent' ? Math.min(100, numeric) : numeric;
+                              setFormData({ ...formData, maxDiscountValue: capped });
+                              setMaxDiscountInput(formatDecimalPtBr(capped));
+                            }}
+                            className={`w-full py-2 bg-white border border-rose-300 rounded-lg font-mono font-extrabold text-rose-900 focus:outline-hidden focus:ring-2 focus:ring-rose-500 ${
+                              formData.maxDiscountType === 'value' ? 'pl-9 pr-3' : 'pl-3 pr-8'
+                            }`}
+                          />
+                          {formData.maxDiscountType !== 'value' && (
+                            <span className="absolute right-3 top-2 text-xs font-bold text-slate-500">%</span>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Prévia explicativa do limite configurado */}
+                    {(() => {
+                      const salePrice = Number(formData.salePrice || 0);
+                      const limVal = Number(formData.maxDiscountValue ?? 0);
+                      if (limVal <= 0) {
+                        return (
+                          <div className="text-[11px] font-bold text-rose-900 bg-rose-100/70 border border-rose-200 rounded-lg px-3 py-2">
+                            Limite definido em 0{formData.maxDiscountType === 'value' ? ' (R$ 0,00)' : '%'}: nenhum desconto poderá ser concedido neste produto sem autorização de Administrador ou Gerente Geral.
+                          </div>
+                        );
+                      }
+                      if (formData.maxDiscountType === 'value') {
+                        const eqPct = salePrice > 0 ? (limVal / salePrice) * 100 : 0;
+                        return (
+                          <div className="text-[11px] font-semibold text-slate-700 bg-white border border-slate-200 rounded-lg px-3 py-2">
+                            Descontos até <strong className="text-emerald-700">{formatCurrency(limVal)}</strong> por {formData.unit || 'UN'}
+                            {salePrice > 0 ? ` (equivalente a ${eqPct.toFixed(2)}% sobre ${formatCurrency(salePrice)})` : ''} serão liberados normalmente. Acima disso exigirá autorização.
+                          </div>
+                        );
+                      }
+                      const eqVal = (salePrice * limVal) / 100;
+                      return (
+                        <div className="text-[11px] font-semibold text-slate-700 bg-white border border-slate-200 rounded-lg px-3 py-2">
+                          Descontos até <strong className="text-emerald-700">{limVal.toLocaleString('pt-BR', { maximumFractionDigits: 2 })}%</strong>
+                          {salePrice > 0 ? ` (equivalente a ${formatCurrency(eqVal)} sobre ${formatCurrency(salePrice)})` : ''} serão liberados normalmente. Acima disso exigirá autorização.
+                        </div>
+                      );
+                    })()}
+                  </div>
+                ) : (
+                  <p className="text-[11px] text-slate-500">
+                    Controle desativado: este produto seguirá o comportamento padrão do sistema, sem limite individual de desconto.
+                  </p>
+                )}
               </div>
 
               {/* SEÇÃO ESPECIAL: RECURSO EMBALAGEM MASTER */}

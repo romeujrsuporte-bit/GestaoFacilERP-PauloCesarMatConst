@@ -56,8 +56,14 @@ import {
   CustomerVoucher,
   CustomerVoucherOrigin,
   CustomerVoucherUsage,
+  DiscountAuthorizationRecord,
 } from '../types';
 import { DEFAULT_CHART_OF_ACCOUNTS } from './defaultChartOfAccounts';
+import {
+  clearSaleSessionAuthorizations,
+  formatDiscountAuthorizationAuditDetails,
+  validateOrderDiscounts,
+} from './discountControl';
 
 export const DEFAULT_STOCK_CONTROL_CONFIG: StockControlConfig = {
   enableStockControl: true,
@@ -5136,6 +5142,158 @@ export class Database {
     if (!skipPersist) {
       this.persist();
     }
+  }
+
+  /**
+   * Validação obrigatória na camada de persistência para garantir que nenhum pedido/venda
+   * seja salvo com desconto (no item, geral ou por alteração manual de preço) acima do limite
+   * configurado no cadastro do produto sem autorização válida de Administrador ou Gerente Geral.
+   */
+  public static validateOrderDiscountsForPersistence(
+    order: Order,
+    options?: {
+      saleSessionId?: string;
+      existingOrder?: Order | null;
+      globalOrderDiscountValue?: number;
+    }
+  ): DiscountAuthorizationRecord[] {
+    const s = this.getState();
+    const itemDiscountsSum = (order.items || []).reduce((sum, i) => sum + (i.discountValue || 0), 0);
+    const inferredGlobalDiscount =
+      options?.globalOrderDiscountValue !== undefined
+        ? Math.max(0, options.globalOrderDiscountValue)
+        : Math.max(0, (order.discountTotal || 0) - itemDiscountsSum);
+
+    const validation = validateOrderDiscounts({
+      items: order.items || [],
+      products: s.products || [],
+      companyId: order.companyId || this.getCurrentCompany()?.id || 'comp-matriz',
+      origin: options?.existingOrder ? 'edicao_pedido' : order.origin,
+      globalOrderDiscountValue: inferredGlobalDiscount,
+      saleSessionId: options?.saleSessionId,
+      existingOrder: options?.existingOrder || null,
+      users: s.users || [],
+    });
+
+    if (!validation.valid) {
+      const first = validation.violations[0]?.violation;
+      throw new Error(
+        first
+          ? `Desconto acima do limite permitido para o produto [${first.productCode}] ${first.productDescription} sem autorização válida de Administrador (Acesso Total) ou Gerente Geral.`
+          : 'Existem itens com desconto acima do limite máximo permitido sem autorização válida.'
+      );
+    }
+
+    return validation.validAuthorizations.map((auth) => ({
+      ...auth,
+      orderId: order.id,
+      orderNumber: order.number,
+    }));
+  }
+
+  /**
+   * Vincula as autorizações validadas ao pedido persistido, grava os registros de auditoria
+   * (sem senhas ou dados sensíveis) e encerra o escopo da sessão para impedir reutilização.
+   */
+  public static finalizeOrderDiscountAuthorizations(
+    order: Order,
+    validatedAuthorizations: DiscountAuthorizationRecord[],
+    options?: {
+      saleSessionId?: string;
+      existingOrder?: Order | null;
+      skipPersist?: boolean;
+    }
+  ): Order {
+    const byProductId = new Map<string, DiscountAuthorizationRecord>();
+    validatedAuthorizations.forEach((auth) => {
+      byProductId.set(auth.productId, {
+        ...auth,
+        orderId: order.id,
+        orderNumber: order.number,
+      });
+    });
+
+    const enrichedItems = (order.items || []).map((item) => {
+      const matched = byProductId.get(item.productId);
+      if (matched) {
+        return { ...item, discountAuthorization: matched };
+      }
+      // Se o desconto do item foi reduzido para dentro do limite, remove autorização obsoleta
+      if (item.discountAuthorization) {
+        const { discountAuthorization: _removed, ...rest } = item;
+        return rest;
+      }
+      return item;
+    });
+
+    const finalAuthorizations = Array.from(byProductId.values());
+    const enrichedOrder: Order = {
+      ...order,
+      items: enrichedItems,
+      ...(finalAuthorizations.length > 0 ? { discountAuthorizations: finalAuthorizations } : { discountAuthorizations: undefined }),
+    };
+
+    const alreadyLoggedOpIds = new Set(
+      (options?.existingOrder?.discountAuthorizations || []).map((a) => a.operationId)
+    );
+
+    finalAuthorizations.forEach((auth) => {
+      if (!alreadyLoggedOpIds.has(auth.operationId)) {
+        this.addAuditLog(
+          'AUTORIZACAO_DESCONTO_MAXIMO',
+          'VENDAS',
+          order.id,
+          formatDiscountAuthorizationAuditDetails(auth),
+          true
+        );
+      }
+    });
+
+    if (options?.saleSessionId) {
+      clearSaleSessionAuthorizations(options.saleSessionId);
+    }
+
+    if (!options?.skipPersist) {
+      this.persist();
+    }
+
+    return enrichedOrder;
+  }
+
+  /**
+   * Retorna todo o histórico consolidado de autorizações de desconto excedente
+   * registradas nas vendas e pedidos para consulta administrativa e auditoria.
+   */
+  public static getAllDiscountAuthorizations(): DiscountAuthorizationRecord[] {
+    const s = this.getState();
+    const list: DiscountAuthorizationRecord[] = [];
+    const seen = new Set<string>();
+
+    (s.orders || []).forEach((ord) => {
+      const fromOrder = ord.discountAuthorizations || [];
+      fromOrder.forEach((rec) => {
+        if (!rec || !rec.operationId || seen.has(rec.operationId)) return;
+        seen.add(rec.operationId);
+        list.push({
+          ...rec,
+          orderId: rec.orderId || ord.id,
+          orderNumber: rec.orderNumber || ord.number,
+        });
+      });
+
+      (ord.items || []).forEach((it) => {
+        const rec = it.discountAuthorization;
+        if (!rec || !rec.operationId || seen.has(rec.operationId)) return;
+        seen.add(rec.operationId);
+        list.push({
+          ...rec,
+          orderId: rec.orderId || ord.id,
+          orderNumber: rec.orderNumber || ord.number,
+        });
+      });
+    });
+
+    return list.sort((a, b) => Date.parse(b.authorizedAt || '') - Date.parse(a.authorizedAt || ''));
   }
 
   public static getPrinterConfig(): ThermalPrinterConfig {
