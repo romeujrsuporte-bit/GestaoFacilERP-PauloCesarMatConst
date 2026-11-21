@@ -46,6 +46,7 @@ import {
   Unlock,
   Trash2,
   Mail,
+  Tag,
 } from 'lucide-react';
 import {
   Database,
@@ -55,6 +56,7 @@ import {
 } from '../../services/db';
 import { Company, User, UserRole, SidebarMenuConfig } from '../../types';
 import { ThermalPrinterSettings } from './ThermalPrinterSettings';
+import { ProductLabelsView } from './ProductLabelsView';
 import { DataCleanupView } from './DataCleanupView';
 import { ChangePasswordModal } from '../auth/ChangePasswordModal';
 import { formatCurrency } from '../../services/pricingEngine';
@@ -72,7 +74,7 @@ import {
 import { processLogoFile } from '../../services/imageUtils';
 
 interface SettingsViewProps {
-  initialTab?: 'empresas' | 'usuarios' | 'impressora' | 'preferencias' | 'menus' | 'auditoria' | 'backup' | 'limpeza';
+  initialTab?: 'empresas' | 'usuarios' | 'impressora' | 'etiquetas' | 'preferencias' | 'menus' | 'auditoria' | 'backup' | 'limpeza';
 }
 
 export interface MenuCatalogItem {
@@ -258,7 +260,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ initialTab = 'empres
   const fallbackAllowedTab = canManageSettings ? 'empresas' : 'preferencias';
   const initialAllowedTab = isRestrictedTab(initialTab) ? fallbackAllowedTab : initialTab;
 
-  const [activeTab, setActiveTab] = useState<'empresas' | 'usuarios' | 'impressora' | 'preferencias' | 'menus' | 'supabase' | 'auditoria' | 'backup' | 'limpeza'>(initialAllowedTab);
+  const [activeTab, setActiveTab] = useState<'empresas' | 'usuarios' | 'impressora' | 'etiquetas' | 'preferencias' | 'menus' | 'supabase' | 'auditoria' | 'backup' | 'limpeza'>(initialAllowedTab);
 
   useEffect(() => {
     if (isRestrictedTab(initialTab)) {
@@ -1162,6 +1164,15 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ initialTab = 'empres
             <span>Configuração de Impressão</span>
           </button>
           <button
+            onClick={() => setActiveTab('etiquetas')}
+            className={`px-3 py-1.5 rounded-lg transition-colors flex items-center gap-1.5 ${
+              activeTab === 'etiquetas' ? 'bg-white text-blue-700 shadow-xs' : 'text-slate-600 hover:text-slate-900'
+            }`}
+          >
+            <Tag size={14} />
+            <span>Etiquetas de Produtos</span>
+          </button>
+          <button
             onClick={() => setActiveTab('preferencias')}
             className={`px-3 py-1.5 rounded-lg transition-colors flex items-center gap-1.5 ${
               activeTab === 'preferencias' ? 'bg-white text-blue-700 shadow-xs' : 'text-slate-600 hover:text-slate-900'
@@ -1991,6 +2002,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ initialTab = 'empres
 
       {/* ABA 5: CONFIGURAÇÃO DA IMPRESSORA TÉRMICA */}
       {activeTab === 'impressora' && <ThermalPrinterSettings />}
+
+      {activeTab === 'etiquetas' && <ProductLabelsView />}
 
       {/* ABA 6: PREFERÊNCIAS DO SISTEMA & ALERTAS */}
       {activeTab === 'preferencias' && (() => {

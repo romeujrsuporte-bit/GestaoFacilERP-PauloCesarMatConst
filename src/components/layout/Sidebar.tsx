@@ -30,6 +30,7 @@ import {
   ChevronRight,
   FolderOpen,
   LogOut,
+  Tag,
 } from 'lucide-react';
 import { Database } from '../../services/db';
 import { toast } from '../../services/toast';
@@ -49,6 +50,7 @@ interface SubMenuItem {
   id: string;
   label: string;
   shortcut?: string;
+  icon?: React.ReactNode;
 }
 
 interface MenuGroupItem {
@@ -253,6 +255,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
         { id: 'settings_menus', label: 'Menus do Sistema' },
         { id: 'settings_preferences', label: 'Preferências & Alertas' },
         { id: 'settings_printer', label: 'Configuração de Impressão' },
+        { id: 'settings_labels', label: 'Etiquetas de Produtos', icon: <Tag size={12} /> },
         { id: 'settings_cleanup', label: 'Limpeza de Dados' },
       ],
     },
@@ -294,7 +297,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
             return false;
           }
           // Permissão granular do submenu definida pelo admin para este usuário
-          if (!isAdmin && !Database.isSubItemAllowedForCurrentUser(sub.id)) {
+          const permSubId = sub.id === 'settings_labels' ? 'settings_printer' : sub.id;
+          if (!isAdmin && !Database.isSubItemAllowedForCurrentUser(permSubId)) {
             return false;
           }
           return true;
@@ -511,9 +515,15 @@ export const Sidebar: React.FC<SidebarProps> = ({
                             }`}
                           >
                             <div className="flex items-center gap-1.5 truncate">
-                              <span className={isSubActive ? 'text-emerald-400 font-bold' : 'text-zinc-600'}>
-                                {isSubActive ? '•' : '◦'}
-                              </span>
+                              {sub.icon ? (
+                                <span className={isSubActive ? 'text-emerald-400 shrink-0' : 'text-zinc-500 shrink-0'}>
+                                  {sub.icon}
+                                </span>
+                              ) : (
+                                <span className={isSubActive ? 'text-emerald-400 font-bold' : 'text-zinc-600'}>
+                                  {isSubActive ? '•' : '◦'}
+                                </span>
+                              )}
                               <span className="truncate">{sub.label}</span>
                             </div>
 

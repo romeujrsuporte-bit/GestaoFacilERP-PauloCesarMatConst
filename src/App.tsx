@@ -642,7 +642,12 @@ export default function App() {
         );
       }
 
-      const permModule = currentModule === 'orders_history_profit' ? 'orders_history' : currentModule;
+      const permModule =
+        currentModule === 'orders_history_profit'
+          ? 'orders_history'
+          : currentModule === 'settings_labels'
+          ? 'settings_printer'
+          : currentModule;
       const isAllowedSub = Database.isSubItemAllowedForCurrentUser(permModule);
       const isAllowedSec = Database.isMenuSectionAllowedForCurrentUser(permModule);
       if ((!isAllowedSub && !isAllowedSec && currentModule !== 'dashboard') || (currentModule === 'orders_history_profit' && !Database.canCurrentUserView('grossProfit'))) {
@@ -828,6 +833,8 @@ export default function App() {
         return <SettingsView initialTab="menus" />;
       case 'settings_printer':
         return <SettingsView initialTab="impressora" />;
+      case 'settings_labels':
+        return <SettingsView initialTab="etiquetas" />;
       case 'settings_preferences':
         return <SettingsView initialTab="preferencias" />;
       case 'settings_cleanup':
