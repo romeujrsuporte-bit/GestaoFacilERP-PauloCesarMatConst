@@ -21,6 +21,50 @@ export function toggleSortConfig<K extends string>(prev: SortConfig<K>, key: K):
   };
 }
 
+const ptBrBaseCollator =
+  typeof Intl !== 'undefined' && typeof Intl.Collator === 'function'
+    ? new Intl.Collator('pt-BR', { numeric: true, sensitivity: 'base' })
+    : null;
+
+const ptBrVariantCollator =
+  typeof Intl !== 'undefined' && typeof Intl.Collator === 'function'
+    ? new Intl.Collator('pt-BR', { numeric: true, sensitivity: 'variant' })
+    : null;
+
+export function normalizeSortText(value: string | number | null | undefined): string {
+  if (value === null || value === undefined) return '';
+  return String(value)
+    .replace(/[\u0000-\u001F\u007F\u200B-\u200F\u202A-\u202E\u2060\uFEFF]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+export function compareSortText(
+  a: string | number | null | undefined,
+  b: string | number | null | undefined,
+  direction: SortDirection
+): number {
+  const strA = normalizeSortText(a);
+  const strB = normalizeSortText(b);
+
+  const emptyA = strA.length === 0;
+  const emptyB = strB.length === 0;
+  if (emptyA && emptyB) return 0;
+  if (emptyA) return 1;
+  if (emptyB) return -1;
+
+  const factor = direction === 'asc' ? 1 : -1;
+  const baseCmp = ptBrBaseCollator
+    ? ptBrBaseCollator.compare(strA, strB)
+    : strA.localeCompare(strB, 'pt-BR', { numeric: true, sensitivity: 'base' });
+  if (baseCmp !== 0) return baseCmp * factor;
+
+  const variantCmp = ptBrVariantCollator
+    ? ptBrVariantCollator.compare(strA, strB)
+    : strA.localeCompare(strB, 'pt-BR', { numeric: true, sensitivity: 'variant' });
+  return variantCmp * factor;
+}
+
 export function compareSortValues(
   a: string | number | null | undefined,
   b: string | number | null | undefined,
@@ -34,9 +78,7 @@ export function compareSortValues(
     return (safeA - safeB) * factor;
   }
 
-  const strA = String(a ?? '').trim();
-  const strB = String(b ?? '').trim();
-  return strA.localeCompare(strB, 'pt-BR', { numeric: true, sensitivity: 'base' }) * factor;
+  return compareSortText(a, b, direction);
 }
 
 export function parseSortableDate(value?: string | null): number {

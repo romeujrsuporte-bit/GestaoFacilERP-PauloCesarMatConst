@@ -199,7 +199,7 @@ export const ExcelToolsView: React.FC<{ onNavigateHome?: () => void }> = ({ onNa
     if (importType === 'produtos') {
       const validProds = parsedPreview.validRows as (Partial<Product> & { targetCompanyId?: string; targetCompanyName?: string })[];
 
-      validProds.forEach((prodData) => {
+      validProds.forEach((prodData, importIdx) => {
         const existingIdx = state.products.findIndex((p) => p.code.toUpperCase() === prodData.code?.toUpperCase());
 
         if (existingIdx >= 0) {
@@ -236,7 +236,7 @@ export const ExcelToolsView: React.FC<{ onNavigateHome?: () => void }> = ({ onNa
         } else {
           // Inserir novo produto centralizado
           const newProd: Product = {
-            id: 'PROD-' + Date.now() + '-' + Math.random().toString(36).substring(2, 5),
+            id: 'PROD-' + Date.now() + '-' + importIdx + '-' + Math.random().toString(36).substring(2, 10),
             code: prodData.code!,
             referenceCode: prodData.referenceCode || '',
             description: prodData.description!,

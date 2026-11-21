@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import {
   Package,
   Search,
@@ -29,7 +29,7 @@ import { formatCurrency, formatQuantity } from '../../services/pricingEngine';
 import { ExcelService, ImportPreview } from '../../services/excelService';
 import { FirebaseSyncService } from '../../services/firebaseSync';
 import { toast } from '../../services/toast';
-import { SortableTh, SortConfig, toggleSortConfig, compareSortValues } from '../common/SortableHeader';
+import { SortableTh, SortConfig, toggleSortConfig, compareSortValues, compareSortText } from '../common/SortableHeader';
 
 type ProductSortKey =
   | 'code'
@@ -100,9 +100,13 @@ export const ProductsView: React.FC = () => {
   const [selectedStatus, setSelectedStatus] = useState('todos');
   const [selectedMasterPackFilter, setSelectedMasterPackFilter] = useState<'todos' | 'master_only' | 'unit_only'>('todos');
   const [sortConfig, setSortConfig] = useState<SortConfig<ProductSortKey>>({ key: null, direction: 'asc' });
+  const tableScrollRef = useRef<HTMLDivElement | null>(null);
 
   const handleSort = (key: ProductSortKey) => {
     setSortConfig((prev) => toggleSortConfig(prev, key));
+    if (tableScrollRef.current) {
+      tableScrollRef.current.scrollTop = 0;
+    }
   };
 
   // Modal de Cadastro / Edição
@@ -162,14 +166,15 @@ export const ProductsView: React.FC = () => {
   );
 
   const filteredProducts = dbState.products.filter((p) => {
+    const normalizedSearch = searchTerm.toLowerCase();
     const matchesSearch =
       searchTerm === '' ||
-      p.description.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      p.code.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      (p.referenceCode && p.referenceCode.toLowerCase().includes(searchTerm.toLowerCase())) ||
-      p.barcode.includes(searchTerm) ||
-      (p.masterPackAssociatedProductCode && p.masterPackAssociatedProductCode.toLowerCase().includes(searchTerm.toLowerCase())) ||
-      (p.masterPackAssociatedProductDescription && p.masterPackAssociatedProductDescription.toLowerCase().includes(searchTerm.toLowerCase()));
+      String(p.description ?? '').toLowerCase().includes(normalizedSearch) ||
+      String(p.code ?? '').toLowerCase().includes(normalizedSearch) ||
+      (p.referenceCode && String(p.referenceCode).toLowerCase().includes(normalizedSearch)) ||
+      String(p.barcode ?? '').includes(searchTerm) ||
+      (p.masterPackAssociatedProductCode && String(p.masterPackAssociatedProductCode).toLowerCase().includes(normalizedSearch)) ||
+      (p.masterPackAssociatedProductDescription && String(p.masterPackAssociatedProductDescription).toLowerCase().includes(normalizedSearch));
     const matchesFamily = selectedFamily === 'todos' || p.family === selectedFamily;
     const matchesType = selectedType === 'todos' || p.productType === selectedType;
     const matchesStatus = selectedStatus === 'todos' || p.status === selectedStatus;
@@ -185,35 +190,53 @@ export const ProductsView: React.FC = () => {
     const key = sortConfig.key;
     const dir = sortConfig.direction;
 
+    const priceCache =
+      key === 'salePrice'
+        ? new Map(filteredProducts.map((p) => [p, StockEngine.getProductPriceForCompany(p, currentCompany.id)]))
+        : null;
+    const stockCache =
+      key === 'stock'
+        ? new Map(
+            filteredProducts.map((p) => [
+              p,
+              StockEngine.getCompanyProductStock(dbState.stockBalances, p.id, currentCompany.id, dbState.stockLocations)
+                .available,
+            ])
+          )
+        : null;
+
     return [...filteredProducts].sort((a, b) => {
+      let primary = 0;
       switch (key) {
         case 'code':
-          return compareSortValues(a.code, b.code, dir);
+          primary = compareSortText(a.code, b.code, dir);
+          return primary || compareSortText(a.description, b.description, dir) || compareSortText(a.id, b.id, dir);
         case 'description':
-          return compareSortValues(a.description, b.description, dir);
+          primary = compareSortText(a.description, b.description, dir);
+          return primary || compareSortText(a.code, b.code, dir) || compareSortText(a.id, b.id, dir);
         case 'productType':
-          return compareSortValues(a.productType, b.productType, dir);
+          primary = compareSortText(a.productType, b.productType, dir);
+          break;
         case 'familyGroup':
-          return compareSortValues(`${a.family || ''} / ${a.group || ''}`, `${b.family || ''} / ${b.group || ''}`, dir);
+          primary = compareSortText(`${a.family || ''} / ${a.group || ''}`, `${b.family || ''} / ${b.group || ''}`, dir);
+          break;
         case 'costPrice':
-          return compareSortValues(canViewCosts ? a.costPrice : 0, canViewCosts ? b.costPrice : 0, dir);
+          primary = compareSortValues(canViewCosts ? Number(a.costPrice || 0) : 0, canViewCosts ? Number(b.costPrice || 0) : 0, dir);
+          break;
         case 'salePrice':
-          return compareSortValues(
-            StockEngine.getProductPriceForCompany(a, currentCompany.id),
-            StockEngine.getProductPriceForCompany(b, currentCompany.id),
-            dir
-          );
+          primary = compareSortValues(priceCache?.get(a) ?? 0, priceCache?.get(b) ?? 0, dir);
+          break;
         case 'stock':
-          return compareSortValues(
-            StockEngine.getCompanyProductStock(dbState.stockBalances, a.id, currentCompany.id, dbState.stockLocations).available,
-            StockEngine.getCompanyProductStock(dbState.stockBalances, b.id, currentCompany.id, dbState.stockLocations).available,
-            dir
-          );
+          primary = compareSortValues(stockCache?.get(a) ?? 0, stockCache?.get(b) ?? 0, dir);
+          break;
         case 'status':
-          return compareSortValues(a.status, b.status, dir);
+          primary = compareSortText(a.status, b.status, dir);
+          break;
         default:
           return 0;
       }
+
+      return primary || compareSortText(a.description, b.description, 'asc') || compareSortText(a.code, b.code, 'asc');
     });
   }, [filteredProducts, sortConfig, canViewCosts, currentCompany.id, dbState.stockBalances, dbState.stockLocations]);
 
@@ -401,7 +424,7 @@ export const ProductsView: React.FC = () => {
     } else {
       // Criar novo produto
       const newProd: Product = {
-        id: 'PROD-' + Date.now(),
+        id: 'PROD-' + Date.now() + '-' + Math.random().toString(36).substring(2, 8),
         code: formData.code!.trim(),
         referenceCode: (formData.referenceCode || '').trim(),
         description: formData.description!.trim(),
@@ -543,7 +566,7 @@ export const ProductsView: React.FC = () => {
     const state = Database.getState();
     const validProds = importPreview.validRows;
 
-    validProds.forEach((prodData) => {
+    validProds.forEach((prodData, importIdx) => {
       const existingIdx = state.products.findIndex((p) => p.code.toUpperCase() === prodData.code?.toUpperCase());
 
       if (existingIdx >= 0 && importMode === 'insert_update') {
@@ -559,7 +582,7 @@ export const ProductsView: React.FC = () => {
         } as Product;
       } else if (existingIdx < 0) {
         const newProd: Product = {
-          id: 'PROD-' + Date.now() + '-' + Math.random().toString(36).substring(2, 5),
+          id: 'PROD-' + Date.now() + '-' + importIdx + '-' + Math.random().toString(36).substring(2, 10),
           code: prodData.code!,
           referenceCode: prodData.referenceCode || '',
           description: prodData.description!,
@@ -829,7 +852,7 @@ export const ProductsView: React.FC = () => {
 
       {/* Tabela de Produtos */}
       <div className="flex-1 min-h-0 flex flex-col bg-white rounded-xl border border-slate-200 shadow-xs overflow-hidden">
-        <div className="flex-1 min-h-[300px] overflow-auto">
+        <div ref={tableScrollRef} className="flex-1 min-h-[300px] overflow-auto">
           <table className="w-full text-left text-xs">
             <thead className="sticky top-0 z-10 bg-slate-50 border-b border-slate-200 text-slate-600 font-bold uppercase text-[10px] tracking-wider shadow-[0_1px_0_0_rgba(226,232,240,1)]">
               <tr>
@@ -866,22 +889,29 @@ export const ProductsView: React.FC = () => {
                   </td>
                 </tr>
               ) : (
-                sortedProducts.map((p) => {
-                  const companyStock = StockEngine.getCompanyProductStock(
-                    dbState.stockBalances,
-                    p.id,
-                    currentCompany.id,
-                    dbState.stockLocations
-                  );
-                  const totalConsolidated = StockEngine.getTotalProductStock(dbState.stockBalances, p.id);
-                  const isLow = companyStock.available <= p.minStock;
+                (() => {
+                  const seenRowKeys = new Map<string, number>();
+                  return sortedProducts.map((p) => {
+                    const baseRowKey = `${p.id || 'no-id'}::${p.code || 'no-code'}`;
+                    const occurrence = seenRowKeys.get(baseRowKey) ?? 0;
+                    seenRowKeys.set(baseRowKey, occurrence + 1);
+                    const rowKey = occurrence === 0 ? baseRowKey : `${baseRowKey}::${occurrence}`;
 
-                  const companyPrice = StockEngine.getProductPriceForCompany(p, currentCompany.id);
-                  const isMatriz = currentCompany.type === 'matriz';
-                  const hasCustomPrice = !isMatriz && !!(p.companyPrices && p.companyPrices[currentCompany.id]?.salePrice);
+                    const companyStock = StockEngine.getCompanyProductStock(
+                      dbState.stockBalances,
+                      p.id,
+                      currentCompany.id,
+                      dbState.stockLocations
+                    );
+                    const totalConsolidated = StockEngine.getTotalProductStock(dbState.stockBalances, p.id);
+                    const isLow = companyStock.available <= p.minStock;
 
-                  return (
-                    <tr key={p.id} className="hover:bg-slate-50/80 transition-colors">
+                    const companyPrice = StockEngine.getProductPriceForCompany(p, currentCompany.id);
+                    const isMatriz = currentCompany.type === 'matriz';
+                    const hasCustomPrice = !isMatriz && !!(p.companyPrices && p.companyPrices[currentCompany.id]?.salePrice);
+
+                    return (
+                      <tr key={rowKey} className="hover:bg-slate-50/80 transition-colors">
                       <td className="p-3 font-mono font-bold text-blue-700">{p.code}</td>
                       <td className="p-3">
                         <div className="flex items-center gap-2 flex-wrap">
@@ -1016,7 +1046,8 @@ export const ProductsView: React.FC = () => {
                       </td>
                     </tr>
                   );
-                })
+                });
+                })()
               )}
             </tbody>
           </table>
