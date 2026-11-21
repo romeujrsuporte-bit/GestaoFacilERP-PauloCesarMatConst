@@ -909,7 +909,7 @@ export const PosView: React.FC<PosViewProps> = ({
   // Atalhos de teclado
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (showPriceLookupModal || showProductLookupModal || showReceiptModal || showOpenRegisterModal || cancellingOrderId || showQuickCustomerModal || showSaleConfirmationModal) {
+      if (saleObservationAlerts.length > 0 || showPriceLookupModal || showProductLookupModal || showReceiptModal || showOpenRegisterModal || cancellingOrderId || showQuickCustomerModal || showSaleConfirmationModal) {
         return;
       }
 
@@ -1023,7 +1023,8 @@ export const PosView: React.FC<PosViewProps> = ({
     selectedLocationId,
     dbState,
     quantityInput,
-    barcodeInput
+    barcodeInput,
+    saleObservationAlerts.length
   ]);
 
   // Atalhos de teclado para o modal de finalização de venda
@@ -1792,14 +1793,14 @@ export const PosView: React.FC<PosViewProps> = ({
         )}
       </form>
 
-      {/* Avisos de Observações de Produtos e Cliente */}
+      {/* Avisos de Observações de Produtos e Cliente (Modal Central Obrigatório) */}
       {saleObservationAlerts.length > 0 && (
         <SaleObservationAlerts
           alerts={saleObservationAlerts}
           onDismiss={(id) => setSaleObservationAlerts((prev) => dismissSaleAlert(prev, id))}
           onDismissAll={() => setSaleObservationAlerts([])}
+          onAfterClose={() => barcodeInputRef.current?.focus()}
           variant="compact"
-          className="shrink-0"
         />
       )}
 

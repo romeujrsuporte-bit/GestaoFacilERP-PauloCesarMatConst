@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   X,
   Save,
@@ -67,6 +67,7 @@ export const EditOrderModal: React.FC<EditOrderModalProps> = ({
   const [addQuantity, setAddQuantity] = useState<string>('1');
   const [addUnitPrice, setAddUnitPrice] = useState<string>('0');
   const [saleObservationAlerts, setSaleObservationAlerts] = useState<SaleObservationAlertItem[]>([]);
+  const lastAlertedProductIdRef = useRef<string>('');
 
   useEffect(() => {
     if (order) {
@@ -117,8 +118,13 @@ export const EditOrderModal: React.FC<EditOrderModalProps> = ({
       setAddQuantity('1');
       const prodObsAlert = getProductSaleAlert(prod);
       if (prodObsAlert) {
+        lastAlertedProductIdRef.current = prod.id;
         setSaleObservationAlerts((prev) => upsertSaleAlert(prev, prodObsAlert));
+      } else {
+        lastAlertedProductIdRef.current = '';
       }
+    } else {
+      lastAlertedProductIdRef.current = '';
     }
   };
 
@@ -160,9 +166,13 @@ export const EditOrderModal: React.FC<EditOrderModalProps> = ({
       setItems([...items, newItem]);
     }
 
-    const prodObsAlert = getProductSaleAlert(prod);
-    if (prodObsAlert) {
-      setSaleObservationAlerts((prev) => upsertSaleAlert(prev, prodObsAlert));
+    const alreadyAlertedOnSelect = lastAlertedProductIdRef.current === prod.id;
+    lastAlertedProductIdRef.current = '';
+    if (!alreadyAlertedOnSelect) {
+      const prodObsAlert = getProductSaleAlert(prod);
+      if (prodObsAlert) {
+        setSaleObservationAlerts((prev) => upsertSaleAlert(prev, prodObsAlert));
+      }
     }
 
     // Reset campos de inclusão

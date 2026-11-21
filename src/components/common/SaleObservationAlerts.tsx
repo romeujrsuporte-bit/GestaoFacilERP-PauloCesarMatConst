@@ -1,5 +1,6 @@
-import React from 'react';
-import { AlertTriangle, Package, User, X } from 'lucide-react';
+import React, { useEffect, useRef } from 'react';
+import { createPortal } from 'react-dom';
+import { AlertTriangle, CheckCircle2, Package, User, X } from 'lucide-react';
 import { Customer, Product } from '../../types';
 
 export type SaleObservationAlertSource = 'product' | 'customer';
@@ -58,7 +59,7 @@ export function getCustomerSaleAlert(customer?: Customer | null): SaleObservatio
 }
 
 /**
- * Insere ou atualiza um aviso na pilha ativa da venda sem sobrescrever
+ * Insere ou atualiza um aviso na fila ativa da venda sem sobrescrever
  * silenciosamente avisos de outros produtos ou do cliente.
  */
 export function upsertSaleAlert(
@@ -108,6 +109,7 @@ interface SaleObservationAlertsProps {
   alerts: SaleObservationAlertItem[];
   onDismiss: (id: string) => void;
   onDismissAll?: () => void;
+  onAfterClose?: () => void;
   variant?: 'compact' | 'default' | 'mobile';
   className?: string;
 }
@@ -115,146 +117,175 @@ interface SaleObservationAlertsProps {
 export const SaleObservationAlerts: React.FC<SaleObservationAlertsProps> = ({
   alerts,
   onDismiss,
-  onDismissAll,
+  onAfterClose,
   variant = 'default',
-  className = '',
 }) => {
-  if (!alerts || alerts.length === 0) return null;
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const activeAlert = alerts && alerts.length > 0 ? alerts[0] : null;
+  const activeAlertId = activeAlert?.id ?? null;
 
+  // Retira o foco de inputs de fundo (busca/leitor) e bloqueia rolagem da página
+  // enquanto o modal central estiver aberto, forçando o usuário a fechar o aviso.
+  useEffect(() => {
+    if (!activeAlertId) return;
+
+    const prevOverflow = typeof document !== 'undefined' ? document.body.style.overflow : '';
+    if (typeof document !== 'undefined') {
+      document.body.style.overflow = 'hidden';
+      const activeEl = document.activeElement as HTMLElement | null;
+      if (activeEl && activeEl !== dialogRef.current && typeof activeEl.blur === 'function') {
+        activeEl.blur();
+      }
+    }
+    dialogRef.current?.focus();
+
+    return () => {
+      if (typeof document !== 'undefined') {
+        document.body.style.overflow = prevOverflow;
+      }
+    };
+  }, [activeAlertId]);
+
+  if (!activeAlert) return null;
+
+  const remainingCount = alerts.length - 1;
+  const isCustomer = activeAlert.source === 'customer';
   const isMobile = variant === 'mobile';
-  const isCompact = variant === 'compact';
 
-  return (
+  const handleCloseCurrent = () => {
+    onDismiss(activeAlert.id);
+    if (remainingCount === 0 && onAfterClose) {
+      setTimeout(() => onAfterClose(), 20);
+    }
+  };
+
+  const headerTone = isCustomer
+    ? 'bg-orange-50 border-orange-200 text-orange-950'
+    : 'bg-amber-50 border-amber-200 text-amber-950';
+  const iconBoxTone = isCustomer
+    ? 'bg-orange-100 text-orange-700 border-orange-300'
+    : 'bg-amber-100 text-amber-700 border-amber-300';
+  const badgeTone = isCustomer
+    ? 'bg-white text-orange-800 border-orange-300'
+    : 'bg-white text-amber-800 border-amber-300';
+  const messageBoxTone = isCustomer
+    ? 'bg-orange-50/85 border-orange-300 border-l-orange-500 text-orange-950'
+    : 'bg-amber-50/85 border-amber-300 border-l-amber-500 text-amber-950';
+  const buttonTone = isCustomer
+    ? 'bg-orange-600 hover:bg-orange-700 active:bg-orange-800 text-white'
+    : 'bg-amber-600 hover:bg-amber-700 active:bg-amber-800 text-white';
+
+  const modalContent = (
     <div
-      role="region"
-      aria-label="Avisos importantes da venda"
-      aria-live="polite"
-      className={`space-y-2 ${className}`}
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="sale-obs-alert-title"
+      aria-describedby="sale-obs-alert-message"
+      className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-950/65 backdrop-blur-xs p-4"
     >
-      {alerts.length > 1 && (
-        <div
-          className={`flex items-center justify-between gap-2 px-3 py-1.5 rounded-lg bg-amber-100/90 border border-amber-300 text-amber-950 ${
-            isMobile ? 'text-xs' : 'text-[11px]'
-          }`}
-        >
-          <span className="font-extrabold flex items-center gap-1.5">
-            <AlertTriangle size={isMobile ? 15 : 13} className="text-amber-700 shrink-0" />
-            <span>{alerts.length} avisos importantes ativos nesta venda</span>
-          </span>
-          {onDismissAll && (
-            <button
-              type="button"
-              onClick={onDismissAll}
-              className={`font-bold text-amber-900 hover:text-amber-950 underline underline-offset-2 cursor-pointer shrink-0 ${
-                isMobile ? 'px-2 py-1 text-xs' : 'text-[11px]'
-              }`}
-            >
-              Fechar todos
-            </button>
-          )}
-        </div>
-      )}
-
       <div
-        className={`space-y-2 ${
-          alerts.length > 2
-            ? isCompact
-              ? 'max-h-40 overflow-y-auto pr-1'
-              : isMobile
-              ? 'max-h-64 overflow-y-auto pr-0.5'
-              : 'max-h-56 overflow-y-auto pr-1'
-            : ''
-        }`}
+        ref={dialogRef}
+        tabIndex={-1}
+        className={`w-full bg-white rounded-2xl border-2 shadow-2xl overflow-hidden outline-hidden ${
+          isCustomer ? 'border-orange-300' : 'border-amber-300'
+        } ${isMobile ? 'max-w-md' : 'max-w-lg'}`}
       >
-        {alerts.map((alert) => {
-          const isCustomer = alert.source === 'customer';
-          const containerTone = isCustomer
-            ? 'bg-orange-50 border-orange-300 border-l-orange-500 text-orange-950'
-            : 'bg-amber-50 border-amber-300 border-l-amber-500 text-amber-950';
-          const iconBoxTone = isCustomer
-            ? 'bg-orange-100 text-orange-700 border-orange-200'
-            : 'bg-amber-100 text-amber-700 border-amber-200';
-          const titleTone = isCustomer ? 'text-orange-900' : 'text-amber-900';
-          const closeBtnTone = isCustomer
-            ? 'text-orange-700 hover:bg-orange-100 hover:text-orange-950'
-            : 'text-amber-700 hover:bg-amber-100 hover:text-amber-950';
-
-          return (
+        {/* Cabeçalho de Alerta */}
+        <div className={`px-5 py-4 border-b flex items-start justify-between gap-3 ${headerTone}`}>
+          <div className="flex items-start gap-3 min-w-0">
             <div
-              key={alert.id}
-              role="alert"
-              className={`rounded-xl border border-l-4 shadow-xs transition-all ${containerTone} ${
-                isMobile ? 'p-3.5' : isCompact ? 'px-3 py-2' : 'p-3'
-              }`}
+              className={`w-11 h-11 rounded-xl border flex items-center justify-center shrink-0 shadow-2xs ${iconBoxTone}`}
             >
-              <div className="flex items-start justify-between gap-2.5">
-                <div className="flex items-start gap-2.5 min-w-0 flex-1">
-                  <div
-                    className={`rounded-lg border flex items-center justify-center shrink-0 mt-0.5 ${iconBoxTone} ${
-                      isMobile ? 'w-9 h-9' : isCompact ? 'w-7 h-7' : 'w-8 h-8'
-                    }`}
-                  >
-                    <AlertTriangle size={isMobile ? 19 : isCompact ? 15 : 17} />
-                  </div>
-
-                  <div className="min-w-0 flex-1 space-y-0.5">
-                    <div className="flex items-center gap-1.5 flex-wrap">
-                      <span
-                        className={`font-black uppercase tracking-wide ${titleTone} ${
-                          isMobile ? 'text-xs' : isCompact ? 'text-[10px]' : 'text-[11px]'
-                        }`}
-                      >
-                        {isCustomer ? 'ATENÇÃO – OBSERVAÇÃO DO CLIENTE' : 'ATENÇÃO – OBSERVAÇÃO DO PRODUTO'}
-                      </span>
-                      <span
-                        className={`inline-flex items-center gap-1 font-bold rounded px-1.5 py-0.5 border ${
-                          isCustomer
-                            ? 'bg-white/80 border-orange-200 text-orange-800'
-                            : 'bg-white/80 border-amber-200 text-amber-800'
-                        } ${isMobile ? 'text-[11px]' : 'text-[10px]'}`}
-                      >
-                        {isCustomer ? <User size={11} /> : <Package size={11} />}
-                        <span>{isCustomer ? 'Cliente' : 'Produto'}</span>
-                      </span>
-                    </div>
-
-                    <div
-                      className={`font-extrabold text-slate-900 break-words ${
-                        isMobile ? 'text-sm leading-snug' : isCompact ? 'text-xs' : 'text-xs sm:text-sm'
-                      }`}
-                    >
-                      {alert.entityCode && (
-                        <span className="font-mono text-slate-600 mr-1.5">[{alert.entityCode}]</span>
-                      )}
-                      <span>{alert.entityName}</span>
-                    </div>
-
-                    <p
-                      className={`font-semibold text-slate-800 whitespace-pre-wrap break-words leading-relaxed ${
-                        isMobile ? 'text-sm pt-0.5' : isCompact ? 'text-xs' : 'text-xs sm:text-[13px]'
-                      }`}
-                    >
-                      {alert.message}
-                    </p>
-                  </div>
-                </div>
-
-                <button
-                  type="button"
-                  onClick={() => onDismiss(alert.id)}
-                  title="Fechar aviso"
-                  aria-label={`Fechar aviso de ${alert.entityName}`}
-                  className={`rounded-lg transition-colors cursor-pointer shrink-0 flex items-center justify-center ${closeBtnTone} ${
-                    isMobile ? 'min-w-[36px] min-h-[36px] p-2' : 'p-1.5'
-                  }`}
-                >
-                  <X size={isMobile ? 18 : 15} />
-                </button>
-              </div>
+              <AlertTriangle size={24} />
             </div>
-          );
-        })}
+
+            <div className="min-w-0 space-y-1">
+              <div className="flex items-center gap-2 flex-wrap">
+                <span
+                  className={`inline-flex items-center gap-1 text-[11px] font-extrabold uppercase tracking-wide px-2 py-0.5 rounded-md border ${badgeTone}`}
+                >
+                  {isCustomer ? <User size={12} /> : <Package size={12} />}
+                  <span>{isCustomer ? 'Cliente' : 'Produto'}</span>
+                </span>
+                {alerts.length > 1 && (
+                  <span className="inline-flex items-center text-[11px] font-black px-2 py-0.5 rounded-md bg-slate-900 text-white">
+                    Aviso 1 de {alerts.length}
+                  </span>
+                )}
+              </div>
+
+              <h3
+                id="sale-obs-alert-title"
+                className="text-sm sm:text-base font-black uppercase tracking-wide leading-tight"
+              >
+                {isCustomer ? 'ATENÇÃO – OBSERVAÇÃO DO CLIENTE' : 'ATENÇÃO – OBSERVAÇÃO DO PRODUTO'}
+              </h3>
+            </div>
+          </div>
+
+          <button
+            type="button"
+            onClick={handleCloseCurrent}
+            title="Fechar aviso e continuar"
+            aria-label={`Fechar aviso de ${activeAlert.entityName}`}
+            className="p-2 rounded-xl text-slate-500 hover:text-slate-900 hover:bg-white/80 transition-colors cursor-pointer shrink-0 min-w-[38px] min-h-[38px] flex items-center justify-center"
+          >
+            <X size={20} />
+          </button>
+        </div>
+
+        {/* Corpo com Identificação e Texto da Observação */}
+        <div className="p-5 space-y-4">
+          <div className="space-y-1">
+            <span className="block text-[11px] font-bold uppercase tracking-wider text-slate-500">
+              {isCustomer ? 'Cliente selecionado' : 'Produto selecionado'}
+            </span>
+            <p className="text-base sm:text-lg font-extrabold text-slate-900 leading-snug break-words">
+              {activeAlert.entityCode && (
+                <span className="font-mono text-slate-600 mr-2 text-sm sm:text-base">
+                  [{activeAlert.entityCode}]
+                </span>
+              )}
+              <span>{activeAlert.entityName}</span>
+            </p>
+          </div>
+
+          <div
+            id="sale-obs-alert-message"
+            className={`rounded-xl border border-l-4 p-4 max-h-60 overflow-y-auto ${messageBoxTone}`}
+          >
+            <p className="text-sm sm:text-base font-bold leading-relaxed whitespace-pre-wrap break-words">
+              {activeAlert.message}
+            </p>
+          </div>
+
+          <p className="text-xs text-slate-500 font-medium">
+            Leia a observação acima e clique no botão abaixo para fechar este aviso e prosseguir com o pedido.
+          </p>
+        </div>
+
+        {/* Rodapé com Ação Obrigatória de Fechamento */}
+        <div className="px-5 py-3.5 bg-slate-50 border-t border-slate-200 flex items-center justify-end gap-2">
+          <button
+            type="button"
+            onClick={handleCloseCurrent}
+            className={`w-full sm:w-auto inline-flex items-center justify-center gap-2 px-5 py-3 rounded-xl font-extrabold text-sm shadow-sm transition-colors cursor-pointer min-h-[44px] ${buttonTone}`}
+          >
+            <CheckCircle2 size={18} />
+            <span>
+              {remainingCount > 0
+                ? `Ciente — Próximo Aviso (${remainingCount} restante${remainingCount === 1 ? '' : 's'})`
+                : 'Ciente — Fechar e Continuar'}
+            </span>
+          </button>
+        </div>
       </div>
     </div>
   );
+
+  if (typeof document !== 'undefined' && document.body) {
+    return createPortal(modalContent, document.body);
+  }
+
+  return modalContent;
 };

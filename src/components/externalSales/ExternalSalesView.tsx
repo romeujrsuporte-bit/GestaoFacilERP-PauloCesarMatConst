@@ -924,16 +924,14 @@ export const ExternalSalesView: React.FC<ExternalSalesViewProps> = ({
           )}
         </div>
 
-        {/* Avisos Mobile de Observações de Produtos e Cliente (sempre legíveis em telas menores) */}
+        {/* Avisos Mobile de Observações de Produtos e Cliente (Modal Central Obrigatório) */}
         {saleObservationAlerts.length > 0 && (
-          <div className="sticky top-[68px] z-20">
-            <SaleObservationAlerts
-              alerts={saleObservationAlerts}
-              onDismiss={(id) => setSaleObservationAlerts((prev) => dismissSaleAlert(prev, id))}
-              onDismissAll={() => setSaleObservationAlerts([])}
-              variant="mobile"
-            />
-          </div>
+          <SaleObservationAlerts
+            alerts={saleObservationAlerts}
+            onDismiss={(id) => setSaleObservationAlerts((prev) => dismissSaleAlert(prev, id))}
+            onDismissAll={() => setSaleObservationAlerts([])}
+            variant="mobile"
+          />
         )}
 
         {/* ======================================================== */}

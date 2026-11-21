@@ -263,6 +263,7 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
   const lastAlertedVoucherCustomerRef = useRef<string>('');
   const [saleObservationAlerts, setSaleObservationAlerts] = useState<SaleObservationAlertItem[]>([]);
   const lastObservationCustomerSigRef = useRef<string>('');
+  const lastAlertedFastProductIdRef = useRef<string>('');
 
   useEffect(() => {
     if (!selectedCustomerId) {
@@ -585,8 +586,11 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
     setProductFeedback(null);
     const prodObsAlert = getProductSaleAlert(product);
     if (prodObsAlert) {
+      lastAlertedFastProductIdRef.current = product.id;
       setSaleObservationAlerts((prev) => upsertSaleAlert(prev, prodObsAlert));
+      return;
     }
+    lastAlertedFastProductIdRef.current = '';
     setTimeout(() => {
       fastQtyInputRef.current?.focus();
       fastQtyInputRef.current?.select();
@@ -720,7 +724,9 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
       text: `✓ +${formatQuantity(qty)} ${product.unit}: "${product.description}" incluído no pedido!`,
     });
 
-    const prodObsAlert = getProductSaleAlert(product);
+    const alreadyAlertedOnSelect = !forcedProduct && lastAlertedFastProductIdRef.current === product.id;
+    lastAlertedFastProductIdRef.current = '';
+    const prodObsAlert = alreadyAlertedOnSelect ? null : getProductSaleAlert(product);
     if (prodObsAlert) {
       setSaleObservationAlerts((prev) => upsertSaleAlert(prev, prodObsAlert));
     }
@@ -731,9 +737,11 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
     setFastItemQtyInput('1');
     setFastItemAdjustmentInput('');
 
-    setTimeout(() => {
-      fastProductInputRef.current?.focus();
-    }, 20);
+    if (!prodObsAlert) {
+      setTimeout(() => {
+        fastProductInputRef.current?.focus();
+      }, 20);
+    }
   };
 
   // Processa leitura de código de barras ou digitação do código/nome do produto
@@ -1209,6 +1217,7 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
 
       // Se qualquer modal estiver aberto, não aciona o atalho
       if (
+        saleObservationAlerts.length > 0 ||
         showPriceLookupModal ||
         showReceiptModal ||
         showSaleConfirmationModal ||
@@ -1255,7 +1264,8 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
     quoteToConvert,
     activeTab,
     paymentMethod,
-    paymentTerms
+    paymentTerms,
+    saleObservationAlerts.length
   ]);
 
   // CONVERTER ORÇAMENTO EM VENDA (Abre modal in-app de confirmação)
@@ -1901,12 +1911,20 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
             </div>
           </div>
 
-          {/* Avisos de Observações de Produtos e Cliente */}
+          {/* Avisos de Observações de Produtos e Cliente (Modal Central Obrigatório) */}
           {saleObservationAlerts.length > 0 && (
             <SaleObservationAlerts
               alerts={saleObservationAlerts}
               onDismiss={(id) => setSaleObservationAlerts((prev) => dismissSaleAlert(prev, id))}
               onDismissAll={() => setSaleObservationAlerts([])}
+              onAfterClose={() => {
+                if (fastSelectedProductId) {
+                  fastQtyInputRef.current?.focus();
+                  fastQtyInputRef.current?.select();
+                } else {
+                  fastProductInputRef.current?.focus();
+                }
+              }}
               variant="default"
             />
           )}
