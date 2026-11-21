@@ -21,6 +21,7 @@ import {
   Building2,
   ArrowLeftRight,
   Check,
+  X,
 } from 'lucide-react';
 import { Database } from '../../services/db';
 import { Product, ProductType, UnitOfMeasure, StockLocation, Company, CompanyPriceOverride } from '../../types';
@@ -99,7 +100,7 @@ export const ProductsView: React.FC = () => {
   const [selectedType, setSelectedType] = useState('todos');
   const [selectedStatus, setSelectedStatus] = useState('todos');
   const [selectedMasterPackFilter, setSelectedMasterPackFilter] = useState<'todos' | 'master_only' | 'unit_only'>('todos');
-  const [sortConfig, setSortConfig] = useState<SortConfig<ProductSortKey>>({ key: null, direction: 'asc' });
+  const [sortConfig, setSortConfig] = useState<SortConfig<ProductSortKey>>({ key: 'code', direction: 'desc' });
   const tableScrollRef = useRef<HTMLDivElement | null>(null);
 
   const handleSort = (key: ProductSortKey) => {
@@ -166,39 +167,66 @@ export const ProductsView: React.FC = () => {
     (p) => p.status === 'ativo' && !p.isMasterPack && p.id !== editingProduct?.id
   );
 
-  const filteredProducts = dbState.products.filter((p) => {
-    const normalizedSearch = searchTerm.toLowerCase();
-    const matchesSearch =
-      searchTerm === '' ||
-      String(p.description ?? '').toLowerCase().includes(normalizedSearch) ||
-      String(p.code ?? '').toLowerCase().includes(normalizedSearch) ||
-      (p.referenceCode && String(p.referenceCode).toLowerCase().includes(normalizedSearch)) ||
-      String(p.barcode ?? '').includes(searchTerm) ||
-      (p.masterPackAssociatedProductCode && String(p.masterPackAssociatedProductCode).toLowerCase().includes(normalizedSearch)) ||
-      (p.masterPackAssociatedProductDescription && String(p.masterPackAssociatedProductDescription).toLowerCase().includes(normalizedSearch));
-    const matchesFamily = selectedFamily === 'todos' || p.family === selectedFamily;
-    const matchesType = selectedType === 'todos' || p.productType === selectedType;
-    const matchesStatus = selectedStatus === 'todos' || p.status === selectedStatus;
-    const matchesMaster =
-      selectedMasterPackFilter === 'todos' ||
-      (selectedMasterPackFilter === 'master_only' && p.isMasterPack) ||
-      (selectedMasterPackFilter === 'unit_only' && !p.isMasterPack);
-    return matchesSearch && matchesFamily && matchesType && matchesStatus && matchesMaster;
-  });
+  const trimmedSearch = searchTerm.trim();
+  const isSearching = trimmedSearch.length > 0;
+  const isSearchTooShort = isSearching && trimmedSearch.length < 3;
 
-  const sortedProducts = useMemo(() => {
-    if (!sortConfig.key) return filteredProducts;
+  const baseFilteredProducts = useMemo(() => {
+    return dbState.products.filter((p) => {
+      const matchesFamily = selectedFamily === 'todos' || p.family === selectedFamily;
+      const matchesType = selectedType === 'todos' || p.productType === selectedType;
+      const matchesStatus = selectedStatus === 'todos' || p.status === selectedStatus;
+      const matchesMaster =
+        selectedMasterPackFilter === 'todos' ||
+        (selectedMasterPackFilter === 'master_only' && p.isMasterPack) ||
+        (selectedMasterPackFilter === 'unit_only' && !p.isMasterPack);
+      return matchesFamily && matchesType && matchesStatus && matchesMaster;
+    });
+  }, [dbState.products, selectedFamily, selectedType, selectedStatus, selectedMasterPackFilter]);
+
+  const filteredProducts = useMemo(() => {
+    if (isSearchTooShort) return [];
+
+    if (isSearching) {
+      const normalizedSearch = trimmedSearch.toLowerCase();
+      return baseFilteredProducts.filter((p) => {
+        const description = String(p.description ?? '').toLowerCase();
+        const code = String(p.code ?? '').toLowerCase();
+        const barcode = String(p.barcode ?? '').toLowerCase();
+        const refCode = String(p.referenceCode ?? '').toLowerCase();
+        return (
+          description.includes(normalizedSearch) ||
+          code.includes(normalizedSearch) ||
+          barcode.includes(normalizedSearch) ||
+          (refCode.length > 0 && refCode.includes(normalizedSearch))
+        );
+      });
+    }
+
+    // Sem busca ativa: exibe inicialmente apenas os últimos 20 produtos cadastrados em ordem decrescente de código
+    return [...baseFilteredProducts]
+      .sort(
+        (a, b) =>
+          compareSortText(a.code, b.code, 'desc') ||
+          compareSortText(a.description, b.description, 'desc') ||
+          compareSortText(a.id, b.id, 'desc')
+      )
+      .slice(0, 20);
+  }, [baseFilteredProducts, isSearching, isSearchTooShort, trimmedSearch]);
+
+  const sortProductList = (list: Product[]): Product[] => {
+    if (!sortConfig.key) return list;
     const key = sortConfig.key;
     const dir = sortConfig.direction;
 
     const priceCache =
       key === 'salePrice'
-        ? new Map(filteredProducts.map((p) => [p, StockEngine.getProductPriceForCompany(p, currentCompany.id)]))
+        ? new Map(list.map((p) => [p, StockEngine.getProductPriceForCompany(p, currentCompany.id)]))
         : null;
     const stockCache =
       key === 'stock'
         ? new Map(
-            filteredProducts.map((p) => [
+            list.map((p) => [
               p,
               StockEngine.getCompanyProductStock(dbState.stockBalances, p.id, currentCompany.id, dbState.stockLocations)
                 .available,
@@ -206,7 +234,7 @@ export const ProductsView: React.FC = () => {
           )
         : null;
 
-    return [...filteredProducts].sort((a, b) => {
+    return [...list].sort((a, b) => {
       let primary = 0;
       switch (key) {
         case 'code':
@@ -239,6 +267,10 @@ export const ProductsView: React.FC = () => {
 
       return primary || compareSortText(a.description, b.description, 'asc') || compareSortText(a.code, b.code, 'asc');
     });
+  };
+
+  const sortedProducts = useMemo(() => {
+    return sortProductList(filteredProducts);
   }, [filteredProducts, sortConfig, canViewCosts, currentCompany.id, dbState.stockBalances, dbState.stockLocations]);
 
   const handleOpenNew = () => {
@@ -528,7 +560,9 @@ export const ProductsView: React.FC = () => {
   };
 
   const handleExportToExcel = () => {
-    ExcelService.exportProducts(sortedProducts, locations, `Produtos_${currentCompany.tradeName || 'Catalogo'}.xlsx`);
+    const productsToExport =
+      isSearching && !isSearchTooShort ? sortedProducts : sortProductList(baseFilteredProducts);
+    ExcelService.exportProducts(productsToExport, locations, `Produtos_${currentCompany.tradeName || 'Catalogo'}.xlsx`);
   };
 
   const handleDownloadTemplate = () => {
@@ -809,14 +843,25 @@ export const ProductsView: React.FC = () => {
       <div className="shrink-0 bg-white p-3.5 rounded-xl border border-slate-200 shadow-xs space-y-2.5">
         <div className="grid grid-cols-1 sm:grid-cols-5 gap-2.5 text-xs">
           <div className="relative sm:col-span-2">
-            <Search className="absolute left-3 top-2.5 text-slate-400" size={16} />
+            <Search className="absolute left-3 top-2.5 text-slate-400 pointer-events-none" size={16} />
             <input
               type="text"
-              placeholder="Buscar por código, referência, descrição ou produto associado..."
+              placeholder="Buscar por descrição, código ou código de barras (mín. 3 caracteres)..."
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
-              className="w-full pl-9 pr-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-xs"
+              className="w-full pl-9 pr-8 py-2 bg-slate-50 border border-slate-200 rounded-lg text-xs focus:outline-hidden focus:bg-white focus:ring-1 focus:ring-blue-500"
             />
+            {searchTerm && (
+              <button
+                type="button"
+                onClick={() => setSearchTerm('')}
+                title="Limpar busca"
+                aria-label="Limpar busca"
+                className="absolute right-2 top-1.5 p-1 text-slate-400 hover:text-slate-600 rounded cursor-pointer"
+              >
+                <X size={14} />
+              </button>
+            )}
           </div>
 
           <div>
@@ -857,6 +902,37 @@ export const ProductsView: React.FC = () => {
             </select>
           </div>
         </div>
+
+        {/* Barra de contexto da listagem / busca */}
+        <div className="flex flex-wrap items-center justify-between gap-2 pt-1 border-t border-slate-100 text-[11px] text-slate-500">
+          {isSearchTooShort ? (
+            <span className="font-semibold text-blue-700">
+              Digite pelo menos 3 caracteres em sequência na descrição, código ou código de barras ({trimmedSearch.length}/3 digitados).
+            </span>
+          ) : isSearching ? (
+            <span>
+              Resultados da busca por <strong className="text-slate-800">"{trimmedSearch}"</strong>:{' '}
+              <strong className="text-blue-700">{sortedProducts.length}</strong> produto(s) encontrado(s)
+              {baseFilteredProducts.length > 0 ? ` (de ${baseFilteredProducts.length} no filtro atual)` : ''}.
+            </span>
+          ) : (
+            <span>
+              Exibindo os <strong className="text-slate-800">últimos {sortedProducts.length} produtos cadastrados</strong>
+              {sortConfig.key === 'code' && sortConfig.direction === 'desc' ? ' (ordem decrescente de código)' : ''} de{' '}
+              <strong className="text-slate-700">{baseFilteredProducts.length}</strong> produto(s) — digite ao menos <strong className="text-slate-700">3 caracteres</strong> para pesquisar no catálogo completo.
+            </span>
+          )}
+
+          {isSearching && (
+            <button
+              type="button"
+              onClick={() => setSearchTerm('')}
+              className="text-blue-600 hover:text-blue-800 font-bold hover:underline cursor-pointer"
+            >
+              Limpar busca e voltar aos últimos 20
+            </button>
+          )}
+        </div>
       </div>
 
       {/* Tabela de Produtos */}
@@ -891,10 +967,24 @@ export const ProductsView: React.FC = () => {
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
-              {sortedProducts.length === 0 ? (
+              {isSearchTooShort ? (
+                <tr>
+                  <td colSpan={9} className="p-10 text-center">
+                    <div className="inline-flex flex-col items-center gap-1.5 max-w-md">
+                      <Search size={26} className="text-blue-500" />
+                      <p className="text-sm font-bold text-slate-800">Digite pelo menos 3 caracteres</p>
+                      <p className="text-xs text-slate-500">
+                        A lista de produtos pesquisados aparecerá a partir do 3º caractere em sequência na descrição, código ou código de barras ({trimmedSearch.length}/3 digitados).
+                      </p>
+                    </div>
+                  </td>
+                </tr>
+              ) : sortedProducts.length === 0 ? (
                 <tr>
                   <td colSpan={9} className="p-8 text-center text-slate-400">
-                    Nenhum produto cadastrado com os critérios selecionados.
+                    {isSearching
+                      ? `Nenhum produto encontrado para "${trimmedSearch}" com os critérios selecionados.`
+                      : 'Nenhum produto cadastrado com os critérios selecionados.'}
                   </td>
                 </tr>
               ) : (
