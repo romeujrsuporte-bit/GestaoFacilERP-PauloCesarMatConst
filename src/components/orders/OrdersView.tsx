@@ -61,6 +61,15 @@ import { PriceLookupModal } from '../common/PriceLookupModal';
 import { EditOrderModal } from './EditOrderModal';
 import { CustomerSearchCombobox } from './CustomerSearchCombobox';
 import { toast } from '../../services/toast';
+import {
+  SaleObservationAlerts,
+  SaleObservationAlertItem,
+  getProductSaleAlert,
+  upsertSaleAlert,
+  syncCustomerSaleAlert,
+  dismissSaleAlert,
+  clearProductSaleAlerts,
+} from '../common/SaleObservationAlerts';
 
 interface OrdersViewProps {
   initialMode?: 'novo_pedido' | 'historico';
@@ -252,6 +261,8 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
     0
   );
   const lastAlertedVoucherCustomerRef = useRef<string>('');
+  const [saleObservationAlerts, setSaleObservationAlerts] = useState<SaleObservationAlertItem[]>([]);
+  const lastObservationCustomerSigRef = useRef<string>('');
 
   useEffect(() => {
     if (!selectedCustomerId) {
@@ -270,6 +281,16 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
       );
     }
   }, [selectedCustomerId, selectedCustomer, selectedCustomerVoucherBalance, selectedCustomerVouchers.length]);
+
+  useEffect(() => {
+    const activeCust = selectedCustomerId ? selectedCustomer : undefined;
+    const sig = activeCust
+      ? `${activeCust.id}|${activeCust.showSaleAlert ? '1' : '0'}|${String(activeCust.notes ?? '').trim()}`
+      : '';
+    if (lastObservationCustomerSigRef.current === sig) return;
+    lastObservationCustomerSigRef.current = sig;
+    setSaleObservationAlerts((prev) => syncCustomerSaleAlert(prev, activeCust));
+  }, [selectedCustomerId, selectedCustomer?.id, selectedCustomer?.showSaleAlert, selectedCustomer?.notes, selectedCustomer?.name]);
 
   // Locais vinculados à empresa ativa ou da operação
   const locations = dbState.stockLocations.filter(
@@ -550,6 +571,11 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
 
     // Reset qty selector map for this product
     setQtyToAddMap((prev) => ({ ...prev, [product.id]: 1 }));
+
+    const prodObsAlert = getProductSaleAlert(product);
+    if (prodObsAlert) {
+      setSaleObservationAlerts((prev) => upsertSaleAlert(prev, prodObsAlert));
+    }
   };
 
   // Seleciona o produto na barra rápida e posiciona o foco direto na Quantidade
@@ -557,6 +583,10 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
     setFastSelectedProductId(product.id);
     setFastProductSearchTerm('');
     setProductFeedback(null);
+    const prodObsAlert = getProductSaleAlert(product);
+    if (prodObsAlert) {
+      setSaleObservationAlerts((prev) => upsertSaleAlert(prev, prodObsAlert));
+    }
     setTimeout(() => {
       fastQtyInputRef.current?.focus();
       fastQtyInputRef.current?.select();
@@ -689,6 +719,11 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
       type: stock.quantity < requestedTotal ? 'warning' : 'success',
       text: `✓ +${formatQuantity(qty)} ${product.unit}: "${product.description}" incluído no pedido!`,
     });
+
+    const prodObsAlert = getProductSaleAlert(product);
+    if (prodObsAlert) {
+      setSaleObservationAlerts((prev) => upsertSaleAlert(prev, prodObsAlert));
+    }
 
     // Limpa campos da barra rápida para o próximo produto
     setFastSelectedProductId('');
@@ -1149,6 +1184,8 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
       setPaymentTerms('');
       setFreightType('entrega_propria');
       setDeliveryForecast('A Combinar');
+      setSaleObservationAlerts([]);
+      lastObservationCustomerSigRef.current = '';
 
       // Open receipt modal
       setSelectedOrder(newOrder);
@@ -1864,6 +1901,16 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
             </div>
           </div>
 
+          {/* Avisos de Observações de Produtos e Cliente */}
+          {saleObservationAlerts.length > 0 && (
+            <SaleObservationAlerts
+              alerts={saleObservationAlerts}
+              onDismiss={(id) => setSaleObservationAlerts((prev) => dismissSaleAlert(prev, id))}
+              onDismissAll={() => setSaleObservationAlerts([])}
+              variant="default"
+            />
+          )}
+
           {/* 2. CENTRAL DE INCLUSÃO DE PRODUTOS NO PEDIDO (VISÍVEL NO TOPO DA TELA ABERTA SEM ROLAGEM) */}
           <div className="bg-white rounded-2xl border-2 border-blue-200 shadow-xs p-3 sm:p-3.5 space-y-2.5">
             <div className="flex items-center justify-between pb-1.5 border-b border-slate-100 flex-wrap gap-2">
@@ -2423,6 +2470,7 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
                     onClick={() => {
                       if (window.confirm('Deseja limpar todos os itens deste pedido?')) {
                         setCart([]);
+                        setSaleObservationAlerts((prev) => clearProductSaleAlerts(prev));
                       }
                     }}
                     className="text-[11px] font-bold text-rose-600 hover:text-rose-800 hover:underline cursor-pointer flex items-center gap-1"

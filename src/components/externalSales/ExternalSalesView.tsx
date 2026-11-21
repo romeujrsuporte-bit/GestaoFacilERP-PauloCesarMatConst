@@ -41,6 +41,14 @@ import { FullCustomerModal } from '../common/FullCustomerModal';
 import { PriceLookupModal } from '../common/PriceLookupModal';
 import { CustomerSearchCombobox } from '../orders/CustomerSearchCombobox';
 import { toast } from '../../services/toast';
+import {
+  SaleObservationAlerts,
+  SaleObservationAlertItem,
+  getProductSaleAlert,
+  upsertSaleAlert,
+  syncCustomerSaleAlert,
+  dismissSaleAlert,
+} from '../common/SaleObservationAlerts';
 
 interface ExternalSalesViewProps {
   onStartReturn?: (orderId: string) => void;
@@ -214,6 +222,8 @@ export const ExternalSalesView: React.FC<ExternalSalesViewProps> = ({
     0
   );
   const lastAlertedVoucherCustomerRef = useRef<string>('');
+  const [saleObservationAlerts, setSaleObservationAlerts] = useState<SaleObservationAlertItem[]>([]);
+  const lastObservationCustomerSigRef = useRef<string>('');
 
   useEffect(() => {
     if (!selectedCustomerId) {
@@ -232,6 +242,16 @@ export const ExternalSalesView: React.FC<ExternalSalesViewProps> = ({
       );
     }
   }, [selectedCustomerId, selectedCustomer, selectedCustomerVoucherBalance, selectedCustomerVouchers.length]);
+
+  useEffect(() => {
+    const activeCust = selectedCustomerId ? selectedCustomer : undefined;
+    const sig = activeCust
+      ? `${activeCust.id}|${activeCust.showSaleAlert ? '1' : '0'}|${String(activeCust.notes ?? '').trim()}`
+      : '';
+    if (lastObservationCustomerSigRef.current === sig) return;
+    lastObservationCustomerSigRef.current = sig;
+    setSaleObservationAlerts((prev) => syncCustomerSaleAlert(prev, activeCust));
+  }, [selectedCustomerId, selectedCustomer?.id, selectedCustomer?.showSaleAlert, selectedCustomer?.notes, selectedCustomer?.name]);
 
   // ----------------------------------------------------
   // CARRINHO & ITENS
@@ -332,6 +352,11 @@ export const ExternalSalesView: React.FC<ExternalSalesViewProps> = ({
       delete next[product.id];
       return next;
     });
+
+    const prodObsAlert = getProductSaleAlert(product);
+    if (prodObsAlert) {
+      setSaleObservationAlerts((prev) => upsertSaleAlert(prev, prodObsAlert));
+    }
   };
 
   const handleSetQty = (productId: string, exactQty: number) => {
@@ -744,6 +769,8 @@ export const ExternalSalesView: React.FC<ExternalSalesViewProps> = ({
       setPaymentMethod('');
       setPaymentTerm('');
       setInstallments(1);
+      setSaleObservationAlerts([]);
+      lastObservationCustomerSigRef.current = '';
       setActiveTab('historico');
     } catch (e) {
       toast.error('Erro ao finalizar pedido: ' + (e as Error).message, 'Erro');
@@ -896,6 +923,18 @@ export const ExternalSalesView: React.FC<ExternalSalesViewProps> = ({
             </div>
           )}
         </div>
+
+        {/* Avisos Mobile de Observações de Produtos e Cliente (sempre legíveis em telas menores) */}
+        {saleObservationAlerts.length > 0 && (
+          <div className="sticky top-[68px] z-20">
+            <SaleObservationAlerts
+              alerts={saleObservationAlerts}
+              onDismiss={(id) => setSaleObservationAlerts((prev) => dismissSaleAlert(prev, id))}
+              onDismissAll={() => setSaleObservationAlerts([])}
+              variant="mobile"
+            />
+          </div>
+        )}
 
         {/* ======================================================== */}
         {/* TAB 1: PRODUTOS (CATÁLOGO LIMPO E TOUCH-FIRST)           */}

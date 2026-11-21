@@ -50,6 +50,15 @@ import { PriceLookupModal } from '../common/PriceLookupModal';
 import { CashRegisterIcon } from '../common/icons/CashRegisterIcon';
 import { toast } from '../../services/toast';
 import { CustomerSearchCombobox } from '../orders/CustomerSearchCombobox';
+import {
+  SaleObservationAlerts,
+  SaleObservationAlertItem,
+  getProductSaleAlert,
+  upsertSaleAlert,
+  syncCustomerSaleAlert,
+  dismissSaleAlert,
+  clearProductSaleAlerts,
+} from '../common/SaleObservationAlerts';
 
 export interface PosViewProps {
   isSidebarMinimized?: boolean;
@@ -450,6 +459,8 @@ export const PosView: React.FC<PosViewProps> = ({
     0
   );
   const lastAlertedVoucherCustomerRef = useRef<string>('');
+  const [saleObservationAlerts, setSaleObservationAlerts] = useState<SaleObservationAlertItem[]>([]);
+  const lastObservationCustomerSigRef = useRef<string>('');
 
   useEffect(() => {
     if (!selectedCustomerId || selectedCustomerId === 'consumidor_final') {
@@ -468,6 +479,17 @@ export const PosView: React.FC<PosViewProps> = ({
       );
     }
   }, [selectedCustomerId, selectedCustomer, selectedCustomerVoucherBalance, selectedCustomerVouchers.length]);
+
+  useEffect(() => {
+    const activeCust =
+      selectedCustomerId && selectedCustomerId !== 'consumidor_final' ? selectedCustomer : undefined;
+    const sig = activeCust
+      ? `${activeCust.id}|${activeCust.showSaleAlert ? '1' : '0'}|${String(activeCust.notes ?? '').trim()}`
+      : '';
+    if (lastObservationCustomerSigRef.current === sig) return;
+    lastObservationCustomerSigRef.current = sig;
+    setSaleObservationAlerts((prev) => syncCustomerSaleAlert(prev, activeCust));
+  }, [selectedCustomerId, selectedCustomer?.id, selectedCustomer?.showSaleAlert, selectedCustomer?.notes, selectedCustomer?.name]);
 
   // Locais de estoque vinculados à empresa ativa (priorizando Comercial no topo da lista)
   const locations = [...dbState.stockLocations]
@@ -668,6 +690,11 @@ export const PosView: React.FC<PosViewProps> = ({
     setBarcodeInput('');
     setQuantityInput('1');
 
+    const prodObsAlert = getProductSaleAlert(product);
+    if (prodObsAlert) {
+      setSaleObservationAlerts((prev) => upsertSaleAlert(prev, prodObsAlert));
+    }
+
     playBeep('success');
 
     setFeedbackMessage({
@@ -796,6 +823,7 @@ export const PosView: React.FC<PosViewProps> = ({
       setDiscountInput('');
       setReceivedAmount('');
       setLastAddedItem(null);
+      setSaleObservationAlerts((prev) => clearProductSaleAlerts(prev));
       if (barcodeInputRef.current) barcodeInputRef.current.focus();
     }
   };
@@ -1311,6 +1339,8 @@ export const PosView: React.FC<PosViewProps> = ({
       setPaymentMethod('');
       setPaymentTerm('');
       setLastAddedItem(null);
+      setSaleObservationAlerts([]);
+      lastObservationCustomerSigRef.current = '';
     } catch (error) {
       alert('Erro ao finalizar venda: ' + (error as Error).message);
     }
@@ -1761,6 +1791,17 @@ export const PosView: React.FC<PosViewProps> = ({
           </div>
         )}
       </form>
+
+      {/* Avisos de Observações de Produtos e Cliente */}
+      {saleObservationAlerts.length > 0 && (
+        <SaleObservationAlerts
+          alerts={saleObservationAlerts}
+          onDismiss={(id) => setSaleObservationAlerts((prev) => dismissSaleAlert(prev, id))}
+          onDismissAll={() => setSaleObservationAlerts([])}
+          variant="compact"
+          className="shrink-0"
+        />
+      )}
 
       {/* Grid Principal do PDV: Cupom/Tabela de Itens (Esquerda) + Cockpit de Pagamento (Direita) */}
       <div className="flex-1 min-h-0 grid grid-cols-1 lg:grid-cols-12 gap-2.5 overflow-hidden">

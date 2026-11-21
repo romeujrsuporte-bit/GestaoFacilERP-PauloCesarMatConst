@@ -146,6 +146,7 @@ export const ProductsView: React.FC = () => {
     defaultLocationId: 'loc-comercial',
     status: 'ativo',
     notes: '',
+    showSaleAlert: false,
     isMasterPack: false,
     masterPackAssociatedProductId: '',
     masterPackAssociatedProductCode: '',
@@ -259,6 +260,7 @@ export const ProductsView: React.FC = () => {
       defaultLocationId: locations.find((l) => l.name.toLowerCase() === 'comercial' || l.id === 'loc-comercial')?.id || locations[0]?.id || 'loc-comercial',
       status: 'ativo',
       notes: '',
+      showSaleAlert: false,
       isMasterPack: false,
       masterPackAssociatedProductId: '',
       masterPackAssociatedProductCode: '',
@@ -295,6 +297,7 @@ export const ProductsView: React.FC = () => {
       notes: defaultAssoc
         ? `Embalagem Master contendo 10 unidades de ${defaultAssoc.code} - ${defaultAssoc.description}. O estoque é controlado automaticamente no produto associado.`
         : 'Embalagem Master. O estoque é controlado automaticamente no produto unitário associado.',
+      showSaleAlert: false,
       isMasterPack: true,
       masterPackAssociatedProductId: defaultAssoc?.id || '',
       masterPackAssociatedProductCode: defaultAssoc?.code || '',
@@ -329,6 +332,7 @@ export const ProductsView: React.FC = () => {
       defaultLocationId: product.defaultLocationId || locations[0]?.id || 'loc-comercial',
       status: 'ativo',
       notes: `Embalagem Master contendo ${units} unidades do produto ${product.code} - ${product.description}. Toda venda desta caixa baixa automaticamente ${units} unidades do produto unitário no estoque.`,
+      showSaleAlert: false,
       isMasterPack: true,
       masterPackAssociatedProductId: product.id,
       masterPackAssociatedProductCode: product.code,
@@ -346,6 +350,8 @@ export const ProductsView: React.FC = () => {
     setFormData({
       ...product,
       referenceCode: product.referenceCode || '',
+      notes: product.notes || '',
+      showSaleAlert: !!product.showSaleAlert,
       isMasterPack: !!product.isMasterPack,
       masterPackAssociatedProductId: product.masterPackAssociatedProductId || '',
       masterPackAssociatedProductCode: product.masterPackAssociatedProductCode || '',
@@ -417,6 +423,8 @@ export const ProductsView: React.FC = () => {
               costPrice: Number(formData.costPrice || 0),
               salePrice: Number(formData.salePrice || 0),
               minStock: Number(formData.minStock || 0),
+              notes: (formData.notes || '').trim(),
+              showSaleAlert: !!formData.showSaleAlert,
             } as Product)
           : p
       );
@@ -439,7 +447,8 @@ export const ProductsView: React.FC = () => {
         hasComposition: !!formData.hasComposition,
         defaultLocationId: formData.defaultLocationId || locations[0]?.id || 'loc-comercial',
         status: formData.status || 'ativo',
-        notes: formData.notes || '',
+        notes: (formData.notes || '').trim(),
+        showSaleAlert: !!formData.showSaleAlert,
         companyPrices: formData.companyPrices || {},
         ...masterPackData,
       };
@@ -916,6 +925,15 @@ export const ProductsView: React.FC = () => {
                       <td className="p-3">
                         <div className="flex items-center gap-2 flex-wrap">
                           <span className="font-semibold text-slate-800">{p.description}</span>
+                          {p.showSaleAlert && p.notes?.trim() && (
+                            <span
+                              title={`Aviso de venda ativo: ${p.notes.trim()}`}
+                              className="inline-flex items-center gap-1 text-[10px] bg-amber-50 text-amber-800 font-bold px-1.5 py-0.5 rounded-full border border-amber-300"
+                            >
+                              <AlertTriangle size={11} className="text-amber-600" />
+                              Aviso na venda
+                            </span>
+                          )}
                           {p.isMasterPack && (
                             <span className="inline-flex items-center gap-1 text-[10px] bg-amber-100 text-amber-900 font-extrabold px-2 py-0.5 rounded-full border border-amber-300 shadow-2xs">
                               <Boxes size={12} className="text-amber-700" />
@@ -1683,15 +1701,39 @@ export const ProductsView: React.FC = () => {
                 </label>
               </div>
 
-              <div className="sm:col-span-3">
-                <label className="block font-bold text-slate-700 mb-1">Observações Técnicas</label>
+              <div className="sm:col-span-3 space-y-2">
+                <label className="block font-bold text-slate-700 mb-1">Observação</label>
                 <textarea
-                  rows={2}
-                  value={formData.notes}
+                  rows={3}
+                  value={formData.notes || ''}
                   onChange={(e) => setFormData({ ...formData, notes: e.target.value })}
-                  placeholder="Informações adicionais, lote padrão ou instruções de manuseio..."
-                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg"
+                  placeholder="Ex: Desconto máximo permitido de 5%. Informações comerciais, técnicas ou instruções importantes sobre o produto..."
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg focus:outline-hidden focus:ring-2 focus:ring-blue-500 focus:bg-white"
                 />
+
+                <label
+                  className={`flex items-start gap-2.5 p-2.5 rounded-lg border cursor-pointer transition-colors ${
+                    formData.showSaleAlert
+                      ? 'bg-amber-50/90 border-amber-300 text-amber-950'
+                      : 'bg-slate-50 border-slate-200 text-slate-700 hover:bg-slate-100/70'
+                  }`}
+                >
+                  <input
+                    type="checkbox"
+                    checked={!!formData.showSaleAlert}
+                    onChange={(e) => setFormData({ ...formData, showSaleAlert: e.target.checked })}
+                    className="w-4 h-4 mt-0.5 text-amber-600 rounded-sm accent-amber-600 shrink-0"
+                  />
+                  <div className="space-y-0.5">
+                    <span className="font-bold flex items-center gap-1.5">
+                      <AlertTriangle size={14} className={formData.showSaleAlert ? 'text-amber-600' : 'text-slate-400'} />
+                      <span>Exibir aviso durante a venda</span>
+                    </span>
+                    <p className="text-[11px] text-slate-500 font-normal">
+                      Quando marcado e houver texto em Observação, um aviso destacado aparecerá automaticamente no PDV Balcão, Pedido de Venda e Venda Mobile ao selecionar este produto.
+                    </p>
+                  </div>
+                </label>
               </div>
             </div>
 

@@ -80,6 +80,7 @@ export const FullCustomerModal: React.FC<FullCustomerModalProps> = ({
     preferredPaymentMethod: '',
     status: 'ativo',
     notes: '',
+    showSaleAlert: false,
   });
 
   // Atualizar código e nome inicial ao abrir com campos limpos
@@ -110,6 +111,7 @@ export const FullCustomerModal: React.FC<FullCustomerModalProps> = ({
         preferredPaymentMethod: '',
         status: 'ativo',
         notes: '',
+        showSaleAlert: false,
       });
       setActiveTab('dados_gerais');
     }
@@ -162,6 +164,7 @@ export const FullCustomerModal: React.FC<FullCustomerModalProps> = ({
       preferredPaymentMethod: custForm.preferredPaymentMethod?.trim() || 'À Vista',
       status: custForm.status || 'ativo',
       notes: custForm.notes?.trim() || '',
+      showSaleAlert: !!custForm.showSaleAlert,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
@@ -660,15 +663,36 @@ export const FullCustomerModal: React.FC<FullCustomerModalProps> = ({
                 </select>
               </div>
 
-              <div className="sm:col-span-2">
-                <label className="block font-bold text-slate-700 mb-1">Observações & Instruções de Entrega</label>
+              <div className="sm:col-span-2 space-y-2">
+                <label className="block font-bold text-slate-700 mb-1">Observação</label>
                 <textarea
-                  rows={2}
-                  placeholder="Ex: Horário para descarga das 08h às 11h, procurar Sr. Marcos no estoque."
-                  value={custForm.notes}
+                  rows={3}
+                  placeholder="Ex: Cliente pagou os últimos boletos com 15 dias de atraso. Horário para descarga das 08h às 11h..."
+                  value={custForm.notes || ''}
                   onChange={(e) => setCustForm({ ...custForm, notes: e.target.value })}
-                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg"
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg focus:outline-hidden focus:ring-2 focus:ring-blue-500 focus:bg-white"
                 />
+
+                <label
+                  className={`flex items-start gap-2.5 p-2.5 rounded-lg border cursor-pointer transition-colors ${
+                    custForm.showSaleAlert
+                      ? 'bg-orange-50/90 border-orange-300 text-orange-950'
+                      : 'bg-slate-50 border-slate-200 text-slate-700 hover:bg-slate-100/70'
+                  }`}
+                >
+                  <input
+                    type="checkbox"
+                    checked={!!custForm.showSaleAlert}
+                    onChange={(e) => setCustForm({ ...custForm, showSaleAlert: e.target.checked })}
+                    className="w-4 h-4 mt-0.5 text-orange-600 rounded-sm accent-orange-600 shrink-0"
+                  />
+                  <div className="space-y-0.5">
+                    <span className="font-bold block">Exibir aviso durante a venda</span>
+                    <p className="text-[11px] text-slate-500 font-normal">
+                      Quando marcado e houver texto em Observação, um aviso destacado aparecerá automaticamente nas telas de venda ao selecionar este cliente.
+                    </p>
+                  </div>
+                </label>
               </div>
             </div>
           )}

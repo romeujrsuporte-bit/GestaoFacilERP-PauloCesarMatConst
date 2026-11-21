@@ -121,6 +121,7 @@ export interface Product {
   defaultLocationId: string;
   status: 'ativo' | 'inativo';
   notes?: string;
+  showSaleAlert?: boolean; // Exibir observação como aviso destacado durante a venda
   supplierId?: string;
   supplierCode?: string;
   taxPercent?: number;
@@ -274,6 +275,7 @@ export interface Customer {
   preferredPaymentMethod?: string;
   status: 'ativo' | 'inativo';
   notes?: string;
+  showSaleAlert?: boolean; // Exibir observação como aviso destacado durante a venda
   createdAt?: string;
   updatedAt?: string;
 }

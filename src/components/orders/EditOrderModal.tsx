@@ -19,6 +19,14 @@ import { Database } from '../../services/db';
 import { StockEngine } from '../../services/stockEngine';
 import { formatCurrency } from '../../services/pricingEngine';
 import { CustomerSearchCombobox } from './CustomerSearchCombobox';
+import {
+  SaleObservationAlerts,
+  SaleObservationAlertItem,
+  getProductSaleAlert,
+  upsertSaleAlert,
+  syncCustomerSaleAlert,
+  dismissSaleAlert,
+} from '../common/SaleObservationAlerts';
 
 interface EditOrderModalProps {
   isOpen: boolean;
@@ -58,6 +66,7 @@ export const EditOrderModal: React.FC<EditOrderModalProps> = ({
   const [selectedProductId, setSelectedProductId] = useState('');
   const [addQuantity, setAddQuantity] = useState<string>('1');
   const [addUnitPrice, setAddUnitPrice] = useState<string>('0');
+  const [saleObservationAlerts, setSaleObservationAlerts] = useState<SaleObservationAlertItem[]>([]);
 
   useEffect(() => {
     if (order) {
@@ -82,6 +91,13 @@ export const EditOrderModal: React.FC<EditOrderModalProps> = ({
       } else {
         setDiscountInput('');
       }
+
+      const initialCust = order.customerId
+        ? dbState.customers.find((c) => c.id === order.customerId)
+        : undefined;
+      setSaleObservationAlerts(syncCustomerSaleAlert([], initialCust));
+    } else {
+      setSaleObservationAlerts([]);
     }
   }, [order, isOpen]);
 
@@ -99,6 +115,10 @@ export const EditOrderModal: React.FC<EditOrderModalProps> = ({
       const effPrice = StockEngine.getProductPriceForCompany(prod, targetCompanyId);
       setAddUnitPrice(effPrice.toFixed(2).replace('.', ','));
       setAddQuantity('1');
+      const prodObsAlert = getProductSaleAlert(prod);
+      if (prodObsAlert) {
+        setSaleObservationAlerts((prev) => upsertSaleAlert(prev, prodObsAlert));
+      }
     }
   };
 
@@ -140,6 +160,11 @@ export const EditOrderModal: React.FC<EditOrderModalProps> = ({
       setItems([...items, newItem]);
     }
 
+    const prodObsAlert = getProductSaleAlert(prod);
+    if (prodObsAlert) {
+      setSaleObservationAlerts((prev) => upsertSaleAlert(prev, prodObsAlert));
+    }
+
     // Reset campos de inclusão
     setSelectedProductId('');
     setAddQuantity('1');
@@ -179,6 +204,7 @@ export const EditOrderModal: React.FC<EditOrderModalProps> = ({
       setCustomerPhone(cust.phone || cust.whatsapp || '');
       setCustomerCpfCnpj(cust.cpfCnpj || '');
     }
+    setSaleObservationAlerts((prev) => syncCustomerSaleAlert(prev, cust));
   };
 
   const handleDiscountTypeChange = (newType: 'percent' | 'value') => {
@@ -394,6 +420,16 @@ export const EditOrderModal: React.FC<EditOrderModalProps> = ({
 
         {/* Corpo do Formulário com Rolagem */}
         <div className="p-4 sm:p-5 overflow-y-auto space-y-5 flex-1 text-xs">
+          {/* Avisos de Observações de Produtos e Cliente */}
+          {saleObservationAlerts.length > 0 && (
+            <SaleObservationAlerts
+              alerts={saleObservationAlerts}
+              onDismiss={(id) => setSaleObservationAlerts((prev) => dismissSaleAlert(prev, id))}
+              onDismissAll={() => setSaleObservationAlerts([])}
+              variant="default"
+            />
+          )}
+
           {/* Seção 1: Dados do Cliente e Pagamento */}
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 bg-slate-50/80 p-3.5 rounded-xl border border-slate-200">
             {/* Seleção rápida de Cliente Cadastrado */}

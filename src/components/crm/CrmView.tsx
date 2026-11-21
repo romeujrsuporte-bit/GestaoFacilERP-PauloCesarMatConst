@@ -14,6 +14,7 @@ import {
   DollarSign,
   Power,
   CheckCircle2,
+  AlertTriangle,
 } from 'lucide-react';
 import { Database } from '../../services/db';
 import { Customer, Supplier } from '../../types';
@@ -120,6 +121,7 @@ export const CrmView: React.FC<{ initialSubTab?: 'clientes' | 'fornecedores' }> 
     preferredPaymentMethod: '',
     status: 'ativo',
     notes: '',
+    showSaleAlert: false,
   });
 
   // Form Fornecedores
@@ -166,6 +168,9 @@ export const CrmView: React.FC<{ initialSubTab?: 'clientes' | 'fornecedores' }> 
               state: custForm.state?.trim() || '',
               creditLimit: custForm.creditLimit !== undefined && custForm.creditLimit !== null && !isNaN(Number(custForm.creditLimit)) ? Number(custForm.creditLimit) : 0,
               deliveryRouteName,
+              notes: custForm.notes?.trim() || '',
+              showSaleAlert: !!custForm.showSaleAlert,
+              updatedAt: new Date().toISOString(),
             } as Customer)
           : c
       );
@@ -195,6 +200,7 @@ export const CrmView: React.FC<{ initialSubTab?: 'clientes' | 'fornecedores' }> 
         preferredPaymentMethod: custForm.preferredPaymentMethod?.trim() || 'À Vista',
         status: custForm.status || 'ativo',
         notes: custForm.notes?.trim() || '',
+        showSaleAlert: !!custForm.showSaleAlert,
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
       };
@@ -446,6 +452,7 @@ export const CrmView: React.FC<{ initialSubTab?: 'clientes' | 'fornecedores' }> 
                   preferredPaymentMethod: '',
                   status: 'ativo',
                   notes: '',
+                  showSaleAlert: false,
                 });
                 setIsCustomerModalOpen(true);
               } else {
@@ -530,7 +537,18 @@ export const CrmView: React.FC<{ initialSubTab?: 'clientes' | 'fornecedores' }> 
                     <tr key={c.id} className="hover:bg-slate-50/80">
                       <td className="p-3 font-mono font-bold text-blue-700">{c.code}</td>
                       <td className="p-3">
-                        <div className="font-semibold text-slate-800">{c.name}</div>
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <span className="font-semibold text-slate-800">{c.name}</span>
+                          {c.showSaleAlert && c.notes?.trim() && (
+                            <span
+                              title={`Aviso de venda ativo: ${c.notes.trim()}`}
+                              className="inline-flex items-center gap-1 text-[10px] bg-orange-50 text-orange-800 font-bold px-1.5 py-0.5 rounded-full border border-orange-300"
+                            >
+                              <AlertTriangle size={11} className="text-orange-600" />
+                              Aviso na venda
+                            </span>
+                          )}
+                        </div>
                         {c.tradeName && <div className="text-[11px] text-slate-400">{c.tradeName}</div>}
                       </td>
                       <td className="p-3 font-bold text-slate-600">{c.type}</td>
@@ -615,7 +633,7 @@ export const CrmView: React.FC<{ initialSubTab?: 'clientes' | 'fornecedores' }> 
                             type="button"
                             onClick={() => {
                               setEditingCustomer(c);
-                              setCustForm({ ...c });
+                              setCustForm({ ...c, notes: c.notes || '', showSaleAlert: !!c.showSaleAlert });
                               setIsCustomerModalOpen(true);
                             }}
                             className="p-1.5 hover:bg-blue-50 text-slate-600 hover:text-blue-700 rounded-lg border border-slate-200 hover:border-blue-200 cursor-pointer"
@@ -1099,15 +1117,39 @@ export const CrmView: React.FC<{ initialSubTab?: 'clientes' | 'fornecedores' }> 
                 </select>
               </div>
 
-              <div className="sm:col-span-3">
-                <label className="block font-bold text-slate-700 mb-1">Observações</label>
+              <div className="sm:col-span-3 space-y-2">
+                <label className="block font-bold text-slate-700 mb-1">Observação</label>
                 <textarea
-                  rows={2}
+                  rows={3}
                   value={custForm.notes || ''}
-                  placeholder="Ex: Entregar somente no período da manhã, procurar responsável pelo estoque..."
+                  placeholder="Ex: Cliente pagou os últimos boletos com 15 dias de atraso. Entregar somente no período da manhã..."
                   onChange={(e) => setCustForm({ ...custForm, notes: e.target.value })}
-                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg"
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg focus:outline-hidden focus:ring-2 focus:ring-blue-500 focus:bg-white"
                 />
+
+                <label
+                  className={`flex items-start gap-2.5 p-2.5 rounded-lg border cursor-pointer transition-colors ${
+                    custForm.showSaleAlert
+                      ? 'bg-orange-50/90 border-orange-300 text-orange-950'
+                      : 'bg-slate-50 border-slate-200 text-slate-700 hover:bg-slate-100/70'
+                  }`}
+                >
+                  <input
+                    type="checkbox"
+                    checked={!!custForm.showSaleAlert}
+                    onChange={(e) => setCustForm({ ...custForm, showSaleAlert: e.target.checked })}
+                    className="w-4 h-4 mt-0.5 text-orange-600 rounded-sm accent-orange-600 shrink-0"
+                  />
+                  <div className="space-y-0.5">
+                    <span className="font-bold flex items-center gap-1.5">
+                      <AlertTriangle size={14} className={custForm.showSaleAlert ? 'text-orange-600' : 'text-slate-400'} />
+                      <span>Exibir aviso durante a venda</span>
+                    </span>
+                    <p className="text-[11px] text-slate-500 font-normal">
+                      Quando marcado e houver texto em Observação, um aviso destacado aparecerá automaticamente no PDV Balcão, Pedido de Venda e Venda Mobile sempre que este cliente for selecionado.
+                    </p>
+                  </div>
+                </label>
               </div>
             </div>
 
