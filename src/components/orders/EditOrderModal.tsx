@@ -12,7 +12,9 @@ import {
   Package,
   Layers,
   Check,
-  Barcode
+  Barcode,
+  Pencil,
+  RotateCcw,
 } from 'lucide-react';
 import { Order, OrderItem, Product, Customer, DiscountAuthorizationRecord } from '../../types';
 import { Database } from '../../services/db';
@@ -59,6 +61,8 @@ export const EditOrderModal: React.FC<EditOrderModalProps> = ({
   const dbState = Database.getState();
   const currentCompany = Database.getCurrentCompany();
   const currentUser = Database.getCurrentUser();
+  const canAlterUnitPrice = Database.canCurrentUserAlterUnitPrice(currentUser);
+  const unitPriceOverrideRole: 'admin' | 'gerente' = Database.isAdmin(currentUser) ? 'admin' : 'gerente';
 
   const [items, setItems] = useState<OrderItem[]>([]);
   const [selectedCustomerId, setSelectedCustomerId] = useState<string>('');
@@ -173,10 +177,16 @@ export const EditOrderModal: React.FC<EditOrderModalProps> = ({
     const effPrice = StockEngine.getProductPriceForCompany(prod, targetCompanyId);
     const qty = Math.max(0.001, parseFloat(addQuantity.replace(',', '.')) || 1);
     const parsedPrice = parseFloat(addUnitPrice.replace(',', '.'));
-    const price = Number.isFinite(parsedPrice) && parsedPrice >= 0 ? parsedPrice : effPrice;
+    const requestedPrice =
+      canAlterUnitPrice && Number.isFinite(parsedPrice) && parsedPrice > 0
+        ? Math.round(parsedPrice * 100) / 100
+        : effPrice;
+    const isDirectPriceOverride =
+      canAlterUnitPrice && Math.abs(requestedPrice - effPrice) > 0.004;
 
     const existingIndex = items.findIndex((i) => i.productId === prod.id);
     const commitAdd = (finalUnitPrice: number, authorization?: DiscountAuthorizationRecord | null) => {
+      const overridden = canAlterUnitPrice && Math.abs(finalUnitPrice - effPrice) > 0.004;
       if (existingIndex >= 0) {
         const updated = items.map((it, idx) => {
           if (idx !== existingIndex) return it;
@@ -191,9 +201,16 @@ export const EditOrderModal: React.FC<EditOrderModalProps> = ({
             ...it,
             quantity: nextQty,
             unitPrice: finalUnitPrice,
-            referenceUnitPrice: it.referenceUnitPrice ?? effPrice,
+            referenceUnitPrice: overridden ? finalUnitPrice : (it.referenceUnitPrice ?? effPrice),
+            originalUnitPrice: it.originalUnitPrice ?? effPrice,
+            priceOverridden: overridden ? true : it.priceOverridden,
+            priceOverriddenByRole: overridden ? unitPriceOverrideRole : it.priceOverriddenByRole,
+            discountPercent: overridden ? 0 : it.discountPercent,
+            discountValue: overridden ? 0 : it.discountValue,
+            additionPercent: overridden ? 0 : it.additionPercent,
+            additionValue: overridden ? 0 : it.additionValue,
             totalPrice: Math.round(nextQty * finalUnitPrice * 100) / 100,
-            discountAuthorization: authorization || undefined,
+            discountAuthorization: overridden ? undefined : (authorization || undefined),
           };
         });
         setItems(updated);
@@ -206,13 +223,18 @@ export const EditOrderModal: React.FC<EditOrderModalProps> = ({
           unit: prod.unit,
           quantity: qty,
           unitPrice: finalUnitPrice,
-          referenceUnitPrice: effPrice,
+          referenceUnitPrice: overridden ? finalUnitPrice : effPrice,
+          originalUnitPrice: effPrice,
+          priceOverridden: overridden ? true : undefined,
+          priceOverriddenByRole: overridden ? unitPriceOverrideRole : undefined,
           discountPercent: 0,
           discountValue: 0,
+          additionPercent: 0,
+          additionValue: 0,
           totalPrice: Math.round(qty * finalUnitPrice * 100) / 100,
           unitCost: prod.costPrice,
           locationId: prod.defaultLocationId || 'loc-comercial',
-          discountAuthorization: authorization || undefined,
+          discountAuthorization: overridden ? undefined : (authorization || undefined),
         };
         setItems([...items, newItem]);
       }
@@ -233,14 +255,20 @@ export const EditOrderModal: React.FC<EditOrderModalProps> = ({
       setAddSearch('');
     };
 
+    // Alteração direta de preço unitário por Administrador Geral / Gerente Geral é independente de desconto
+    if (isDirectPriceOverride) {
+      commitAdd(requestedPrice, null);
+      return;
+    }
+
     const resultQty = existingIndex >= 0 ? items[existingIndex].quantity + qty : qty;
-    if (prod.maxDiscountEnabled && price < effPrice) {
+    if (prod.maxDiscountEnabled && requestedPrice < effPrice) {
       const evaluation = evaluateItemMaxDiscount({
         product: prod,
         companyId: targetCompanyId,
         origin: 'edicao_pedido',
         quantity: resultQty,
-        unitPrice: price,
+        unitPrice: requestedPrice,
         referenceUnitPrice: effPrice,
         existingAuthorization: null,
         saleSessionId: saleSessionIdRef.current,
@@ -252,7 +280,7 @@ export const EditOrderModal: React.FC<EditOrderModalProps> = ({
           violation: evaluation.violation,
           onAuthorized: (record) => {
             setDiscountAuthPrompt(null);
-            commitAdd(price, record);
+            commitAdd(requestedPrice, record);
             toast.success(
               `Preço reduzido autorizado por ${record.authorizerUserName} para "${prod.description}".`,
               'Autorização Concedida'
@@ -276,7 +304,7 @@ export const EditOrderModal: React.FC<EditOrderModalProps> = ({
       }
     }
 
-    commitAdd(price, null);
+    commitAdd(requestedPrice, null);
   };
 
   const handleRemoveItem = (index: number) => {
@@ -311,19 +339,36 @@ export const EditOrderModal: React.FC<EditOrderModalProps> = ({
   };
 
   const handleUpdateItemPrice = (index: number, newPriceStr: string) => {
-    const val = Math.max(0, parseFloat(newPriceStr.replace(',', '.')) || 0);
+    if (!canAlterUnitPrice) return;
+    const rawVal = parseFloat(newPriceStr.replace(',', '.'));
+    if (!Number.isFinite(rawVal) || rawVal < 0) return;
+    const val = Math.round(rawVal * 100) / 100;
     setItems((prev) =>
       prev.map((it, idx) => {
         if (idx !== index) return it;
-        if (it.discountAuthorization?.operationId && Math.abs(it.unitPrice - val) > 0.005) {
+        const catalogProd = dbState.products.find((p) => p.id === it.productId);
+        const catalogPrice = catalogProd
+          ? StockEngine.getProductPriceForCompany(catalogProd, targetCompanyId)
+          : it.unitPrice;
+        const origPrice = it.originalUnitPrice ?? catalogPrice;
+        const isOverridden = Math.abs(val - origPrice) > 0.004;
+        const priceChanged = Math.abs(it.unitPrice - val) > 0.004;
+        if (it.discountAuthorization?.operationId && priceChanged) {
           revokeDiscountAuthorization(it.discountAuthorization.operationId);
         }
         return {
           ...it,
           unitPrice: val,
+          referenceUnitPrice: val,
+          originalUnitPrice: origPrice,
+          priceOverridden: isOverridden,
+          priceOverriddenByRole: isOverridden ? unitPriceOverrideRole : undefined,
+          discountPercent: priceChanged ? 0 : it.discountPercent,
+          discountValue: priceChanged ? 0 : it.discountValue,
+          additionPercent: priceChanged ? 0 : it.additionPercent,
+          additionValue: priceChanged ? 0 : it.additionValue,
           totalPrice: Math.round(it.quantity * val * 100) / 100,
-          discountAuthorization:
-            Math.abs(it.unitPrice - val) > 0.005 ? undefined : it.discountAuthorization,
+          discountAuthorization: priceChanged ? undefined : it.discountAuthorization,
         };
       })
     );
@@ -864,12 +909,20 @@ export const EditOrderModal: React.FC<EditOrderModalProps> = ({
 
               <div className="sm:col-span-2">
                 <label className="block text-slate-600 font-semibold mb-1">Preço Unit. (R$):</label>
-                <input
-                  type="text"
-                  value={addUnitPrice}
-                  onChange={(e) => setAddUnitPrice(e.target.value)}
-                  className="w-full bg-white border border-slate-200 rounded-lg p-2 text-xs font-bold text-right text-slate-900 focus:outline-hidden"
-                />
+                {canAlterUnitPrice ? (
+                  <input
+                    type="text"
+                    inputMode="decimal"
+                    value={addUnitPrice}
+                    onChange={(e) => setAddUnitPrice(e.target.value.replace(/[^0-9.,]/g, ''))}
+                    className="w-full bg-white border border-indigo-200 focus:border-indigo-500 rounded-lg p-2 text-xs font-bold text-right text-slate-900 font-mono focus:outline-hidden"
+                    title="Alterar preço unitário antes de inserir (Administrador Geral / Gerente Geral)"
+                  />
+                ) : (
+                  <div className="w-full bg-slate-100 border border-slate-200 rounded-lg p-2 text-xs font-bold text-right text-slate-600 font-mono select-none">
+                    {addUnitPrice || '0,00'}
+                  </div>
+                )}
               </div>
 
               <div className="sm:col-span-2">
@@ -892,7 +945,9 @@ export const EditOrderModal: React.FC<EditOrderModalProps> = ({
                 Itens no Pedido ({items.length} {items.length === 1 ? 'produto' : 'produtos'}):
               </span>
               <span className="text-[11px] text-slate-500">
-                Você pode ajustar quantidades e preços diretamente na tabela abaixo.
+                {canAlterUnitPrice
+                  ? 'Você pode ajustar quantidades e preços diretamente na tabela abaixo.'
+                  : 'Você pode ajustar quantidades diretamente na tabela abaixo.'}
               </span>
             </div>
 
@@ -943,14 +998,49 @@ export const EditOrderModal: React.FC<EditOrderModalProps> = ({
                       </td>
 
                       <td className="p-2.5 text-right">
-                        <input
-                          type="number"
-                          min="0"
-                          step="0.01"
-                          value={item.unitPrice}
-                          onChange={(e) => handleUpdateItemPrice(idx, e.target.value)}
-                          className="w-20 text-right font-bold text-slate-900 border border-slate-200 rounded p-1 bg-white font-mono"
-                        />
+                        {canAlterUnitPrice ? (
+                          <div className="flex flex-col items-end gap-0.5">
+                            <div className="flex items-center gap-1">
+                              {item.priceOverridden && item.originalUnitPrice !== undefined && (
+                                <button
+                                  type="button"
+                                  onClick={() => handleUpdateItemPrice(idx, item.originalUnitPrice!.toFixed(2))}
+                                  className="p-1 text-slate-400 hover:text-indigo-600 rounded cursor-pointer"
+                                  title={`Restaurar preço original (${formatCurrency(item.originalUnitPrice)})`}
+                                >
+                                  <RotateCcw size={12} />
+                                </button>
+                              )}
+                              <input
+                                type="number"
+                                min="0.01"
+                                step="0.01"
+                                value={item.unitPrice}
+                                onChange={(e) => handleUpdateItemPrice(idx, e.target.value)}
+                                className={`w-22 text-right font-bold border rounded p-1 font-mono ${
+                                  item.priceOverridden
+                                    ? 'bg-indigo-50 border-indigo-300 text-indigo-900'
+                                    : 'bg-white border-slate-200 text-slate-900'
+                                }`}
+                              />
+                            </div>
+                            {item.priceOverridden && item.originalUnitPrice !== undefined && (
+                              <span className="inline-flex items-center gap-1 text-[9px] font-bold text-indigo-600">
+                                <Pencil size={8} />
+                                <span>Orig: {formatCurrency(item.originalUnitPrice)}</span>
+                              </span>
+                            )}
+                          </div>
+                        ) : (
+                          <div className="flex flex-col items-end">
+                            <span className="font-bold text-slate-800 font-mono">
+                              {formatCurrency(item.unitPrice)}
+                            </span>
+                            {item.priceOverridden && (
+                              <span className="text-[9px] font-bold text-indigo-600">Preço Alterado</span>
+                            )}
+                          </div>
+                        )}
                       </td>
 
                       <td className="p-2.5 text-right font-black text-slate-900 font-mono">

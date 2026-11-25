@@ -24,6 +24,8 @@ import {
   Boxes,
   Ticket,
   Gift,
+  Pencil,
+  RotateCcw,
 } from 'lucide-react';
 import { Database } from '../../services/db';
 import { Product, Customer, Order, OrderCommercialKind, OrderItem } from '../../types';
@@ -109,11 +111,18 @@ export const QuickOrderDesk: React.FC<QuickOrderDeskProps> = ({
   // Modal de Cadastro Completo de Cliente (com Endereço e Rota para Romaneio)
   const [showQuickCustomerModal, setShowQuickCustomerModal] = useState<boolean>(false);
 
-  // Modal de Desconto por Item
+  // Permissão estrita para alteração direta de preço unitário: apenas Administrador Geral ou Gerente Geral
+  const canAlterUnitPrice = Database.canCurrentUserAlterUnitPrice(currentUser);
+  const unitPriceOverrideRole: 'admin' | 'gerente' = Database.isAdmin(currentUser) ? 'admin' : 'gerente';
+
+  // Modal de Ajuste (Desconto, Acréscimo ou Alterar Preço) por Item
   const [showItemDiscountModal, setShowItemDiscountModal] = useState<boolean>(false);
   const [discountingItemId, setDiscountingItemId] = useState<string | null>(null);
+  const [itemAdjustmentMode, setItemAdjustmentMode] = useState<'desconto' | 'acrescimo' | 'alterar_preco'>('desconto');
   const [itemDiscountType, setItemDiscountType] = useState<'percent' | 'value'>('percent');
   const [itemDiscountInput, setItemDiscountInput] = useState<string>('');
+  const [searchPriceDrafts, setSearchPriceDrafts] = useState<Record<string, string>>({});
+  const [editingSearchPriceId, setEditingSearchPriceId] = useState<string | null>(null);
 
   // Comprovante / Recibo
   const [completedOrder, setCompletedOrder] = useState<Order | null>(null);
@@ -183,7 +192,7 @@ export const QuickOrderDesk: React.FC<QuickOrderDeskProps> = ({
   // ==========================================
   // MANIPULAÇÃO DO CARRINHO
   // ==========================================
-  const handleAddToCart = (product: Product, quantityToAdd: number = 1) => {
+  const handleAddToCart = (product: Product, quantityToAdd: number = 1, customUnitPriceOverride?: number) => {
     const stock = StockEngine.getBalance(dbState.stockBalances, product.id, selectedLocationId);
     const existing = cart.find((i) => i.productId === product.id);
     const currentCartQty = existing ? existing.quantity : 0;
@@ -197,11 +206,24 @@ export const QuickOrderDesk: React.FC<QuickOrderDeskProps> = ({
       if (!confirmAdd) return;
     }
 
+    const catalogPrice = StockEngine.getProductPriceForCompany(product, currentCompany.id);
+    const effectiveCost = StockEngine.getProductCostForCompany(product, currentCompany.id);
+    const hasAuthorizedOverride =
+      canAlterUnitPrice &&
+      customUnitPriceOverride !== undefined &&
+      Number.isFinite(customUnitPriceOverride) &&
+      customUnitPriceOverride >= 0 &&
+      Math.abs(customUnitPriceOverride - catalogPrice) > 0.005;
+    const appliedPrice = hasAuthorizedOverride
+      ? Math.round(customUnitPriceOverride! * 100) / 100
+      : catalogPrice;
+
     if (existing) {
       const newQty = existing.quantity + quantityToAdd;
-      const unitPrice = existing.unitPrice;
-      const itemDiscVal = existing.discountValue || 0;
-      const totalPrice = Math.max(0, newQty * unitPrice - itemDiscVal);
+      const unitPrice = hasAuthorizedOverride ? appliedPrice : existing.unitPrice;
+      const itemDiscVal = hasAuthorizedOverride ? 0 : existing.discountValue || 0;
+      const itemAddVal = hasAuthorizedOverride ? 0 : existing.additionValue || 0;
+      const totalPrice = Math.max(0, Math.round((newQty * unitPrice + itemAddVal - itemDiscVal) * 100) / 100);
 
       setCart(
         cart.map((i) =>
@@ -209,15 +231,21 @@ export const QuickOrderDesk: React.FC<QuickOrderDeskProps> = ({
             ? {
                 ...i,
                 quantity: newQty,
+                unitPrice,
+                referenceUnitPrice: hasAuthorizedOverride ? unitPrice : i.referenceUnitPrice,
+                originalUnitPrice: hasAuthorizedOverride ? (i.originalUnitPrice ?? catalogPrice) : i.originalUnitPrice,
+                priceOverridden: hasAuthorizedOverride ? true : i.priceOverridden,
+                priceOverriddenByRole: hasAuthorizedOverride ? unitPriceOverrideRole : i.priceOverriddenByRole,
+                discountPercent: hasAuthorizedOverride ? 0 : i.discountPercent,
+                discountValue: itemDiscVal,
+                additionPercent: hasAuthorizedOverride ? 0 : i.additionPercent,
+                additionValue: itemAddVal,
                 totalPrice,
               }
             : i
         )
       );
     } else {
-      const effectivePrice = StockEngine.getProductPriceForCompany(product, currentCompany.id);
-      const effectiveCost = StockEngine.getProductCostForCompany(product, currentCompany.id);
-
       const newItem: OrderItem = {
         id: 'ITM-' + Date.now() + '-' + Math.random().toString(36).substr(2, 4),
         productId: product.id,
@@ -225,10 +253,16 @@ export const QuickOrderDesk: React.FC<QuickOrderDeskProps> = ({
         description: product.description,
         unit: product.unit,
         quantity: quantityToAdd,
-        unitPrice: effectivePrice,
+        unitPrice: appliedPrice,
+        referenceUnitPrice: appliedPrice,
+        originalUnitPrice: hasAuthorizedOverride ? catalogPrice : undefined,
+        priceOverridden: hasAuthorizedOverride || undefined,
+        priceOverriddenByRole: hasAuthorizedOverride ? unitPriceOverrideRole : undefined,
         discountPercent: 0,
         discountValue: 0,
-        totalPrice: effectivePrice * quantityToAdd,
+        additionPercent: 0,
+        additionValue: 0,
+        totalPrice: Math.round(appliedPrice * quantityToAdd * 100) / 100,
         unitCost: effectiveCost,
         locationId: selectedLocationId,
         isMasterPack: product.isMasterPack,
@@ -239,6 +273,13 @@ export const QuickOrderDesk: React.FC<QuickOrderDeskProps> = ({
       setCart([newItem, ...cart]);
     }
 
+    setSearchPriceDrafts((prev) => {
+      if (!(product.id in prev)) return prev;
+      const next = { ...prev };
+      delete next[product.id];
+      return next;
+    });
+    if (editingSearchPriceId === product.id) setEditingSearchPriceId(null);
     setSearchQuery('');
     setShowSearchResults(false);
   };
@@ -268,17 +309,37 @@ export const QuickOrderDesk: React.FC<QuickOrderDeskProps> = ({
   };
 
   // ==========================================
-  // DESCONTO POR ITEM
+  // AJUSTE POR ITEM (DESCONTO, ACRÉSCIMO OU ALTERAR PREÇO)
   // ==========================================
-  const handleOpenItemDiscount = (item: OrderItem) => {
+  const handleOpenItemDiscount = (item: OrderItem, initialMode?: 'desconto' | 'acrescimo' | 'alterar_preco') => {
     setDiscountingItemId(item.id);
-    if (item.discountPercent && item.discountPercent > 0) {
+    if (initialMode === 'alterar_preco' && canAlterUnitPrice) {
+      setItemAdjustmentMode('alterar_preco');
+      setItemDiscountType('value');
+      setItemDiscountInput(item.unitPrice.toFixed(2).replace('.', ','));
+    } else if (item.additionValue && item.additionValue > 0) {
+      setItemAdjustmentMode('acrescimo');
+      if (item.additionPercent && item.additionPercent > 0) {
+        setItemDiscountType('percent');
+        setItemDiscountInput(String(item.additionPercent));
+      } else {
+        setItemDiscountType('value');
+        setItemDiscountInput(item.additionValue.toFixed(2).replace('.', ','));
+      }
+    } else if (item.discountPercent && item.discountPercent > 0) {
+      setItemAdjustmentMode('desconto');
       setItemDiscountType('percent');
       setItemDiscountInput(String(item.discountPercent));
     } else if (item.discountValue && item.discountValue > 0) {
+      setItemAdjustmentMode('desconto');
       setItemDiscountType('value');
       setItemDiscountInput(item.discountValue.toFixed(2).replace('.', ','));
+    } else if (item.priceOverridden && canAlterUnitPrice && !initialMode) {
+      setItemAdjustmentMode('alterar_preco');
+      setItemDiscountType('value');
+      setItemDiscountInput(item.unitPrice.toFixed(2).replace('.', ','));
     } else {
+      setItemAdjustmentMode(initialMode && initialMode !== 'alterar_preco' ? initialMode : 'desconto');
       setItemDiscountType('percent');
       setItemDiscountInput('');
     }
@@ -290,19 +351,73 @@ export const QuickOrderDesk: React.FC<QuickOrderDeskProps> = ({
     const item = cart.find((i) => i.id === discountingItemId);
     if (!item) return;
 
+    if (itemAdjustmentMode === 'alterar_preco') {
+      if (!canAlterUnitPrice) {
+        toast.error(
+          'Somente usuários com perfil Administrador Geral ou Gerente Geral podem alterar o preço unitário.',
+          'Permissão Negada'
+        );
+        return;
+      }
+      const parsedNewPrice = parseFloat(itemDiscountInput.replace(',', '.'));
+      if (!Number.isFinite(parsedNewPrice) || parsedNewPrice < 0) {
+        toast.warning('Informe um preço unitário válido.', 'Preço Inválido');
+        return;
+      }
+      const cleanNewPrice = Math.round(parsedNewPrice * 100) / 100;
+      const product = dbState.products.find((p) => p.id === item.productId);
+      const catalogPrice = product
+        ? StockEngine.getProductPriceForCompany(product, currentCompany.id)
+        : item.originalUnitPrice ?? item.referenceUnitPrice ?? item.unitPrice;
+      const isDifferentFromCatalog = Math.abs(cleanNewPrice - catalogPrice) > 0.005;
+
+      setCart((prev) =>
+        prev.map((i) =>
+          i.id === discountingItemId
+            ? {
+                ...i,
+                unitPrice: cleanNewPrice,
+                referenceUnitPrice: cleanNewPrice,
+                originalUnitPrice: isDifferentFromCatalog ? (i.originalUnitPrice ?? catalogPrice) : undefined,
+                priceOverridden: isDifferentFromCatalog || undefined,
+                priceOverriddenByRole: isDifferentFromCatalog ? unitPriceOverrideRole : undefined,
+                discountPercent: 0,
+                discountValue: 0,
+                additionPercent: 0,
+                additionValue: 0,
+                totalPrice: Math.round(i.quantity * cleanNewPrice * 100) / 100,
+              }
+            : i
+        )
+      );
+      setShowItemDiscountModal(false);
+      setDiscountingItemId(null);
+      return;
+    }
+
     const baseGross = item.quantity * item.unitPrice;
-    const cleanVal = parseFloat(itemDiscountInput.replace(',', '.')) || 0;
+    const cleanVal = Math.max(0, parseFloat(itemDiscountInput.replace(',', '.')) || 0);
     const maxPercent = currentUser.permissions.maxDiscountPercent;
 
     let finalDiscVal = 0;
     let finalDiscPercent = 0;
+    let finalAddVal = 0;
+    let finalAddPercent = 0;
 
-    if (itemDiscountType === 'percent') {
-      finalDiscPercent = Math.min(maxPercent, Math.max(0, cleanVal));
+    if (itemAdjustmentMode === 'acrescimo') {
+      if (itemDiscountType === 'percent') {
+        finalAddPercent = cleanVal;
+        finalAddVal = (baseGross * finalAddPercent) / 100;
+      } else {
+        finalAddVal = cleanVal;
+        finalAddPercent = baseGross > 0 ? (finalAddVal / baseGross) * 100 : 0;
+      }
+    } else if (itemDiscountType === 'percent') {
+      finalDiscPercent = Math.min(maxPercent, cleanVal);
       finalDiscVal = (baseGross * finalDiscPercent) / 100;
     } else {
       const maxAllowedVal = (baseGross * maxPercent) / 100;
-      finalDiscVal = Math.min(maxAllowedVal, Math.min(baseGross, Math.max(0, cleanVal)));
+      finalDiscVal = Math.min(maxAllowedVal, Math.min(baseGross, cleanVal));
       finalDiscPercent = baseGross > 0 ? (finalDiscVal / baseGross) * 100 : 0;
     }
 
@@ -311,9 +426,11 @@ export const QuickOrderDesk: React.FC<QuickOrderDeskProps> = ({
         if (i.id === discountingItemId) {
           return {
             ...i,
-            discountPercent: finalDiscPercent,
-            discountValue: finalDiscVal,
-            totalPrice: Math.max(0, baseGross - finalDiscVal),
+            discountPercent: Math.round(finalDiscPercent * 100) / 100,
+            discountValue: Math.round(finalDiscVal * 100) / 100,
+            additionPercent: Math.round(finalAddPercent * 100) / 100,
+            additionValue: Math.round(finalAddVal * 100) / 100,
+            totalPrice: Math.max(0, Math.round((baseGross + finalAddVal - finalDiscVal) * 100) / 100),
           };
         }
         return i;
@@ -798,11 +915,20 @@ export const QuickOrderDesk: React.FC<QuickOrderDeskProps> = ({
                 filteredProducts.map((p) => {
                   const stock = StockEngine.getBalance(dbState.stockBalances, p.id, selectedLocationId);
                   const isOutOfStock = stock.quantity <= 0;
+                  const catalogPrice = StockEngine.getProductPriceForCompany(p, currentCompany.id);
+                  const draftStr = searchPriceDrafts[p.id];
+                  const parsedDraft =
+                    draftStr !== undefined && draftStr.trim() !== ''
+                      ? parseFloat(draftStr.replace(',', '.'))
+                      : NaN;
+                  const hasDraft = canAlterUnitPrice && Number.isFinite(parsedDraft) && parsedDraft >= 0;
+                  const displayPrice = hasDraft ? parsedDraft : catalogPrice;
+                  const isDraftChanged = hasDraft && Math.abs(displayPrice - catalogPrice) > 0.005;
 
                   return (
                     <div
                       key={p.id}
-                      onClick={() => handleAddToCart(p, 1)}
+                      onClick={() => handleAddToCart(p, 1, hasDraft ? displayPrice : undefined)}
                       className="p-2.5 hover:bg-blue-50 flex items-center justify-between gap-3 cursor-pointer transition-colors"
                     >
                       <div className="flex-1 min-w-0">
@@ -820,8 +946,65 @@ export const QuickOrderDesk: React.FC<QuickOrderDeskProps> = ({
                             </span>
                           )}
                         </div>
-                        <div className="text-[11px] text-slate-400 mt-0.5 flex items-center gap-2">
-                          <span>Preço: <strong className="text-slate-700">{formatCurrency(StockEngine.getProductPriceForCompany(p, currentCompany.id))}</strong></span>
+                        <div className="text-[11px] text-slate-400 mt-0.5 flex items-center gap-2 flex-wrap">
+                          {canAlterUnitPrice ? (
+                            editingSearchPriceId === p.id ? (
+                              <span
+                                onClick={(e) => e.stopPropagation()}
+                                className="inline-flex items-center gap-1 bg-indigo-50 border border-indigo-400 rounded px-1.5 py-0.5"
+                              >
+                                <span className="text-[10px] font-bold text-indigo-700">R$</span>
+                                <input
+                                  type="text"
+                                  inputMode="decimal"
+                                  autoFocus
+                                  value={draftStr ?? catalogPrice.toFixed(2).replace('.', ',')}
+                                  onFocus={(e) => e.currentTarget.select()}
+                                  onChange={(e) =>
+                                    setSearchPriceDrafts((prev) => ({
+                                      ...prev,
+                                      [p.id]: e.target.value.replace(/[^0-9.,]/g, ''),
+                                    }))
+                                  }
+                                  onBlur={() => setEditingSearchPriceId(null)}
+                                  onKeyDown={(e) => {
+                                    if (e.key === 'Enter') {
+                                      e.preventDefault();
+                                      e.stopPropagation();
+                                      setEditingSearchPriceId(null);
+                                    } else if (e.key === 'Escape') {
+                                      e.stopPropagation();
+                                      setEditingSearchPriceId(null);
+                                    }
+                                  }}
+                                  className="w-16 text-right font-mono text-[11px] font-black text-indigo-950 bg-transparent focus:outline-hidden"
+                                />
+                              </span>
+                            ) : (
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setSearchPriceDrafts((prev) => ({
+                                    ...prev,
+                                    [p.id]: displayPrice.toFixed(2).replace('.', ','),
+                                  }));
+                                  setEditingSearchPriceId(p.id);
+                                }}
+                                className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded border cursor-pointer ${
+                                  isDraftChanged
+                                    ? 'bg-indigo-100 text-indigo-900 border-indigo-300 font-bold'
+                                    : 'text-slate-700 border-transparent hover:bg-indigo-50 hover:text-indigo-800'
+                                }`}
+                                title={`Clique para alterar o preço unitário antes de adicionar (Original: ${formatCurrency(catalogPrice)})`}
+                              >
+                                <span>Preço: <strong className="font-mono">{formatCurrency(displayPrice)}</strong></span>
+                                <Pencil size={10} className="text-indigo-500" />
+                              </button>
+                            )
+                          ) : (
+                            <span>Preço: <strong className="text-slate-700">{formatCurrency(catalogPrice)}</strong></span>
+                          )}
                           <span>•</span>
                           <span className={isOutOfStock ? 'text-rose-600 font-semibold' : 'text-emerald-700 font-semibold'}>
                             Saldo ({selectedLocationName}): {formatQuantity(stock.quantity)} {p.unit}
@@ -833,7 +1016,7 @@ export const QuickOrderDesk: React.FC<QuickOrderDeskProps> = ({
                         type="button"
                         onClick={(e) => {
                           e.stopPropagation();
-                          handleAddToCart(p, 1);
+                          handleAddToCart(p, 1, hasDraft ? displayPrice : undefined);
                         }}
                         className="bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs px-2.5 py-1 rounded-lg flex items-center gap-1 shadow-2xs shrink-0 cursor-pointer"
                       >
@@ -909,13 +1092,35 @@ export const QuickOrderDesk: React.FC<QuickOrderDeskProps> = ({
                       </span>
                     )}
                   </div>
-                  <div className="text-[11px] text-slate-500 flex items-center gap-2">
+                  <div className="text-[11px] text-slate-500 flex items-center gap-2 flex-wrap">
+                    {canAlterUnitPrice ? (
+                      <button
+                        type="button"
+                        onClick={() => handleOpenItemDiscount(item, 'alterar_preco')}
+                        className={`inline-flex items-center gap-1 px-1 py-0.2 rounded transition-colors cursor-pointer ${
+                          item.priceOverridden
+                            ? 'bg-indigo-100 text-indigo-900 font-bold border border-indigo-300'
+                            : 'hover:bg-indigo-50 hover:text-indigo-800'
+                        }`}
+                        title="Clique para alterar o preço unitário deste item"
+                      >
+                        <span className="font-mono">{formatCurrency(item.unitPrice)}</span>
+                        <Pencil size={10} />
+                      </button>
+                    ) : (
+                      <span>{formatCurrency(item.unitPrice)}</span>
+                    )}
                     <span>
-                      {formatCurrency(item.unitPrice)} x {item.quantity} {item.unit}
+                      x {item.quantity} {item.unit}
                     </span>
                     {item.discountValue > 0 && (
                       <span className="text-amber-700 font-bold">
                         (-{formatCurrency(item.discountValue)})
+                      </span>
+                    )}
+                    {item.additionValue && item.additionValue > 0 && (
+                      <span className="text-blue-700 font-bold">
+                        (+{formatCurrency(item.additionValue)})
                       </span>
                     )}
                   </div>
@@ -943,16 +1148,20 @@ export const QuickOrderDesk: React.FC<QuickOrderDeskProps> = ({
                     </button>
                   </div>
 
-                  {/* Desconto por Item */}
+                  {/* Ajuste (Desconto, Acréscimo ou Alterar Preço) por Item */}
                   <button
                     type="button"
                     onClick={() => handleOpenItemDiscount(item)}
                     className={`p-1 rounded cursor-pointer transition-colors ${
-                      item.discountValue > 0
+                      item.priceOverridden
+                        ? 'bg-indigo-100 text-indigo-800 ring-1 ring-indigo-300'
+                        : item.additionValue && item.additionValue > 0
+                        ? 'bg-blue-100 text-blue-800 ring-1 ring-blue-300'
+                        : item.discountValue > 0
                         ? 'bg-amber-100 text-amber-800 ring-1 ring-amber-300'
                         : 'text-slate-400 hover:text-amber-600 hover:bg-amber-50'
                     }`}
-                    title="Desconto neste item"
+                    title={canAlterUnitPrice ? 'Desconto, Acréscimo ou Alterar Preço' : 'Desconto ou Acréscimo neste item'}
                   >
                     <Tag size={13} />
                   </button>
@@ -1257,81 +1466,212 @@ export const QuickOrderDesk: React.FC<QuickOrderDeskProps> = ({
         onCustomerCreated={(newCust) => setSelectedCustomerId(newCust.id)}
       />
 
-      {/* Modal de Desconto por Item */}
-      {showItemDiscountModal && discountingItemId && (
-        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 z-50 animate-in fade-in">
-          <div className="bg-white rounded-2xl max-w-sm w-full p-4 space-y-3 shadow-xl border border-slate-200">
-            <div className="flex items-center justify-between pb-2 border-b border-slate-100">
-              <h3 className="font-extrabold text-sm text-slate-900 flex items-center gap-1.5">
-                <Tag size={16} className="text-amber-600" />
-                <span>Desconto no Produto</span>
-              </h3>
-              <button
-                type="button"
-                onClick={() => setShowItemDiscountModal(false)}
-                className="text-slate-400 hover:text-slate-600 p-1"
-              >
-                <X size={16} />
-              </button>
-            </div>
+      {/* Modal de Ajuste (Desconto, Acréscimo ou Alterar Preço) por Item */}
+      {showItemDiscountModal && discountingItemId && (() => {
+        const target = cart.find((i) => i.id === discountingItemId);
+        if (!target) return null;
+        const targetProduct = dbState.products.find((p) => p.id === target.productId);
+        const originalCatalogPrice = targetProduct
+          ? StockEngine.getProductPriceForCompany(targetProduct, currentCompany.id)
+          : target.originalUnitPrice ?? target.referenceUnitPrice ?? target.unitPrice;
+        const isAlterPriceMode = itemAdjustmentMode === 'alterar_preco' && canAlterUnitPrice;
+        const parsedRaw = Math.max(0, parseFloat(itemDiscountInput.replace(',', '.')) || 0);
+        const previewSubtotal = isAlterPriceMode
+          ? Math.round(target.quantity * parsedRaw * 100) / 100
+          : itemAdjustmentMode === 'acrescimo'
+          ? Math.round((target.quantity * target.unitPrice + (itemDiscountType === 'percent' ? (target.quantity * target.unitPrice * parsedRaw) / 100 : parsedRaw)) * 100) / 100
+          : Math.max(0, Math.round((target.quantity * target.unitPrice - (itemDiscountType === 'percent' ? (target.quantity * target.unitPrice * parsedRaw) / 100 : parsedRaw)) * 100) / 100);
 
-            <div className="space-y-3 text-xs">
-              <div className="flex items-center justify-between bg-slate-50 p-2 rounded-xl">
-                <span className="font-bold text-slate-600">Tipo de Desconto:</span>
-                <div className="inline-flex rounded-lg bg-slate-200 p-0.5">
-                  <button
-                    type="button"
-                    onClick={() => setItemDiscountType('percent')}
-                    className={`px-3 py-1 font-bold rounded-md ${
-                      itemDiscountType === 'percent' ? 'bg-amber-600 text-white' : 'text-slate-700'
-                    }`}
-                  >
-                    %
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setItemDiscountType('value')}
-                    className={`px-3 py-1 font-bold rounded-md ${
-                      itemDiscountType === 'value' ? 'bg-amber-600 text-white' : 'text-slate-700'
-                    }`}
-                  >
-                    R$
-                  </button>
-                </div>
-              </div>
-
-              <div>
-                <label className="block font-bold text-slate-700 mb-1">Valor do Desconto</label>
-                <input
-                  type="text"
-                  placeholder={itemDiscountType === 'percent' ? 'Ex: 10' : 'Ex: 15,00'}
-                  value={itemDiscountInput}
-                  onChange={(e) => setItemDiscountInput(e.target.value.replace(/[^0-9.,]/g, ''))}
-                  className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2.5 text-right font-mono font-bold"
-                  autoFocus
-                />
-              </div>
-
-              <div className="pt-2 flex justify-end gap-2">
+        return (
+          <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 z-50 animate-in fade-in">
+            <div className="bg-white rounded-2xl max-w-sm w-full p-4 space-y-3 shadow-xl border border-slate-200">
+              <div className="flex items-center justify-between pb-2 border-b border-slate-100">
+                <h3 className="font-extrabold text-sm text-slate-900 flex items-center gap-1.5">
+                  {isAlterPriceMode ? (
+                    <Pencil size={16} className="text-indigo-600" />
+                  ) : (
+                    <Tag size={16} className={itemAdjustmentMode === 'acrescimo' ? 'text-blue-600' : 'text-amber-600'} />
+                  )}
+                  <span>
+                    {isAlterPriceMode
+                      ? 'Alterar Preço Unitário'
+                      : itemAdjustmentMode === 'acrescimo'
+                      ? 'Acréscimo no Produto'
+                      : 'Desconto no Produto'}
+                  </span>
+                </h3>
                 <button
                   type="button"
                   onClick={() => setShowItemDiscountModal(false)}
-                  className="px-3 py-1.5 border border-slate-200 rounded-xl text-slate-600 font-bold"
+                  className="text-slate-400 hover:text-slate-600 p-1 cursor-pointer"
                 >
-                  Cancelar
+                  <X size={16} />
                 </button>
-                <button
-                  type="button"
-                  onClick={handleApplyItemDiscount}
-                  className="px-3 py-1.5 bg-amber-600 hover:bg-amber-700 text-white rounded-xl font-bold shadow-xs"
-                >
-                  Aplicar Desconto
-                </button>
+              </div>
+
+              <div className="space-y-3 text-xs">
+                <div className="bg-slate-50 p-2 rounded-xl border border-slate-200 space-y-0.5">
+                  <div className="font-bold text-slate-900 truncate">{target.description}</div>
+                  {isAlterPriceMode && (
+                    <div className="flex justify-between text-[11px] text-indigo-700 font-semibold">
+                      <span>Preço Original Cadastrado:</span>
+                      <span className="font-mono font-bold">{formatCurrency(originalCatalogPrice)}</span>
+                    </div>
+                  )}
+                </div>
+
+                {/* Abas de Operação */}
+                <div className="flex bg-slate-100 p-0.5 rounded-xl border border-slate-200 gap-0.5">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setItemAdjustmentMode('desconto');
+                      setItemDiscountInput('');
+                    }}
+                    className={`flex-1 py-1.5 text-[11px] font-bold rounded-lg cursor-pointer ${
+                      itemAdjustmentMode === 'desconto' ? 'bg-amber-600 text-white shadow-2xs' : 'text-slate-600'
+                    }`}
+                  >
+                    Desconto (-)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setItemAdjustmentMode('acrescimo');
+                      setItemDiscountInput('');
+                    }}
+                    className={`flex-1 py-1.5 text-[11px] font-bold rounded-lg cursor-pointer ${
+                      itemAdjustmentMode === 'acrescimo' ? 'bg-blue-600 text-white shadow-2xs' : 'text-slate-600'
+                    }`}
+                  >
+                    Acréscimo (+)
+                  </button>
+                  {canAlterUnitPrice && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setItemAdjustmentMode('alterar_preco');
+                        setItemDiscountType('value');
+                        setItemDiscountInput(target.unitPrice.toFixed(2).replace('.', ','));
+                      }}
+                      className={`flex-1 py-1.5 text-[11px] font-bold rounded-lg cursor-pointer ${
+                        itemAdjustmentMode === 'alterar_preco' ? 'bg-indigo-600 text-white shadow-2xs' : 'text-slate-600'
+                      }`}
+                    >
+                      Alterar Preço
+                    </button>
+                  )}
+                </div>
+
+                {isAlterPriceMode ? (
+                  <div className="space-y-1.5">
+                    <div className="flex items-center justify-between">
+                      <label className="font-bold text-slate-700">Novo Preço Unitário (R$)</label>
+                      {Math.abs(parsedRaw - originalCatalogPrice) > 0.005 && (
+                        <button
+                          type="button"
+                          onClick={() => setItemDiscountInput(originalCatalogPrice.toFixed(2).replace('.', ','))}
+                          className="text-[10px] font-bold text-indigo-700 hover:underline cursor-pointer flex items-center gap-1"
+                        >
+                          <RotateCcw size={10} />
+                          Restaurar Original
+                        </button>
+                      )}
+                    </div>
+                    <input
+                      type="text"
+                      inputMode="decimal"
+                      placeholder="0,00"
+                      value={itemDiscountInput}
+                      onFocus={(e) => e.currentTarget.select()}
+                      onChange={(e) => setItemDiscountInput(e.target.value.replace(/[^0-9.,]/g, ''))}
+                      className="w-full bg-indigo-50/40 border-2 border-indigo-300 rounded-xl p-2.5 text-right font-mono font-black text-base"
+                      autoFocus
+                    />
+                  </div>
+                ) : (
+                  <>
+                    <div className="flex items-center justify-between bg-slate-50 p-2 rounded-xl">
+                      <span className="font-bold text-slate-600">Tipo:</span>
+                      <div className="inline-flex rounded-lg bg-slate-200 p-0.5">
+                        <button
+                          type="button"
+                          onClick={() => setItemDiscountType('percent')}
+                          className={`px-3 py-1 font-bold rounded-md cursor-pointer ${
+                            itemDiscountType === 'percent'
+                              ? itemAdjustmentMode === 'acrescimo' ? 'bg-blue-600 text-white' : 'bg-amber-600 text-white'
+                              : 'text-slate-700'
+                          }`}
+                        >
+                          %
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setItemDiscountType('value')}
+                          className={`px-3 py-1 font-bold rounded-md cursor-pointer ${
+                            itemDiscountType === 'value'
+                              ? itemAdjustmentMode === 'acrescimo' ? 'bg-blue-600 text-white' : 'bg-amber-600 text-white'
+                              : 'text-slate-700'
+                          }`}
+                        >
+                          R$
+                        </button>
+                      </div>
+                    </div>
+
+                    <div>
+                      <label className="block font-bold text-slate-700 mb-1">
+                        {itemAdjustmentMode === 'acrescimo' ? 'Valor do Acréscimo' : 'Valor do Desconto'}
+                      </label>
+                      <input
+                        type="text"
+                        inputMode="decimal"
+                        placeholder={itemDiscountType === 'percent' ? 'Ex: 10' : 'Ex: 15,00'}
+                        value={itemDiscountInput}
+                        onChange={(e) => setItemDiscountInput(e.target.value.replace(/[^0-9.,]/g, ''))}
+                        className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2.5 text-right font-mono font-bold"
+                        autoFocus
+                      />
+                    </div>
+                  </>
+                )}
+
+                <div className="bg-slate-900 text-white rounded-xl p-2.5 flex justify-between items-center font-mono">
+                  <span className="text-[11px] text-slate-300">Novo Subtotal do Item:</span>
+                  <span className="text-sm font-black text-emerald-400">{formatCurrency(previewSubtotal)}</span>
+                </div>
+
+                <div className="pt-2 flex justify-end gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setShowItemDiscountModal(false)}
+                    className="px-3 py-1.5 border border-slate-200 rounded-xl text-slate-600 font-bold cursor-pointer"
+                  >
+                    Cancelar
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleApplyItemDiscount}
+                    className={`px-3 py-1.5 text-white rounded-xl font-bold shadow-xs cursor-pointer ${
+                      isAlterPriceMode
+                        ? 'bg-indigo-600 hover:bg-indigo-700'
+                        : itemAdjustmentMode === 'acrescimo'
+                        ? 'bg-blue-600 hover:bg-blue-700'
+                        : 'bg-amber-600 hover:bg-amber-700'
+                    }`}
+                  >
+                    {isAlterPriceMode
+                      ? 'Confirmar Novo Preço'
+                      : itemAdjustmentMode === 'acrescimo'
+                      ? 'Aplicar Acréscimo'
+                      : 'Aplicar Desconto'}
+                  </button>
+                </div>
               </div>
             </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
 
       {/* MODAL: TELA DE CONFIRMAÇÃO DA VENDA (NOME DO CLIENTE, TOTAL, FORMA E PRAZO DE PAGTO) */}
       <SaleConfirmationModal

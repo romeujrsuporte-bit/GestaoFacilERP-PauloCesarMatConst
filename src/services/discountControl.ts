@@ -59,6 +59,8 @@ export interface EvaluateItemDiscountInput {
   quantity: number;
   unitPrice: number;
   referenceUnitPrice?: number;
+  priceOverridden?: boolean;
+  priceOverriddenByRole?: 'admin' | 'gerente';
   itemDiscountValue?: number;
   itemDiscountPercent?: number;
   globalDiscountShare?: number;
@@ -361,12 +363,16 @@ export function evaluateItemMaxDiscount(input: EvaluateItemDiscountInput): ItemD
 
   const safeQty = Math.max(0, Number.isFinite(quantity) ? quantity : 0);
   const tablePrice = StockEngine.getProductPriceForCompany(product, companyId);
-  const effectiveRefUnitPrice =
-    input.referenceUnitPrice !== undefined && input.referenceUnitPrice > 0
-      ? input.referenceUnitPrice
-      : tablePrice > 0
-      ? tablePrice
-      : Math.max(0, unitPrice);
+  const isAuthorizedDirectPriceOverride =
+    input.priceOverridden === true &&
+    (input.priceOverriddenByRole === 'admin' || input.priceOverriddenByRole === 'gerente');
+  const effectiveRefUnitPrice = isAuthorizedDirectPriceOverride
+    ? Math.max(0, unitPrice)
+    : input.referenceUnitPrice !== undefined && input.referenceUnitPrice > 0
+    ? input.referenceUnitPrice
+    : tablePrice > 0
+    ? tablePrice
+    : Math.max(0, unitPrice);
 
   const grossLineValue = effectiveRefUnitPrice * safeQty;
   const manualPriceDiscountTotal = Math.max(0, (effectiveRefUnitPrice - unitPrice) * safeQty);
@@ -571,6 +577,8 @@ export function validateOrderDiscounts(params: {
       quantity: item.quantity,
       unitPrice: item.unitPrice,
       referenceUnitPrice: item.referenceUnitPrice,
+      priceOverridden: item.priceOverridden,
+      priceOverriddenByRole: item.priceOverriddenByRole,
       itemDiscountValue: item.discountValue || 0,
       itemDiscountPercent: item.discountPercent || 0,
       globalDiscountShare,

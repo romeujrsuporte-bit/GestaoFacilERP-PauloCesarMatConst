@@ -39,6 +39,7 @@ import {
   Boxes,
   Clock,
   Ticket,
+  Pencil,
 } from 'lucide-react';
 import { Database } from '../../services/db';
 import { Product, Customer, Order, OrderItem, CashRegister, DiscountAuthorizationRecord } from '../../types';
@@ -90,6 +91,8 @@ export const PosView: React.FC<PosViewProps> = ({
   const [dbState, setDbState] = useState(Database.getState());
   const currentCompany = Database.getCurrentCompany();
   const currentUser = Database.getCurrentUser();
+  const canAlterUnitPrice = Database.canCurrentUserAlterUnitPrice(currentUser);
+  const unitPriceOverrideRole: 'admin' | 'gerente' = Database.isAdmin(currentUser) ? 'admin' : 'gerente';
 
   const [internalHideKpis, setInternalHideKpis] = useState(true);
   const isKpisHidden = propHideDashboardKpis !== undefined ? propHideDashboardKpis : internalHideKpis;
@@ -236,16 +239,58 @@ export const PosView: React.FC<PosViewProps> = ({
     onReduceToLimit?: () => void;
   } | null>(null);
 
-  // Modal de Desconto por Produto
+  // Edição rápida de preço unitário antes de incluir no cupom (somente Administrador Geral ou Gerente Geral)
+  const [posPriceDrafts, setPosPriceDrafts] = useState<Record<string, string>>({});
+  const [editingPosPriceId, setEditingPosPriceId] = useState<string | null>(null);
+  const [stagedPosProductId, setStagedPosProductId] = useState<string>('');
+  const [stagedPosUnitPriceInput, setStagedPosUnitPriceInput] = useState<string>('');
+  const [isEditingStagedPosPrice, setIsEditingStagedPosPrice] = useState<boolean>(false);
+  const stagedPosPriceInputRef = useRef<HTMLInputElement>(null);
+  const posQtyInputRef = useRef<HTMLInputElement>(null);
+
+  // Modal de Desconto / Acréscimo / Alteração de Preço por Produto
   const [showItemDiscountModal, setShowItemDiscountModal] = useState<boolean>(false);
   const [discountingItemId, setDiscountingItemId] = useState<string | null>(null);
+  const [itemAdjustmentMode, setItemAdjustmentMode] = useState<'desconto' | 'acrescimo' | 'alterar_preco'>('desconto');
   const [itemDiscountType, setItemDiscountType] = useState<'percent' | 'value'>('percent');
   const [itemDiscountInput, setItemDiscountInput] = useState<string>('');
   const itemDiscountInputRef = useRef<HTMLInputElement>(null);
 
-  const handleOpenItemDiscountModal = (item: OrderItem) => {
+  const handleOpenItemDiscountModal = (
+    item: OrderItem,
+    initialMode?: 'desconto' | 'acrescimo' | 'alterar_preco'
+  ) => {
+    const resolvedMode: 'desconto' | 'acrescimo' | 'alterar_preco' =
+      initialMode === 'alterar_preco' && canAlterUnitPrice
+        ? 'alterar_preco'
+        : initialMode === 'acrescimo'
+        ? 'acrescimo'
+        : initialMode === 'desconto'
+        ? 'desconto'
+        : (item.additionValue || 0) > 0 || (item.additionPercent || 0) > 0
+        ? 'acrescimo'
+        : item.priceOverridden && canAlterUnitPrice && !(item.discountValue > 0)
+        ? 'alterar_preco'
+        : 'desconto';
+
     setDiscountingItemId(item.productId);
-    if (item.discountValue > 0 || item.discountPercent > 0) {
+    setItemAdjustmentMode(resolvedMode);
+
+    if (resolvedMode === 'alterar_preco') {
+      setItemDiscountType('value');
+      setItemDiscountInput(item.unitPrice.toFixed(2).replace('.', ','));
+    } else if (resolvedMode === 'acrescimo') {
+      if ((item.additionPercent || 0) > 0) {
+        setItemDiscountType('percent');
+        setItemDiscountInput((item.additionPercent || 0).toFixed(2).replace(/\.?0+$/, '').replace('.', ','));
+      } else if ((item.additionValue || 0) > 0) {
+        setItemDiscountType('value');
+        setItemDiscountInput((item.additionValue || 0).toFixed(2).replace('.', ','));
+      } else {
+        setItemDiscountType('percent');
+        setItemDiscountInput('');
+      }
+    } else if (item.discountValue > 0 || item.discountPercent > 0) {
       if (item.discountPercent > 0) {
         setItemDiscountType('percent');
         setItemDiscountInput(item.discountPercent.toFixed(2).replace(/\.?0+$/, '').replace('.', ','));
@@ -268,7 +313,8 @@ export const PosView: React.FC<PosViewProps> = ({
     productId: string,
     finalPercent: number,
     finalValue: number,
-    authorization?: DiscountAuthorizationRecord | null
+    authorization?: DiscountAuthorizationRecord | null,
+    mode: 'desconto' | 'acrescimo' = 'desconto'
   ) => {
     const roundedPercent = Math.round(finalPercent * 100) / 100;
     const roundedValue = Math.round(finalValue * 100) / 100;
@@ -277,35 +323,115 @@ export const PosView: React.FC<PosViewProps> = ({
       prev.map((i) => {
         if (i.productId !== productId) return i;
         const gross = i.quantity * i.unitPrice;
-        const nextTotal = Math.max(0, Math.round((gross - roundedValue) * 100) / 100);
+        const isAdd = mode === 'acrescimo';
+        const nextTotal = isAdd
+          ? Math.max(0, Math.round((gross + roundedValue) * 100) / 100)
+          : Math.max(0, Math.round((gross - roundedValue) * 100) / 100);
         if (
           i.discountAuthorization?.operationId &&
-          i.discountAuthorization.operationId !== authorization?.operationId
+          (isAdd || i.discountAuthorization.operationId !== authorization?.operationId)
         ) {
           revokeDiscountAuthorization(i.discountAuthorization.operationId);
         }
         return {
           ...i,
-          discountPercent: roundedPercent,
-          discountValue: roundedValue,
+          discountPercent: isAdd ? 0 : roundedPercent,
+          discountValue: isAdd ? 0 : roundedValue,
+          additionPercent: isAdd ? roundedPercent : 0,
+          additionValue: isAdd ? roundedValue : 0,
           totalPrice: nextTotal,
-          discountAuthorization: authorization || undefined,
+          discountAuthorization: isAdd ? undefined : authorization || undefined,
         };
       })
     );
 
     if (lastAddedItem && lastAddedItem.productId === productId) {
       const gross = lastAddedItem.quantity * lastAddedItem.unitPrice;
+      const isAdd = mode === 'acrescimo';
       setLastAddedItem({
         ...lastAddedItem,
-        discountPercent: roundedPercent,
-        discountValue: roundedValue,
-        totalPrice: Math.max(0, Math.round((gross - roundedValue) * 100) / 100),
-        discountAuthorization: authorization || undefined,
+        discountPercent: isAdd ? 0 : roundedPercent,
+        discountValue: isAdd ? 0 : roundedValue,
+        additionPercent: isAdd ? roundedPercent : 0,
+        additionValue: isAdd ? roundedValue : 0,
+        totalPrice: isAdd
+          ? Math.max(0, Math.round((gross + roundedValue) * 100) / 100)
+          : Math.max(0, Math.round((gross - roundedValue) * 100) / 100),
+        discountAuthorization: isAdd ? undefined : authorization || undefined,
       });
     }
 
     setShowItemDiscountModal(false);
+    setTimeout(() => barcodeInputRef.current?.focus(), 50);
+  };
+
+  const commitItemUnitPriceOverride = (productId: string, newUnitPrice: number) => {
+    if (!canAlterUnitPrice) {
+      toast.error(
+        'Apenas usuários com perfil Administrador Geral ou Gerente Geral podem alterar o preço unitário.',
+        'Acesso Negado'
+      );
+      return;
+    }
+
+    const roundedPrice = Math.round(newUnitPrice * 100) / 100;
+    if (isNaN(roundedPrice) || roundedPrice <= 0) {
+      toast.warning('Informe um preço unitário válido maior que zero.', 'Preço Inválido');
+      return;
+    }
+
+    const product = dbState.products.find((p) => p.id === productId);
+    const catalogPrice = product
+      ? StockEngine.getProductPriceForCompany(product, currentCompany.id)
+      : undefined;
+
+    setCart((prev) =>
+      prev.map((i) => {
+        if (i.productId !== productId) return i;
+        if (i.discountAuthorization?.operationId) {
+          revokeDiscountAuthorization(i.discountAuthorization.operationId);
+        }
+        const origPrice = i.originalUnitPrice ?? catalogPrice ?? i.unitPrice;
+        const isOverridden = Math.abs(roundedPrice - origPrice) > 0.004;
+        const nextTotal = Math.round(i.quantity * roundedPrice * 100) / 100;
+        return {
+          ...i,
+          unitPrice: roundedPrice,
+          referenceUnitPrice: roundedPrice,
+          originalUnitPrice: origPrice,
+          priceOverridden: isOverridden,
+          priceOverriddenByRole: isOverridden ? unitPriceOverrideRole : undefined,
+          discountPercent: 0,
+          discountValue: 0,
+          additionPercent: 0,
+          additionValue: 0,
+          totalPrice: nextTotal,
+          discountAuthorization: undefined,
+        };
+      })
+    );
+
+    if (lastAddedItem && lastAddedItem.productId === productId) {
+      const origPrice = lastAddedItem.originalUnitPrice ?? catalogPrice ?? lastAddedItem.unitPrice;
+      const isOverridden = Math.abs(roundedPrice - origPrice) > 0.004;
+      setLastAddedItem({
+        ...lastAddedItem,
+        unitPrice: roundedPrice,
+        referenceUnitPrice: roundedPrice,
+        originalUnitPrice: origPrice,
+        priceOverridden: isOverridden,
+        priceOverriddenByRole: isOverridden ? unitPriceOverrideRole : undefined,
+        discountPercent: 0,
+        discountValue: 0,
+        additionPercent: 0,
+        additionValue: 0,
+        totalPrice: Math.round(lastAddedItem.quantity * roundedPrice * 100) / 100,
+        discountAuthorization: undefined,
+      });
+    }
+
+    setShowItemDiscountModal(false);
+    toast.success(`Preço unitário alterado para ${formatCurrency(roundedPrice)} nesta venda.`, 'Preço Atualizado');
     setTimeout(() => barcodeInputRef.current?.focus(), 50);
   };
 
@@ -317,9 +443,46 @@ export const PosView: React.FC<PosViewProps> = ({
       return;
     }
 
+    const rawNum = Math.max(0, parseFloat(itemDiscountInput.replace(',', '.')) || 0);
+
+    // Modo 3: Alteração Direta de Preço Unitário (somente Admin / Gerente Geral)
+    if (itemAdjustmentMode === 'alterar_preco') {
+      if (!canAlterUnitPrice) {
+        toast.error(
+          'Apenas Administrador Geral ou Gerente Geral podem alterar o preço unitário.',
+          'Permissão Restrita'
+        );
+        return;
+      }
+      if (rawNum <= 0) {
+        toast.warning('Informe um preço unitário válido maior que zero.', 'Preço Inválido');
+        return;
+      }
+      commitItemUnitPriceOverride(targetItem.productId, rawNum);
+      return;
+    }
+
     const product = dbState.products.find((p) => p.id === targetItem.productId);
     const gross = targetItem.quantity * targetItem.unitPrice;
-    const rawNum = Math.max(0, parseFloat(itemDiscountInput.replace(',', '.')) || 0);
+
+    // Modo 2: Acréscimo (+)
+    if (itemAdjustmentMode === 'acrescimo') {
+      let finalPercent = 0;
+      let finalValue = 0;
+      if (rawNum > 0) {
+        if (itemDiscountType === 'percent') {
+          finalPercent = rawNum;
+          finalValue = (gross * finalPercent) / 100;
+        } else {
+          finalValue = rawNum;
+          finalPercent = gross > 0 ? (finalValue / gross) * 100 : 0;
+        }
+      }
+      commitItemDiscountUpdate(targetItem.productId, finalPercent, finalValue, null, 'acrescimo');
+      return;
+    }
+
+    // Modo 1: Desconto (-)
     const maxPercent = currentUser.permissions.maxDiscountPercent;
 
     let finalPercent = 0;
@@ -355,6 +518,8 @@ export const PosView: React.FC<PosViewProps> = ({
         quantity: targetItem.quantity,
         unitPrice: targetItem.unitPrice,
         referenceUnitPrice: targetItem.referenceUnitPrice,
+        priceOverridden: targetItem.priceOverridden,
+        priceOverriddenByRole: targetItem.priceOverriddenByRole,
         itemDiscountValue: finalValue,
         itemDiscountPercent: finalPercent,
         explicitPercentRequested,
@@ -368,7 +533,7 @@ export const PosView: React.FC<PosViewProps> = ({
           violation: evaluation.violation,
           onAuthorized: (record) => {
             setDiscountAuthPrompt(null);
-            commitItemDiscountUpdate(targetItem.productId, finalPercent, finalValue, record);
+            commitItemDiscountUpdate(targetItem.productId, finalPercent, finalValue, record, 'desconto');
             toast.success(
               `Desconto autorizado por ${record.authorizerUserName} para "${product.description}".`,
               'Autorização Concedida'
@@ -380,7 +545,8 @@ export const PosView: React.FC<PosViewProps> = ({
               targetItem.productId,
               evaluation.maxDiscountPercentAllowed,
               evaluation.maxDiscountValueAllowed,
-              null
+              null,
+              'desconto'
             );
             toast.info(
               `Desconto ajustado para o limite permitido do produto (${evaluation.maxDiscountPercentAllowed.toFixed(2)}% / ${formatCurrency(evaluation.maxDiscountValueAllowed)}).`,
@@ -392,21 +558,21 @@ export const PosView: React.FC<PosViewProps> = ({
       }
 
       if (evaluation.exceeded && evaluation.authorized && targetItem.discountAuthorization) {
-        commitItemDiscountUpdate(targetItem.productId, finalPercent, finalValue, targetItem.discountAuthorization);
+        commitItemDiscountUpdate(targetItem.productId, finalPercent, finalValue, targetItem.discountAuthorization, 'desconto');
         return;
       }
 
       // Dentro do limite: remove eventual autorização anterior
-      commitItemDiscountUpdate(targetItem.productId, finalPercent, finalValue, null);
+      commitItemDiscountUpdate(targetItem.productId, finalPercent, finalValue, null, 'desconto');
       return;
     }
 
-    commitItemDiscountUpdate(targetItem.productId, finalPercent, finalValue, null);
+    commitItemDiscountUpdate(targetItem.productId, finalPercent, finalValue, null, 'desconto');
   };
 
   const handleRemoveItemDiscount = () => {
     if (!discountingItemId) return;
-    commitItemDiscountUpdate(discountingItemId, 0, 0, null);
+    commitItemDiscountUpdate(discountingItemId, 0, 0, null, 'desconto');
   };
 
   // Modal de Quantidade Fracionada [F12] (até 3 casas decimais com recálculo automático do Total Líquido)
@@ -489,11 +655,13 @@ export const PosView: React.FC<PosViewProps> = ({
             }
             const gross = roundedQty * item.unitPrice;
             const discVal = (gross * (item.discountPercent || 0)) / 100;
+            const addVal = (gross * (item.additionPercent || 0)) / 100;
             return {
               ...item,
               quantity: roundedQty,
               discountValue: Math.round(discVal * 100) / 100,
-              totalPrice: Math.round((gross - discVal) * 100) / 100,
+              additionValue: Math.round(addVal * 100) / 100,
+              totalPrice: Math.round((gross + addVal - discVal) * 100) / 100,
               discountAuthorization:
                 Math.abs(item.quantity - roundedQty) > 0.0005 ? undefined : item.discountAuthorization,
             };
@@ -504,11 +672,13 @@ export const PosView: React.FC<PosViewProps> = ({
       if (lastAddedItem && lastAddedItem.productId === fractionalProductId) {
         const gross = roundedQty * lastAddedItem.unitPrice;
         const discVal = (gross * (lastAddedItem.discountPercent || 0)) / 100;
+        const addVal = (gross * (lastAddedItem.additionPercent || 0)) / 100;
         setLastAddedItem({
           ...lastAddedItem,
           quantity: roundedQty,
           discountValue: Math.round(discVal * 100) / 100,
-          totalPrice: Math.round((gross - discVal) * 100) / 100,
+          additionValue: Math.round(addVal * 100) / 100,
+          totalPrice: Math.round((gross + addVal - discVal) * 100) / 100,
           discountAuthorization:
             Math.abs(lastAddedItem.quantity - roundedQty) > 0.0005
               ? undefined
@@ -709,13 +879,25 @@ export const PosView: React.FC<PosViewProps> = ({
   };
 
   // Adicionar produto ao carrinho e contar 1 unidade (ou quantidade especificada)
-  const handleAddToCart = (product: Product, quantityToAdd: number = 1) => {
+  const handleAddToCart = (product: Product, quantityToAdd: number = 1, customUnitPriceOverride?: number) => {
     if (quantityToAdd <= 0) quantityToAdd = 1;
 
     const stockBalance = StockEngine.getBalance(dbState.stockBalances, product.id, selectedLocationId);
     const existingInCart = cart.find((i) => i.productId === product.id);
     const currentCartQty = existingInCart ? existingInCart.quantity : 0;
     const requestedTotal = currentCartQty + quantityToAdd;
+
+    const catalogPrice = StockEngine.getProductPriceForCompany(product, currentCompany.id);
+    const effectiveCost = StockEngine.getProductCostForCompany(product, currentCompany.id);
+    const hasAuthorizedOverride =
+      canAlterUnitPrice &&
+      customUnitPriceOverride !== undefined &&
+      !isNaN(customUnitPriceOverride) &&
+      customUnitPriceOverride > 0 &&
+      Math.abs(customUnitPriceOverride - catalogPrice) > 0.004;
+    const finalInitialUnitPrice = hasAuthorizedOverride
+      ? Math.round(customUnitPriceOverride! * 100) / 100
+      : catalogPrice;
 
     // Avisa se o saldo for menor, mas não bloqueia a venda no balcão da loja física
     if (stockBalance.quantity < requestedTotal) {
@@ -733,20 +915,29 @@ export const PosView: React.FC<PosViewProps> = ({
         revokeDiscountAuthorization(existingInCart.discountAuthorization.operationId);
       }
       const newQty = existingInCart.quantity + quantityToAdd;
-      const newGross = newQty * existingInCart.unitPrice;
-      const newDiscVal = (newGross * (existingInCart.discountPercent || 0)) / 100;
+      const nextUnitPrice = hasAuthorizedOverride ? finalInitialUnitPrice : existingInCart.unitPrice;
+      const newGross = newQty * nextUnitPrice;
+      const newDiscPct = hasAuthorizedOverride ? 0 : (existingInCart.discountPercent || 0);
+      const newAddPct = hasAuthorizedOverride ? 0 : (existingInCart.additionPercent || 0);
+      const newDiscVal = (newGross * newDiscPct) / 100;
+      const newAddVal = (newGross * newAddPct) / 100;
       affectedItem = {
         ...existingInCart,
         quantity: newQty,
+        unitPrice: nextUnitPrice,
+        referenceUnitPrice: hasAuthorizedOverride ? nextUnitPrice : existingInCart.referenceUnitPrice,
+        originalUnitPrice: existingInCart.originalUnitPrice ?? catalogPrice,
+        priceOverridden: hasAuthorizedOverride ? true : existingInCart.priceOverridden,
+        priceOverriddenByRole: hasAuthorizedOverride ? unitPriceOverrideRole : existingInCart.priceOverriddenByRole,
+        discountPercent: newDiscPct,
         discountValue: Math.round(newDiscVal * 100) / 100,
-        totalPrice: Math.round((newGross - newDiscVal) * 100) / 100,
+        additionPercent: newAddPct,
+        additionValue: Math.round(newAddVal * 100) / 100,
+        totalPrice: Math.round((newGross + newAddVal - newDiscVal) * 100) / 100,
         discountAuthorization: undefined,
       };
       updatedCart = cart.map((item) => (item.productId === product.id ? affectedItem : item));
     } else {
-      const effectivePrice = StockEngine.getProductPriceForCompany(product, currentCompany.id);
-      const effectiveCost = StockEngine.getProductCostForCompany(product, currentCompany.id);
-
       affectedItem = {
         id: 'ITEM-' + Date.now() + '-' + Math.random().toString(36).substring(2, 5),
         productId: product.id,
@@ -754,11 +945,16 @@ export const PosView: React.FC<PosViewProps> = ({
         description: product.description,
         unit: product.unit,
         quantity: quantityToAdd,
-        unitPrice: effectivePrice,
-        referenceUnitPrice: effectivePrice,
+        unitPrice: finalInitialUnitPrice,
+        referenceUnitPrice: finalInitialUnitPrice,
+        originalUnitPrice: catalogPrice,
+        priceOverridden: hasAuthorizedOverride ? true : undefined,
+        priceOverriddenByRole: hasAuthorizedOverride ? unitPriceOverrideRole : undefined,
         discountPercent: 0,
         discountValue: 0,
-        totalPrice: quantityToAdd * effectivePrice,
+        additionPercent: 0,
+        additionValue: 0,
+        totalPrice: Math.round(quantityToAdd * finalInitialUnitPrice * 100) / 100,
         unitCost: effectiveCost,
         locationId: selectedLocationId,
         isMasterPack: product.isMasterPack,
@@ -773,6 +969,13 @@ export const PosView: React.FC<PosViewProps> = ({
     setLastAddedItem(affectedItem);
     setBarcodeInput('');
     setQuantityInput('1');
+    setEditingPosPriceId(null);
+    setPosPriceDrafts((prev) => {
+      if (!(product.id in prev)) return prev;
+      const next = { ...prev };
+      delete next[product.id];
+      return next;
+    });
 
     const prodObsAlert = getProductSaleAlert(product);
     if (prodObsAlert) {
@@ -793,16 +996,54 @@ export const PosView: React.FC<PosViewProps> = ({
     }, 20);
   };
 
+  const handleSelectStagedPosProduct = (product: Product) => {
+    setStagedPosProductId(product.id);
+    setBarcodeInput('');
+    setStagedPosUnitPriceInput('');
+    setIsEditingStagedPosPrice(false);
+    setQuantityInput('1');
+    setTimeout(() => {
+      posQtyInputRef.current?.focus();
+      posQtyInputRef.current?.select();
+    }, 20);
+  };
+
+  const handleCommitStagedPosProduct = () => {
+    if (!stagedPosProductId) return;
+    const prod = dbState.products.find((p) => p.id === stagedPosProductId);
+    if (!prod) {
+      setStagedPosProductId('');
+      return;
+    }
+    const qty = Math.max(0.001, parseFloat((quantityInput || '1').replace(',', '.')) || 1);
+    const parsedPrice = parseFloat(stagedPosUnitPriceInput.replace(',', '.'));
+    const customPrice =
+      canAlterUnitPrice && stagedPosUnitPriceInput.trim() !== '' && Number.isFinite(parsedPrice) && parsedPrice > 0
+        ? parsedPrice
+        : undefined;
+
+    handleAddToCart(prod, qty, customPrice);
+    setStagedPosProductId('');
+    setStagedPosUnitPriceInput('');
+    setIsEditingStagedPosPrice(false);
+  };
+
   // Processa leitura de código de barras ou digitação do código do produto
   const handleProcessBarcodeOrCode = (rawQuery: string, forcedQty?: number) => {
     const query = (rawQuery || barcodeInput).trim();
-    if (!query) return;
+    if (!query) {
+      if (stagedPosProductId) {
+        handleCommitStagedPosProduct();
+      }
+      return;
+    }
 
     let qty = 1;
     let cleanCode = query;
+    const hasMultiplier = query.includes('*');
 
     // Suporte para quantidade multiplicadora no formato: "2*PA-301" ou "3*789..."
-    if (query.includes('*')) {
+    if (hasMultiplier) {
       const parts = query.split('*');
       const parsedQty = parseFloat(parts[0].replace(',', '.'));
       if (!isNaN(parsedQty) && parsedQty > 0) {
@@ -823,7 +1064,12 @@ export const PosView: React.FC<PosViewProps> = ({
     const matched = findProductByCodeOrBarcode(cleanCode);
 
     if (matched) {
-      handleAddToCart(matched, qty);
+      const isExactBarcodeScan = Boolean(matched.barcode && matched.barcode.trim() === cleanCode);
+      if (isExactBarcodeScan || hasMultiplier) {
+        handleAddToCart(matched, qty);
+      } else {
+        handleSelectStagedPosProduct(matched);
+      }
     } else {
       playBeep('error');
       setFeedbackMessage({
@@ -840,6 +1086,10 @@ export const PosView: React.FC<PosViewProps> = ({
   // Entrada pelo campo de leitor / código ao teclar Enter
   const handleBarcodeSubmit = (e: React.FormEvent) => {
     e.preventDefault();
+    if (stagedPosProductId && !barcodeInput.trim()) {
+      handleCommitStagedPosProduct();
+      return;
+    }
     handleProcessBarcodeOrCode(barcodeInput);
   };
 
@@ -866,11 +1116,13 @@ export const PosView: React.FC<PosViewProps> = ({
 
             const gross = newQty * item.unitPrice;
             const discVal = (gross * (item.discountPercent || 0)) / 100;
+            const addVal = (gross * (item.additionPercent || 0)) / 100;
             return {
               ...item,
               quantity: newQty,
               discountValue: Math.round(discVal * 100) / 100,
-              totalPrice: Math.round((gross - discVal) * 100) / 100,
+              additionValue: Math.round(addVal * 100) / 100,
+              totalPrice: Math.round((gross + addVal - discVal) * 100) / 100,
               discountAuthorization: undefined,
             };
           }
@@ -895,11 +1147,13 @@ export const PosView: React.FC<PosViewProps> = ({
           }
           const gross = qty * item.unitPrice;
           const discVal = (gross * (item.discountPercent || 0)) / 100;
+          const addVal = (gross * (item.additionPercent || 0)) / 100;
           return {
             ...item,
             quantity: qty,
             discountValue: Math.round(discVal * 100) / 100,
-            totalPrice: Math.round((gross - discVal) * 100) / 100,
+            additionValue: Math.round(addVal * 100) / 100,
+            totalPrice: Math.round((gross + addVal - discVal) * 100) / 100,
             discountAuthorization:
               Math.abs(item.quantity - qty) > 0.0005 ? undefined : item.discountAuthorization,
           };
@@ -926,6 +1180,9 @@ export const PosView: React.FC<PosViewProps> = ({
       setDiscountInput('');
       setReceivedAmount('');
       setLastAddedItem(null);
+      setStagedPosProductId('');
+      setStagedPosUnitPriceInput('');
+      setIsEditingStagedPosPrice(false);
       setSaleObservationAlerts((prev) => clearProductSaleAlerts(prev));
       if (barcodeInputRef.current) barcodeInputRef.current.focus();
     }
@@ -1550,6 +1807,9 @@ export const PosView: React.FC<PosViewProps> = ({
       setPaymentMethod('');
       setPaymentTerm('');
       setLastAddedItem(null);
+      setStagedPosProductId('');
+      setStagedPosUnitPriceInput('');
+      setIsEditingStagedPosPrice(false);
       setSaleObservationAlerts([]);
       lastObservationCustomerSigRef.current = '';
     } catch (error) {
@@ -1855,82 +2115,402 @@ export const PosView: React.FC<PosViewProps> = ({
         </div>
       )}
 
-      {/* Barra de Entrada Rápida de Produtos (Leitor de Código de Barras / Digitação) */}
+      {/* Barra de Entrada Rápida de Produtos (Produto | Preço Unit. | Quantidade | + Incluir Item) */}
       <form
         onSubmit={handleBarcodeSubmit}
-        className="bg-white p-2 sm:p-2.5 rounded-xl border border-slate-200 shadow-xs relative shrink-0"
+        className="bg-white p-2.5 sm:p-3 rounded-xl border border-slate-200 shadow-xs relative shrink-0"
       >
-        <div className="flex flex-col sm:flex-row items-stretch gap-2">
-          {/* Seletor do Local de Saída */}
-          <div className="flex items-center gap-1.5 bg-slate-50 border border-slate-200 rounded-lg px-2 py-1 shrink-0">
-            <Warehouse size={14} className="text-slate-500" />
-            <span className="text-[10px] font-bold text-slate-500 whitespace-nowrap">Saída:</span>
-            <select
-              value={selectedLocationId}
-              onChange={(e) => setSelectedLocationId(e.target.value)}
-              className="bg-transparent text-xs font-semibold text-slate-800 focus:outline-hidden cursor-pointer"
-            >
-              {locations.map((loc) => (
-                <option key={loc.id} value={loc.id}>
-                  {loc.name} {loc.id === 'loc-comercial' || loc.name.toLowerCase() === 'comercial' ? '(Padrão)' : ''}
-                </option>
-              ))}
-            </select>
-          </div>
+        {(() => {
+          const stagedProd = stagedPosProductId
+            ? dbState.products.find((p) => p.id === stagedPosProductId)
+            : null;
+          const stagedCatalogPrice = stagedProd
+            ? StockEngine.getProductPriceForCompany(stagedProd, currentCompany.id)
+            : 0;
+          const parsedStagedPrice = parseFloat(stagedPosUnitPriceInput.replace(',', '.'));
+          const displayedStagedPrice = !stagedProd
+            ? 0
+            : canAlterUnitPrice &&
+              stagedPosUnitPriceInput.trim() !== '' &&
+              Number.isFinite(parsedStagedPrice) &&
+              parsedStagedPrice > 0
+            ? parsedStagedPrice
+            : stagedCatalogPrice;
+          const isStagedPriceOverridden =
+            Boolean(stagedProd) && Math.abs(displayedStagedPrice - stagedCatalogPrice) > 0.005;
+          const numericQty = Math.max(0.001, parseFloat((quantityInput || '1').replace(',', '.')) || 1);
 
-          {/* Campo Quantidade Multiplicadora */}
-          <div className="flex items-center bg-slate-50 border border-slate-200 rounded-lg px-2 py-1 shrink-0 w-24">
-            <span className="text-[10px] font-bold text-slate-500 mr-1">Qtd:</span>
-            <input
-              type="text"
-              value={quantityInput}
-              onChange={(e) => setQuantityInput(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') {
-                  e.preventDefault();
-                  barcodeInputRef.current?.focus();
-                  barcodeInputRef.current?.select();
-                }
-              }}
-              className="w-full bg-transparent text-xs font-extrabold text-slate-900 text-center focus:outline-hidden"
-              title="Quantidade a adicionar ao escanear ou teclar Enter (Padrão: 1 unidade)"
-            />
-          </div>
+          return (
+            <div className="grid grid-cols-1 md:grid-cols-12 gap-2.5 items-end">
+              {/* Produto (Código, Barras ou Nome) — 6 Colunas */}
+              <div className="md:col-span-6 space-y-1 relative">
+                <div className="flex items-center justify-between gap-2">
+                  <label className="text-[11px] font-bold text-slate-700 block truncate">
+                    Produto (Código, Barras ou Nome) *:
+                  </label>
+                  <div className="inline-flex items-center gap-1 bg-emerald-100/90 border border-emerald-300 rounded px-1.5 py-0.2 shrink-0">
+                    <span className="text-[10px] font-bold text-emerald-800">Depósito:</span>
+                    <select
+                      value={selectedLocationId}
+                      onChange={(e) => setSelectedLocationId(e.target.value)}
+                      className="bg-transparent text-[10px] font-extrabold text-emerald-900 focus:outline-hidden cursor-pointer"
+                    >
+                      {locations.map((loc) => (
+                        <option key={loc.id} value={loc.id}>
+                          {loc.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
 
-          {/* Input Principal: Código de Barras / Código Interno / Descrição */}
-          <div className="relative flex-1">
-            <Barcode className="absolute left-2.5 top-2 text-slate-400" size={18} />
-            <input
-              ref={barcodeInputRef}
-              type="text"
-              placeholder="Bipar leitor ou digitar código / barras (ex: PA-301 ou 789...) e teclar Enter..."
-              value={barcodeInput}
-              onChange={(e) => setBarcodeInput(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') {
-                  e.preventDefault();
-                  e.stopPropagation();
-                  handleProcessBarcodeOrCode(barcodeInput);
-                }
-              }}
-              className="w-full pl-8 pr-24 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs font-semibold text-slate-900 placeholder-slate-400 focus:outline-hidden focus:ring-2 focus:ring-blue-500 focus:bg-white transition-all"
-              autoFocus
-            />
+                {stagedProd ? (
+                  <div className="flex items-center justify-between gap-1.5 w-full h-[40px] bg-blue-50/80 border-2 border-blue-400 rounded-xl px-2.5">
+                    <div className="flex items-center gap-1.5 min-w-0 flex-1">
+                      <span className="font-mono text-[11px] font-extrabold text-blue-700 bg-white px-1.5 py-0.5 rounded border border-blue-200 shrink-0">
+                        {stagedProd.code}
+                      </span>
+                      <span className="text-xs font-extrabold text-slate-900 truncate" title={stagedProd.description}>
+                        {stagedProd.description}
+                      </span>
+                    </div>
 
-            {/* Botão submit invisível para assegurar envio nativo do formulário com Enter em qualquer navegador */}
-            <button type="submit" className="hidden" aria-hidden="true" tabIndex={-1} />
+                    <div className="flex items-center gap-1 shrink-0">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setStagedPosProductId('');
+                          setStagedPosUnitPriceInput('');
+                          setIsEditingStagedPosPrice(false);
+                          setTimeout(() => barcodeInputRef.current?.focus(), 20);
+                        }}
+                        className="p-1 text-slate-500 hover:text-rose-600 hover:bg-rose-50 rounded-md cursor-pointer"
+                        title="Limpar produto selecionado"
+                      >
+                        <X size={14} />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setShowProductLookupModal(true)}
+                        className="px-2 py-1 bg-white hover:bg-blue-100 text-blue-700 rounded-lg text-[11px] font-bold flex items-center gap-1 transition-colors border border-blue-200 cursor-pointer"
+                      >
+                        <Search size={12} />
+                        <span>Trocar [F2]</span>
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="relative">
+                    <Barcode className="absolute left-2.5 top-2.5 text-slate-400 pointer-events-none" size={18} />
+                    <input
+                      ref={barcodeInputRef}
+                      type="text"
+                      placeholder="Bipar leitor ou digitar código / barras / nome (3+ letras)..."
+                      value={barcodeInput}
+                      onChange={(e) => setBarcodeInput(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          handleProcessBarcodeOrCode(barcodeInput);
+                        }
+                      }}
+                      className="w-full h-[40px] pl-8 pr-28 bg-slate-50 border border-slate-300 rounded-xl text-xs font-semibold text-slate-900 placeholder-slate-400 focus:outline-hidden focus:ring-2 focus:ring-blue-500 focus:bg-white transition-all"
+                      autoFocus
+                    />
 
-            {/* Botão de Busca F2 dentro do input */}
-            <button
-              type="button"
-              onClick={() => setShowProductLookupModal(true)}
-              className="absolute right-1 top-1 bottom-1 px-2.5 bg-blue-50 hover:bg-blue-100 text-blue-700 rounded-md text-[11px] font-bold flex items-center gap-1 transition-colors border border-blue-200 cursor-pointer"
-            >
-              <Search size={12} />
-              <span>Buscar [F2]</span>
-            </button>
-          </div>
-        </div>
+                    <button type="submit" className="hidden" aria-hidden="true" tabIndex={-1} />
+
+                    <button
+                      type="button"
+                      onClick={() => setShowProductLookupModal(true)}
+                      className="absolute right-1 top-1 bottom-1 px-2.5 bg-blue-50 hover:bg-blue-100 text-blue-700 rounded-lg text-[11px] font-bold flex items-center gap-1 transition-colors border border-blue-200 cursor-pointer"
+                    >
+                      <Search size={12} />
+                      <span>Buscar [F2]</span>
+                    </button>
+                  </div>
+                )}
+
+                {/* Autocomplete Dropdown ao digitar (só exibe a lista a partir do 3º caractere digitado) */}
+                {!stagedProd && searchResults.length > 0 && barcodeInput.trim().length >= 3 && (
+                  <div className="absolute left-0 right-0 top-full mt-1 bg-white border border-slate-200 rounded-xl shadow-xl z-30 max-h-64 overflow-y-auto divide-y divide-slate-100">
+                    {searchResults.slice(0, 6).map((prod) => {
+                      const stock = StockEngine.getBalance(dbState.stockBalances, prod.id, selectedLocationId);
+                      const catalogPrice = StockEngine.getProductPriceForCompany(prod, currentCompany.id);
+                      const draftStr = posPriceDrafts[prod.id];
+                      const parsedDraft =
+                        canAlterUnitPrice && draftStr !== undefined && draftStr.trim() !== ''
+                          ? parseFloat(draftStr.replace(',', '.'))
+                          : NaN;
+                      const effectiveDisplayPrice =
+                        !isNaN(parsedDraft) && parsedDraft > 0 ? parsedDraft : catalogPrice;
+                      const isPriceAltered =
+                        canAlterUnitPrice &&
+                        !isNaN(parsedDraft) &&
+                        parsedDraft > 0 &&
+                        Math.abs(parsedDraft - catalogPrice) > 0.004;
+                      const isEditingThisPrice = canAlterUnitPrice && editingPosPriceId === prod.id;
+
+                      return (
+                        <div
+                          key={prod.id}
+                          onClick={() => {
+                            if (isPriceAltered) {
+                              handleAddToCart(
+                                prod,
+                                parseFloat((quantityInput || '1').replace(',', '.')) || 1,
+                                effectiveDisplayPrice
+                              );
+                            } else {
+                              handleSelectStagedPosProduct(prod);
+                            }
+                          }}
+                          className="p-2.5 hover:bg-blue-50/70 cursor-pointer flex items-center justify-between gap-2 transition-colors"
+                        >
+                          <div className="flex items-center gap-2.5 min-w-0">
+                            <span className="font-mono text-xs font-bold text-blue-700 bg-blue-50 px-1.5 py-0.5 rounded border border-blue-200 shrink-0">
+                              {prod.code}
+                            </span>
+                            <div className="min-w-0">
+                              <div className="font-bold text-xs text-slate-900 truncate">{prod.description}</div>
+                              <div className="text-[10px] text-slate-400">
+                                {prod.barcode ? `EAN: ${prod.barcode} • ` : ''}
+                                Estoque no local: <strong className={stock.quantity <= 0 ? 'text-rose-600' : 'text-emerald-600'}>{formatQuantity(stock.quantity)} {prod.unit}</strong>
+                              </div>
+                            </div>
+                          </div>
+
+                          <div className="text-right shrink-0 flex flex-col items-end gap-0.5">
+                            {isEditingThisPrice ? (
+                              <div
+                                className="flex items-center gap-1"
+                                onClick={(e) => e.stopPropagation()}
+                              >
+                                <div className="relative flex items-center">
+                                  <span className="absolute left-2 text-[10px] font-black text-indigo-500">R$</span>
+                                  <input
+                                    type="text"
+                                    inputMode="decimal"
+                                    autoFocus
+                                    value={draftStr ?? catalogPrice.toFixed(2).replace('.', ',')}
+                                    onChange={(e) =>
+                                      setPosPriceDrafts((prev) => ({
+                                        ...prev,
+                                        [prod.id]: e.target.value.replace(/[^0-9.,]/g, ''),
+                                      }))
+                                    }
+                                    onKeyDown={(e) => {
+                                      if (e.key === 'Enter') {
+                                        e.preventDefault();
+                                        e.stopPropagation();
+                                        const typed = parseFloat((posPriceDrafts[prod.id] || '').replace(',', '.'));
+                                        handleAddToCart(
+                                          prod,
+                                          parseFloat((quantityInput || '1').replace(',', '.')) || 1,
+                                          !isNaN(typed) && typed > 0 ? typed : undefined
+                                        );
+                                      } else if (e.key === 'Escape') {
+                                        e.stopPropagation();
+                                        setEditingPosPriceId(null);
+                                      }
+                                    }}
+                                    onBlur={() => setEditingPosPriceId(null)}
+                                    className="w-24 pl-7 pr-2 py-1 text-right font-mono font-black text-xs text-indigo-900 bg-indigo-50 border-2 border-indigo-400 rounded-lg focus:outline-hidden"
+                                  />
+                                </div>
+                              </div>
+                            ) : (
+                              <div className="font-extrabold text-xs sm:text-sm text-slate-900 font-mono">
+                                {formatCurrency(effectiveDisplayPrice)}
+                              </div>
+                            )}
+                            <span className="text-[9px] text-blue-600 font-bold">Clique para selecionar</span>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+
+              {/* Preço Unitário — Campo Dedicado Antes da Quantidade (2 Colunas) */}
+              <div className="md:col-span-2 space-y-1">
+                <div className="flex items-center justify-between gap-1">
+                  <label className="text-[11px] font-bold text-slate-700 block">
+                    Preço Unit.:
+                  </label>
+                  {canAlterUnitPrice && stagedProd && (
+                    isStagedPriceOverridden ? (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setStagedPosUnitPriceInput('');
+                          setIsEditingStagedPosPrice(false);
+                        }}
+                        className="text-[10px] font-bold text-indigo-600 hover:text-indigo-800 hover:underline cursor-pointer"
+                        title={`Restaurar preço original (${formatCurrency(stagedCatalogPrice)})`}
+                      >
+                        Restaurar
+                      </button>
+                    ) : (
+                      <span className="text-[10px] font-bold text-emerald-700">
+                        Clique p/ editar
+                      </span>
+                    )
+                  )}
+                </div>
+
+                {canAlterUnitPrice && stagedProd ? (
+                  isEditingStagedPosPrice ? (
+                    <div className="flex items-center justify-between gap-1.5 w-full h-[40px] bg-white border-2 border-blue-500 ring-2 ring-blue-500/20 rounded-xl px-2.5 transition-all">
+                      <Pencil size={13} className="text-blue-600 shrink-0" />
+                      <div className="flex items-center justify-end gap-1 flex-1 min-w-0">
+                        <span className="text-xs font-extrabold text-slate-500 font-mono">R$</span>
+                        <input
+                          ref={stagedPosPriceInputRef}
+                          type="text"
+                          inputMode="decimal"
+                          value={stagedPosUnitPriceInput}
+                          onChange={(e) =>
+                            setStagedPosUnitPriceInput(e.target.value.replace(/[^0-9.,]/g, ''))
+                          }
+                          onBlur={() => setIsEditingStagedPosPrice(false)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') {
+                              e.preventDefault();
+                              setIsEditingStagedPosPrice(false);
+                              setTimeout(() => {
+                                posQtyInputRef.current?.focus();
+                                posQtyInputRef.current?.select();
+                              }, 15);
+                            } else if (e.key === 'Escape') {
+                              e.preventDefault();
+                              setStagedPosUnitPriceInput('');
+                              setIsEditingStagedPosPrice(false);
+                            }
+                          }}
+                          className="w-full text-right font-mono text-xs font-black text-slate-900 bg-transparent focus:outline-hidden"
+                          aria-label="Novo preço unitário no PDV"
+                        />
+                      </div>
+                    </div>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setStagedPosUnitPriceInput(displayedStagedPrice.toFixed(2).replace('.', ','));
+                        setIsEditingStagedPosPrice(true);
+                        setTimeout(() => {
+                          stagedPosPriceInputRef.current?.focus();
+                          stagedPosPriceInputRef.current?.select();
+                        }, 20);
+                      }}
+                      className={`flex items-center justify-between gap-1.5 w-full h-[40px] rounded-xl px-3 border transition-all cursor-pointer ${
+                        isStagedPriceOverridden
+                          ? 'bg-indigo-50/70 border-indigo-400 text-indigo-950 hover:border-indigo-500'
+                          : 'bg-white border-slate-300 text-slate-900 hover:border-blue-400'
+                      }`}
+                      title={`Clique para alterar o preço unitário nesta venda (Original: ${formatCurrency(stagedCatalogPrice)})`}
+                    >
+                      <Pencil
+                        size={13}
+                        className={isStagedPriceOverridden ? 'text-indigo-600 shrink-0' : 'text-slate-400 shrink-0'}
+                      />
+                      <span className="font-mono text-xs font-extrabold truncate">
+                        {formatCurrency(displayedStagedPrice)}
+                      </span>
+                    </button>
+                  )
+                ) : (
+                  <div className="flex items-center justify-between gap-1.5 w-full h-[40px] bg-slate-50 border border-slate-200 rounded-xl px-3 text-slate-500 select-none">
+                    {canAlterUnitPrice ? (
+                      <Pencil size={13} className="text-slate-300 shrink-0" />
+                    ) : (
+                      <span />
+                    )}
+                    <span className="font-mono text-xs font-bold">
+                      {formatCurrency(stagedProd ? stagedCatalogPrice : 0)}
+                    </span>
+                  </div>
+                )}
+              </div>
+
+              {/* Quantidade — 2 Colunas */}
+              <div className="md:col-span-2 space-y-1">
+                <label className="text-[11px] font-bold text-slate-700 block">
+                  Quantidade:
+                </label>
+                <div className="inline-flex items-center w-full h-[40px] bg-white border border-slate-300 rounded-xl focus-within:ring-2 focus-within:ring-blue-500">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const next = Math.max(1, numericQty - 1);
+                      setQuantityInput(String(next).replace('.', ','));
+                    }}
+                    className="px-2.5 h-full text-slate-600 hover:bg-slate-100 rounded-l-xl cursor-pointer"
+                  >
+                    <Minus size={12} />
+                  </button>
+                  <input
+                    ref={posQtyInputRef}
+                    type="text"
+                    inputMode="decimal"
+                    value={quantityInput}
+                    onChange={(e) => setQuantityInput(e.target.value.replace(/[^0-9.,]/g, ''))}
+                    onBlur={() => {
+                      if (!quantityInput.trim() || parseFloat(quantityInput.replace(',', '.')) <= 0) {
+                        setQuantityInput('1');
+                      }
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        e.preventDefault();
+                        if (stagedProd) {
+                          handleCommitStagedPosProduct();
+                        } else {
+                          barcodeInputRef.current?.focus();
+                          barcodeInputRef.current?.select();
+                        }
+                      }
+                    }}
+                    className="w-full text-center text-xs font-black text-slate-900 bg-transparent focus:outline-hidden font-mono"
+                    title="Quantidade a incluir na venda"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const next = numericQty + 1;
+                      setQuantityInput(String(next).replace('.', ','));
+                    }}
+                    className="px-2.5 h-full text-slate-600 hover:bg-slate-100 rounded-r-xl cursor-pointer"
+                  >
+                    <Plus size={12} />
+                  </button>
+                </div>
+              </div>
+
+              {/* Botão + Incluir Item — 2 Colunas */}
+              <div className="md:col-span-2">
+                <button
+                  type="button"
+                  disabled={!stagedProd && !barcodeInput.trim()}
+                  onClick={() => {
+                    if (stagedProd) {
+                      handleCommitStagedPosProduct();
+                    } else {
+                      handleProcessBarcodeOrCode(barcodeInput);
+                    }
+                  }}
+                  className="w-full h-[40px] px-3 bg-blue-600 hover:bg-blue-700 disabled:opacity-40 text-white font-bold text-xs rounded-xl shadow-xs transition-colors cursor-pointer flex items-center justify-center gap-1.5"
+                >
+                  <Plus size={15} />
+                  <span>Incluir Item</span>
+                </button>
+              </div>
+            </div>
+          );
+        })()}
 
         {/* Feedback Visual de Confirmação da Leitura / Contagem de Unidade */}
         {feedbackMessage && (
@@ -1961,44 +2541,6 @@ export const PosView: React.FC<PosViewProps> = ({
             >
               <X size={14} />
             </button>
-          </div>
-        )}
-
-        {/* Autocomplete Dropdown ao digitar (só exibe a lista a partir do 3º caractere digitado) */}
-        {searchResults.length > 0 && barcodeInput.trim().length >= 3 && (
-          <div className="absolute left-0 right-0 top-full mt-1 bg-white border border-slate-200 rounded-xl shadow-xl z-30 max-h-56 overflow-y-auto divide-y divide-slate-100">
-            {searchResults.slice(0, 6).map((prod) => {
-              const stock = StockEngine.getBalance(dbState.stockBalances, prod.id, selectedLocationId);
-              return (
-                <div
-                  key={prod.id}
-                  onClick={() => {
-                    handleAddToCart(prod, parseFloat(quantityInput) || 1);
-                  }}
-                  className="p-2.5 hover:bg-blue-50/70 cursor-pointer flex items-center justify-between transition-colors"
-                >
-                  <div className="flex items-center gap-2.5">
-                    <span className="font-mono text-xs font-bold text-blue-700 bg-blue-50 px-1.5 py-0.5 rounded border border-blue-200">
-                      {prod.code}
-                    </span>
-                    <div>
-                      <div className="font-bold text-xs text-slate-900">{prod.description}</div>
-                      <div className="text-[10px] text-slate-400">
-                        {prod.barcode ? `EAN: ${prod.barcode} • ` : ''}
-                        Estoque no local: <strong className={stock.quantity <= 0 ? 'text-rose-600' : 'text-emerald-600'}>{formatQuantity(stock.quantity)} {prod.unit}</strong>
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="text-right">
-                    <div className="font-extrabold text-xs sm:text-sm text-slate-900">
-                      {formatCurrency(StockEngine.getProductPriceForCompany(prod, currentCompany.id))}
-                    </div>
-                    <span className="text-[9px] text-blue-600 font-bold">Clique ou Enter p/ Inserir</span>
-                  </div>
-                </div>
-              );
-            })}
           </div>
         )}
       </form>
@@ -2088,6 +2630,18 @@ export const PosView: React.FC<PosViewProps> = ({
                               Desc: -{formatCurrency(item.discountValue)} {item.discountPercent > 0 ? `(${item.discountPercent.toFixed(1).replace('.0', '')}%)` : ''}
                             </span>
                           )}
+                          {(item.additionValue || 0) > 0 && (
+                            <span className="inline-flex items-center gap-0.5 text-[10px] font-black uppercase px-1.5 py-0.5 rounded-md bg-blue-100 text-blue-800 border border-blue-300">
+                              <Tag size={10} />
+                              Acrésc: +{formatCurrency(item.additionValue || 0)} {(item.additionPercent || 0) > 0 ? `(${(item.additionPercent || 0).toFixed(1).replace('.0', '')}%)` : ''}
+                            </span>
+                          )}
+                          {item.priceOverridden && (
+                            <span className="inline-flex items-center gap-0.5 text-[10px] font-black uppercase px-1.5 py-0.5 rounded-md bg-indigo-100 text-indigo-800 border border-indigo-300">
+                              <Pencil size={9} />
+                              Preço Alterado
+                            </span>
+                          )}
                         </div>
                       </td>
                       <td className="py-2 px-2.5 text-center">
@@ -2122,7 +2676,34 @@ export const PosView: React.FC<PosViewProps> = ({
                         {item.unit}
                       </td>
                       <td className="py-2 px-3 text-right font-mono font-semibold text-slate-600 text-xs sm:text-sm">
-                        {formatCurrency(item.unitPrice)}
+                        {canAlterUnitPrice ? (
+                          <button
+                            type="button"
+                            onClick={() => handleOpenItemDiscountModal(item, 'alterar_preco')}
+                            className={`inline-flex flex-col items-end px-1.5 py-0.5 rounded-md transition-colors cursor-pointer ${
+                              item.priceOverridden
+                                ? 'bg-indigo-50 text-indigo-800 ring-1 ring-indigo-300 hover:bg-indigo-100'
+                                : 'hover:bg-indigo-50 hover:text-indigo-700'
+                            }`}
+                            title={
+                              item.priceOverridden && item.originalUnitPrice !== undefined
+                                ? `Preço alterado (original: ${formatCurrency(item.originalUnitPrice)}). Clique para editar`
+                                : 'Clique para alterar o preço unitário deste item'
+                            }
+                          >
+                            <span className="inline-flex items-center gap-1">
+                              <span>{formatCurrency(item.unitPrice)}</span>
+                              <Pencil size={10} className="text-indigo-500" />
+                            </span>
+                            {item.priceOverridden && item.originalUnitPrice !== undefined && (
+                              <span className="text-[9px] text-slate-400 line-through leading-none">
+                                {formatCurrency(item.originalUnitPrice)}
+                              </span>
+                            )}
+                          </button>
+                        ) : (
+                          formatCurrency(item.unitPrice)
+                        )}
                       </td>
                       <td className="py-2 px-3 text-right font-mono">
                         {item.discountValue > 0 ? (
@@ -2142,19 +2723,23 @@ export const PosView: React.FC<PosViewProps> = ({
                       </td>
                       <td className="py-2 px-2 text-center whitespace-nowrap">
                         <div className="flex items-center justify-center gap-1">
-                          {/* Botão de Desconto por Produto ao lado de Remover Item */}
+                          {/* Botão de Desconto / Acréscimo / Alterar Preço por Produto */}
                           <button
                             type="button"
                             onClick={() => handleOpenItemDiscountModal(item)}
                             className={`p-1.5 rounded-lg transition-all cursor-pointer ${
                               item.discountValue > 0 || item.discountPercent > 0
                                 ? 'bg-amber-100 text-amber-800 hover:bg-amber-200 ring-1 ring-amber-400 font-bold shadow-2xs'
+                                : (item.additionValue || 0) > 0
+                                ? 'bg-blue-100 text-blue-800 hover:bg-blue-200 ring-1 ring-blue-400 font-bold shadow-2xs'
+                                : item.priceOverridden
+                                ? 'bg-indigo-100 text-indigo-800 hover:bg-indigo-200 ring-1 ring-indigo-400 font-bold shadow-2xs'
                                 : 'hover:bg-amber-50 text-slate-400 hover:text-amber-600'
                             }`}
                             title={
-                              item.discountValue > 0 || item.discountPercent > 0
-                                ? `Desconto no produto: -${formatCurrency(item.discountValue)} (${item.discountPercent.toFixed(1).replace('.0', '')}%). Clique para editar`
-                                : 'Aplicar desconto neste produto (% ou R$)'
+                              canAlterUnitPrice
+                                ? 'Desconto, Acréscimo ou Alterar Preço Unitário'
+                                : 'Aplicar desconto ou acréscimo neste produto (% ou R$)'
                             }
                           >
                             <Tag size={14} />
@@ -2185,7 +2770,19 @@ export const PosView: React.FC<PosViewProps> = ({
                 <CheckCircle2 size={16} className="text-emerald-400 shrink-0" />
                 <span className="text-slate-400 text-xs font-bold uppercase">Último Item:</span>
                 <span className="font-bold truncate text-sm sm:text-base text-white">{lastAddedItem.description}</span>
-                <span className="text-emerald-300 font-mono text-xs sm:text-sm">({formatQuantity(lastAddedItem.quantity)} {lastAddedItem.unit} x {formatCurrency(lastAddedItem.unitPrice)})</span>
+                {canAlterUnitPrice ? (
+                  <button
+                    type="button"
+                    onClick={() => handleOpenItemDiscountModal(lastAddedItem, 'alterar_preco')}
+                    className="inline-flex items-center gap-1 text-emerald-300 hover:text-indigo-300 font-mono text-xs sm:text-sm underline decoration-dotted cursor-pointer"
+                    title="Clique para alterar o preço unitário do último item"
+                  >
+                    <span>({formatQuantity(lastAddedItem.quantity)} {lastAddedItem.unit} x {formatCurrency(lastAddedItem.unitPrice)})</span>
+                    <Pencil size={11} />
+                  </button>
+                ) : (
+                  <span className="text-emerald-300 font-mono text-xs sm:text-sm">({formatQuantity(lastAddedItem.quantity)} {lastAddedItem.unit} x {formatCurrency(lastAddedItem.unitPrice)})</span>
+                )}
                 {lastAddedItem.discountValue > 0 && (
                   <span className="text-amber-300 text-xs font-bold font-mono">
                     [-{formatCurrency(lastAddedItem.discountValue)}]
@@ -2586,7 +3183,7 @@ export const PosView: React.FC<PosViewProps> = ({
                     <div
                       key={p.id}
                       onClick={() => {
-                        handleAddToCart(p, parseFloat(quantityInput) || 1);
+                        handleSelectStagedPosProduct(p);
                         setShowProductLookupModal(false);
                       }}
                       className="p-3 hover:bg-blue-50/60 cursor-pointer flex items-center justify-between transition-colors group"
@@ -2855,22 +3452,49 @@ export const PosView: React.FC<PosViewProps> = ({
         </div>
       )}
 
-      {/* MODAL: DESCONTO POR PRODUTO */}
+      {/* MODAL: DESCONTO / ACRÉSCIMO / ALTERAR PREÇO POR PRODUTO */}
       {showItemDiscountModal && (() => {
         const itemUnderDiscount = cart.find((i) => i.productId === discountingItemId);
         if (!itemUnderDiscount) return null;
+        const catalogProduct = dbState.products.find((p) => p.id === itemUnderDiscount.productId);
+        const originalCatalogPrice =
+          itemUnderDiscount.originalUnitPrice ??
+          (catalogProduct
+            ? StockEngine.getProductPriceForCompany(catalogProduct, currentCompany.id)
+            : itemUnderDiscount.unitPrice);
+
         const itemGrossTotal = itemUnderDiscount.quantity * itemUnderDiscount.unitPrice;
         const rawInput = parseFloat(itemDiscountInput.replace(',', '.')) || 0;
-        let previewDiscVal = 0;
-        let previewDiscPct = 0;
-        if (itemDiscountType === 'percent') {
-          previewDiscPct = Math.min(100, Math.max(0, rawInput));
-          previewDiscVal = (itemGrossTotal * previewDiscPct) / 100;
+
+        let previewDeltaVal = 0;
+        let previewDeltaPct = 0;
+        let previewNetTotal = itemGrossTotal;
+
+        if (itemAdjustmentMode === 'alterar_preco') {
+          const previewUnit = rawInput > 0 ? rawInput : itemUnderDiscount.unitPrice;
+          previewNetTotal = Math.max(0, Math.round(itemUnderDiscount.quantity * previewUnit * 100) / 100);
+        } else if (itemAdjustmentMode === 'acrescimo') {
+          if (itemDiscountType === 'percent') {
+            previewDeltaPct = Math.max(0, rawInput);
+            previewDeltaVal = (itemGrossTotal * previewDeltaPct) / 100;
+          } else {
+            previewDeltaVal = Math.max(0, rawInput);
+            previewDeltaPct = itemGrossTotal > 0 ? (previewDeltaVal / itemGrossTotal) * 100 : 0;
+          }
+          previewNetTotal = Math.max(0, itemGrossTotal + previewDeltaVal);
         } else {
-          previewDiscVal = Math.min(itemGrossTotal, Math.max(0, rawInput));
-          previewDiscPct = itemGrossTotal > 0 ? (previewDiscVal / itemGrossTotal) * 100 : 0;
+          if (itemDiscountType === 'percent') {
+            previewDeltaPct = Math.min(100, Math.max(0, rawInput));
+            previewDeltaVal = (itemGrossTotal * previewDeltaPct) / 100;
+          } else {
+            previewDeltaVal = Math.min(itemGrossTotal, Math.max(0, rawInput));
+            previewDeltaPct = itemGrossTotal > 0 ? (previewDeltaVal / itemGrossTotal) * 100 : 0;
+          }
+          previewNetTotal = Math.max(0, itemGrossTotal - previewDeltaVal);
         }
-        const previewNetTotal = Math.max(0, itemGrossTotal - previewDiscVal);
+
+        const isPriceMode = itemAdjustmentMode === 'alterar_preco';
+        const isAddMode = itemAdjustmentMode === 'acrescimo';
 
         return (
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-xs p-4 overflow-y-auto animate-fadeIn">
@@ -2878,13 +3502,31 @@ export const PosView: React.FC<PosViewProps> = ({
               {/* Cabeçalho */}
               <div className="flex justify-between items-start pb-3 border-b border-slate-100">
                 <div className="flex items-center gap-2.5">
-                  <div className="w-10 h-10 rounded-xl bg-amber-100 border border-amber-300 flex items-center justify-center text-amber-700 shrink-0">
-                    <Tag size={20} />
+                  <div
+                    className={`w-10 h-10 rounded-xl border flex items-center justify-center shrink-0 ${
+                      isPriceMode
+                        ? 'bg-indigo-100 border-indigo-300 text-indigo-700'
+                        : isAddMode
+                        ? 'bg-blue-100 border-blue-300 text-blue-700'
+                        : 'bg-amber-100 border-amber-300 text-amber-700'
+                    }`}
+                  >
+                    {isPriceMode ? <Pencil size={19} /> : <Tag size={20} />}
                   </div>
                   <div>
-                    <h3 className="font-extrabold text-base text-slate-900">Desconto por Produto</h3>
+                    <h3 className="font-extrabold text-base text-slate-900">
+                      {isPriceMode
+                        ? 'Alterar Preço Unitário'
+                        : isAddMode
+                        ? 'Acréscimo no Produto'
+                        : 'Desconto por Produto'}
+                    </h3>
                     <p className="text-xs text-slate-500">
-                      Aplicar desconto exclusivo para este item no cupom
+                      {isPriceMode
+                        ? 'Substitui o valor unitário somente nesta venda (sem alterar o cadastro)'
+                        : isAddMode
+                        ? 'Aplicar acréscimo exclusivo para este item no cupom'
+                        : 'Aplicar desconto exclusivo para este item no cupom'}
                     </p>
                   </div>
                 </div>
@@ -2901,6 +3543,77 @@ export const PosView: React.FC<PosViewProps> = ({
                 </button>
               </div>
 
+              {/* Abas: Desconto / Acréscimo / Alterar Preço (RBAC) */}
+              <div className={`grid gap-1 p-1 bg-slate-100 rounded-xl border border-slate-200 ${canAlterUnitPrice ? 'grid-cols-3' : 'grid-cols-2'}`}>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setItemAdjustmentMode('desconto');
+                    setItemDiscountType('percent');
+                    setItemDiscountInput(
+                      itemUnderDiscount.discountPercent > 0
+                        ? itemUnderDiscount.discountPercent.toFixed(2).replace(/\.?0+$/, '').replace('.', ',')
+                        : ''
+                    );
+                    setTimeout(() => {
+                      itemDiscountInputRef.current?.focus();
+                      itemDiscountInputRef.current?.select();
+                    }, 30);
+                  }}
+                  className={`py-1.5 px-2 text-xs font-extrabold rounded-lg transition-all cursor-pointer ${
+                    itemAdjustmentMode === 'desconto'
+                      ? 'bg-amber-600 text-white shadow-2xs'
+                      : 'text-slate-600 hover:text-slate-900'
+                  }`}
+                >
+                  Desconto (-)
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setItemAdjustmentMode('acrescimo');
+                    setItemDiscountType('percent');
+                    setItemDiscountInput(
+                      (itemUnderDiscount.additionPercent || 0) > 0
+                        ? (itemUnderDiscount.additionPercent || 0).toFixed(2).replace(/\.?0+$/, '').replace('.', ',')
+                        : ''
+                    );
+                    setTimeout(() => {
+                      itemDiscountInputRef.current?.focus();
+                      itemDiscountInputRef.current?.select();
+                    }, 30);
+                  }}
+                  className={`py-1.5 px-2 text-xs font-extrabold rounded-lg transition-all cursor-pointer ${
+                    itemAdjustmentMode === 'acrescimo'
+                      ? 'bg-blue-600 text-white shadow-2xs'
+                      : 'text-slate-600 hover:text-slate-900'
+                  }`}
+                >
+                  Acréscimo (+)
+                </button>
+                {canAlterUnitPrice && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setItemAdjustmentMode('alterar_preco');
+                      setItemDiscountType('value');
+                      setItemDiscountInput(itemUnderDiscount.unitPrice.toFixed(2).replace('.', ','));
+                      setTimeout(() => {
+                        itemDiscountInputRef.current?.focus();
+                        itemDiscountInputRef.current?.select();
+                      }, 30);
+                    }}
+                    className={`py-1.5 px-2 text-xs font-extrabold rounded-lg transition-all cursor-pointer ${
+                      itemAdjustmentMode === 'alterar_preco'
+                        ? 'bg-indigo-600 text-white shadow-2xs'
+                        : 'text-slate-600 hover:text-slate-900'
+                    }`}
+                  >
+                    Alterar Preço
+                  </button>
+                )}
+              </div>
+
               {/* Resumo do Produto Selecionado */}
               <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl space-y-2">
                 <div className="flex items-center justify-between text-xs">
@@ -2915,14 +3628,16 @@ export const PosView: React.FC<PosViewProps> = ({
                   {itemUnderDiscount.description}
                 </div>
                 <div className="flex justify-between items-center text-xs pt-1.5 border-t border-slate-200/80">
-                  <span className="text-slate-500 font-semibold">Valor Bruto do Item:</span>
+                  <span className="text-slate-500 font-semibold">
+                    {isPriceMode ? 'Preço Original Cadastrado:' : 'Valor Bruto do Item:'}
+                  </span>
                   <span className="font-extrabold text-slate-800 font-mono text-sm">
-                    {formatCurrency(itemGrossTotal)}
+                    {isPriceMode ? formatCurrency(originalCatalogPrice) : formatCurrency(itemGrossTotal)}
                   </span>
                 </div>
               </div>
 
-              {/* Formulário de Desconto */}
+              {/* Formulário */}
               <form
                 onSubmit={(e) => {
                   e.preventDefault();
@@ -2931,36 +3646,58 @@ export const PosView: React.FC<PosViewProps> = ({
                 className="space-y-3.5"
               >
                 <div>
-                  <div className="flex items-center justify-between mb-1.5">
-                    <label className="text-xs font-bold text-slate-700">Tipo de Desconto:</label>
-                    <div className="inline-flex rounded-lg bg-slate-100 p-0.5 border border-slate-200">
-                      <button
-                        type="button"
-                        onClick={() => setItemDiscountType('percent')}
-                        className={`px-3 py-1 text-xs font-bold rounded-md cursor-pointer transition-all ${
-                          itemDiscountType === 'percent'
-                            ? 'bg-amber-600 text-white shadow-2xs'
-                            : 'text-slate-600 hover:text-slate-900'
-                        }`}
-                      >
-                        % Percentual
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setItemDiscountType('value')}
-                        className={`px-3 py-1 text-xs font-bold rounded-md cursor-pointer transition-all ${
-                          itemDiscountType === 'value'
-                            ? 'bg-amber-600 text-white shadow-2xs'
-                            : 'text-slate-600 hover:text-slate-900'
-                        }`}
-                      >
-                        R$ Reais
-                      </button>
+                  {isPriceMode ? (
+                    <div className="flex items-center justify-between mb-1.5">
+                      <label className="text-xs font-bold text-slate-700">Novo Preço Unitário (R$):</label>
+                      {Math.abs(itemUnderDiscount.unitPrice - originalCatalogPrice) > 0.004 && (
+                        <button
+                          type="button"
+                          onClick={() => setItemDiscountInput(originalCatalogPrice.toFixed(2).replace('.', ','))}
+                          className="inline-flex items-center gap-1 text-[11px] font-bold text-indigo-600 hover:text-indigo-800 cursor-pointer"
+                        >
+                          <RotateCcw size={11} />
+                          Restaurar Original ({formatCurrency(originalCatalogPrice)})
+                        </button>
+                      )}
                     </div>
-                  </div>
+                  ) : (
+                    <div className="flex items-center justify-between mb-1.5">
+                      <label className="text-xs font-bold text-slate-700">
+                        {isAddMode ? 'Tipo de Acréscimo:' : 'Tipo de Desconto:'}
+                      </label>
+                      <div className="inline-flex rounded-lg bg-slate-100 p-0.5 border border-slate-200">
+                        <button
+                          type="button"
+                          onClick={() => setItemDiscountType('percent')}
+                          className={`px-3 py-1 text-xs font-bold rounded-md cursor-pointer transition-all ${
+                            itemDiscountType === 'percent'
+                              ? isAddMode
+                                ? 'bg-blue-600 text-white shadow-2xs'
+                                : 'bg-amber-600 text-white shadow-2xs'
+                              : 'text-slate-600 hover:text-slate-900'
+                          }`}
+                        >
+                          % Percentual
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setItemDiscountType('value')}
+                          className={`px-3 py-1 text-xs font-bold rounded-md cursor-pointer transition-all ${
+                            itemDiscountType === 'value'
+                              ? isAddMode
+                                ? 'bg-blue-600 text-white shadow-2xs'
+                                : 'bg-amber-600 text-white shadow-2xs'
+                              : 'text-slate-600 hover:text-slate-900'
+                          }`}
+                        >
+                          R$ Reais
+                        </button>
+                      </div>
+                    </div>
+                  )}
 
                   <div className="relative">
-                    {itemDiscountType === 'value' && (
+                    {(isPriceMode || itemDiscountType === 'value') && (
                       <span className="absolute left-3 top-1/2 -translate-y-1/2 text-sm font-black text-slate-400 select-none">
                         R$
                       </span>
@@ -2969,32 +3706,44 @@ export const PosView: React.FC<PosViewProps> = ({
                       ref={itemDiscountInputRef}
                       type="text"
                       inputMode="decimal"
-                      placeholder={itemDiscountType === 'percent' ? 'Ex: 10' : 'Ex: 5,00'}
+                      placeholder={
+                        isPriceMode
+                          ? originalCatalogPrice.toFixed(2).replace('.', ',')
+                          : itemDiscountType === 'percent'
+                          ? 'Ex: 10'
+                          : 'Ex: 5,00'
+                      }
                       value={itemDiscountInput}
                       onChange={(e) => setItemDiscountInput(e.target.value.replace(/[^0-9.,]/g, ''))}
-                      className={`w-full py-2.5 bg-slate-50 border-2 border-slate-200 focus:border-amber-500 rounded-xl text-right font-black text-slate-900 text-xl font-mono focus:outline-hidden focus:bg-white focus:ring-2 focus:ring-amber-400/40 transition-all ${
-                        itemDiscountType === 'value' ? 'pl-10 pr-3' : 'pl-3 pr-10'
+                      className={`w-full py-2.5 bg-slate-50 border-2 border-slate-200 rounded-xl text-right font-black text-slate-900 text-xl font-mono focus:outline-hidden focus:bg-white focus:ring-2 transition-all ${
+                        isPriceMode
+                          ? 'pl-10 pr-3 focus:border-indigo-500 focus:ring-indigo-400/40'
+                          : isAddMode
+                          ? `${itemDiscountType === 'value' ? 'pl-10 pr-3' : 'pl-3 pr-10'} focus:border-blue-500 focus:ring-blue-400/40`
+                          : `${itemDiscountType === 'value' ? 'pl-10 pr-3' : 'pl-3 pr-10'} focus:border-amber-500 focus:ring-amber-400/40`
                       }`}
                     />
-                    {itemDiscountType === 'percent' && (
+                    {!isPriceMode && itemDiscountType === 'percent' && (
                       <span className="absolute right-3.5 top-1/2 -translate-y-1/2 text-sm font-black text-slate-400 select-none">
                         %
                       </span>
                     )}
                   </div>
 
-                  <div className="flex items-center justify-between text-[11px] text-slate-500 mt-1">
-                    <span>Limite do operador: <strong>{currentUser.permissions.maxDiscountPercent}%</strong></span>
-                    {itemDiscountType === 'value' && (
-                      <span className="text-slate-400">
-                        (Máx: {formatCurrency((itemGrossTotal * currentUser.permissions.maxDiscountPercent) / 100)})
-                      </span>
-                    )}
-                  </div>
+                  {!isPriceMode && !isAddMode && (
+                    <div className="flex items-center justify-between text-[11px] text-slate-500 mt-1">
+                      <span>Limite do operador: <strong>{currentUser.permissions.maxDiscountPercent}%</strong></span>
+                      {itemDiscountType === 'value' && (
+                        <span className="text-slate-400">
+                          (Máx: {formatCurrency((itemGrossTotal * currentUser.permissions.maxDiscountPercent) / 100)})
+                        </span>
+                      )}
+                    </div>
+                  )}
                 </div>
 
-                {/* Botões de Atalho Rápido de % */}
-                {itemDiscountType === 'percent' && (
+                {/* Botões de Atalho Rápido de % (Desconto) */}
+                {!isPriceMode && !isAddMode && itemDiscountType === 'percent' && (
                   <div className="flex items-center gap-1.5 pt-0.5">
                     <span className="text-[10px] font-bold text-slate-400 uppercase">Atalhos:</span>
                     {[5, 10, 15, 20]
@@ -3021,14 +3770,33 @@ export const PosView: React.FC<PosViewProps> = ({
 
                 {/* Pré-visualização ao Vivo do Item */}
                 <div className="p-3 bg-gradient-to-br from-slate-900 to-slate-950 text-white rounded-xl space-y-1 font-mono text-xs border border-slate-800">
-                  <div className="flex justify-between text-slate-400">
-                    <span>Bruto do Item:</span>
-                    <span>{formatCurrency(itemGrossTotal)}</span>
-                  </div>
-                  <div className="flex justify-between text-amber-400 font-bold">
-                    <span>Desconto a Aplicar:</span>
-                    <span>-{formatCurrency(previewDiscVal)} {previewDiscPct > 0 ? `(${previewDiscPct.toFixed(1).replace('.0', '')}%)` : ''}</span>
-                  </div>
+                  {isPriceMode ? (
+                    <>
+                      <div className="flex justify-between text-slate-400">
+                        <span>Preço Original Cadastrado:</span>
+                        <span>{formatCurrency(originalCatalogPrice)}</span>
+                      </div>
+                      <div className="flex justify-between text-indigo-300 font-bold">
+                        <span>Novo Preço Unitário:</span>
+                        <span>{formatCurrency(rawInput > 0 ? rawInput : itemUnderDiscount.unitPrice)}</span>
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      <div className="flex justify-between text-slate-400">
+                        <span>Bruto do Item:</span>
+                        <span>{formatCurrency(itemGrossTotal)}</span>
+                      </div>
+                      <div className={`flex justify-between font-bold ${isAddMode ? 'text-blue-400' : 'text-amber-400'}`}>
+                        <span>{isAddMode ? 'Acréscimo a Aplicar:' : 'Desconto a Aplicar:'}</span>
+                        <span>
+                          {isAddMode ? '+' : '-'}
+                          {formatCurrency(previewDeltaVal)}{' '}
+                          {previewDeltaPct > 0 ? `(${previewDeltaPct.toFixed(1).replace('.0', '')}%)` : ''}
+                        </span>
+                      </div>
+                    </>
+                  )}
                   <div className="flex items-baseline justify-between pt-1.5 border-t border-slate-800">
                     <span className="text-xs uppercase font-extrabold text-emerald-400">
                       Novo Total do Item:
@@ -3042,13 +3810,13 @@ export const PosView: React.FC<PosViewProps> = ({
                 {/* Botões de Ação */}
                 <div className="flex items-center justify-between pt-2 border-t border-slate-100 gap-2">
                   <div>
-                    {itemUnderDiscount.discountValue > 0 && (
+                    {!isPriceMode && (itemUnderDiscount.discountValue > 0 || (itemUnderDiscount.additionValue || 0) > 0) && (
                       <button
                         type="button"
                         onClick={handleRemoveItemDiscount}
                         className="px-3 py-2 text-xs font-bold text-rose-600 hover:bg-rose-50 rounded-xl transition-colors cursor-pointer border border-rose-200"
                       >
-                        Remover Desconto
+                        {isAddMode ? 'Remover Acréscimo' : 'Remover Desconto'}
                       </button>
                     )}
                   </div>
@@ -3066,10 +3834,22 @@ export const PosView: React.FC<PosViewProps> = ({
                     </button>
                     <button
                       type="submit"
-                      className="px-5 py-2 text-xs font-extrabold bg-amber-600 hover:bg-amber-700 text-white rounded-xl shadow-md transition-all flex items-center gap-1.5 cursor-pointer"
+                      className={`px-5 py-2 text-xs font-extrabold text-white rounded-xl shadow-md transition-all flex items-center gap-1.5 cursor-pointer ${
+                        isPriceMode
+                          ? 'bg-indigo-600 hover:bg-indigo-700'
+                          : isAddMode
+                          ? 'bg-blue-600 hover:bg-blue-700'
+                          : 'bg-amber-600 hover:bg-amber-700'
+                      }`}
                     >
                       <CheckCircle2 size={15} />
-                      <span>Aplicar Desconto [Enter]</span>
+                      <span>
+                        {isPriceMode
+                          ? 'Confirmar Preço [Enter]'
+                          : isAddMode
+                          ? 'Aplicar Acréscimo [Enter]'
+                          : 'Aplicar Desconto [Enter]'}
+                      </span>
                     </button>
                   </div>
                 </div>

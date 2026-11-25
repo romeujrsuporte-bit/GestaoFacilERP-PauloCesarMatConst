@@ -4979,6 +4979,16 @@ export class Database {
     return this.isAdmin(u) || this.isGerente(u);
   }
 
+  /**
+   * Somente usuários ativos com perfil Administrador Geral (admin) ou Gerente Geral (gerente)
+   * têm permissão para alterar diretamente o preço unitário de produtos durante a venda.
+   */
+  public static canCurrentUserAlterUnitPrice(user?: User): boolean {
+    const u = user || this.getCurrentUser();
+    if (!u || u.status === 'inativo') return false;
+    return this.isAdmin(u) || this.isGerente(u);
+  }
+
   public static isBalconista(user?: User): boolean {
     const u = user || this.getCurrentUser();
     if (!u) return false;
@@ -5162,6 +5172,25 @@ export class Database {
       return [];
     }
     const s = this.getState();
+
+    // Validação de perfil para alteração direta de preço unitário (exclusivo Administrador Geral ou Gerente Geral)
+    const canAlterPrice = this.canCurrentUserAlterUnitPrice();
+    if (!canAlterPrice) {
+      for (const item of order.items || []) {
+        const baselineItem = options?.existingOrder?.items?.find((bi) => bi.productId === item.productId);
+        const isExistingSameOverride =
+          baselineItem &&
+          baselineItem.priceOverridden === true &&
+          Math.abs((baselineItem.unitPrice || 0) - (item.unitPrice || 0)) <= 0.005;
+
+        if (item.priceOverridden && !isExistingSameOverride) {
+          throw new Error(
+            `Alteração direta de preço unitário no produto [${item.productCode}] ${item.description} permitida apenas para Administrador Geral ou Gerente Geral.`
+          );
+        }
+      }
+    }
+
     const itemDiscountsSum = (order.items || []).reduce((sum, i) => sum + (i.discountValue || 0), 0);
     const inferredGlobalDiscount =
       options?.globalOrderDiscountValue !== undefined

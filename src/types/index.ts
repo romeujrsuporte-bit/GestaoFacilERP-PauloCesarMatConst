@@ -383,6 +383,9 @@ export interface OrderItem {
   masterPackAssociatedProductCode?: string;
   returnedQuantity?: number; // Quantidade deste item já devolvida em devoluções anteriores
   referenceUnitPrice?: number; // Preço de tabela de referência na inclusão (para controle de alteração manual de preço)
+  originalUnitPrice?: number; // Preço unitário original cadastrado no catálogo antes de alteração direta autorizada
+  priceOverridden?: boolean; // Indica alteração direta do preço unitário na venda (sem desconto/acréscimo)
+  priceOverriddenByRole?: 'admin' | 'gerente'; // Perfil autorizado que realizou a alteração direta do preço unitário
   discountAuthorization?: DiscountAuthorizationRecord; // Autorização específica vinculada a este item nesta operação
 }
 

@@ -31,6 +31,7 @@ import {
   Ticket,
   Tag,
   Gift,
+  Pencil,
 } from 'lucide-react';
 import { Database } from '../../services/db';
 import { Product, Customer, Order, OrderCommercialKind, OrderItem, DiscountAuthorizationRecord } from '../../types';
@@ -82,6 +83,8 @@ export const ExternalSalesView: React.FC<ExternalSalesViewProps> = ({
   const [dbState, setDbState] = useState(Database.getState());
   const currentCompany = Database.getCurrentCompany();
   const currentUser = Database.getCurrentUser();
+  const canAlterUnitPrice = Database.canCurrentUserAlterUnitPrice(currentUser);
+  const unitPriceOverrideRole: 'admin' | 'gerente' = Database.isAdmin(currentUser) ? 'admin' : 'gerente';
 
   useEffect(() => {
     return Database.subscribe(() => {
@@ -289,6 +292,9 @@ export const ExternalSalesView: React.FC<ExternalSalesViewProps> = ({
   const setCart = propSetCart || setInternalCart;
   const [catalogQtyDrafts, setCatalogQtyDrafts] = useState<Record<string, string>>({});
   const [cartQtyDrafts, setCartQtyDrafts] = useState<Record<string, string>>({});
+  // Edição rápida de preço unitário antes de informar quantidade / adicionar (somente Admin / Gerente Geral)
+  const [catalogPriceDrafts, setCatalogPriceDrafts] = useState<Record<string, string>>({});
+  const [editingCatalogPriceId, setEditingCatalogPriceId] = useState<string | null>(null);
 
   const getProductAvailableCommercialStock = (productId: string) => {
     const locBalance = StockEngine.getBalance(dbState.stockBalances, productId, commercialLocation.id);
@@ -314,7 +320,7 @@ export const ExternalSalesView: React.FC<ExternalSalesViewProps> = ({
     };
   };
 
-  const handleAddToCart = (product: Product, customQty?: number) => {
+  const handleAddToCart = (product: Product, customQty?: number, customUnitPriceOverride?: number) => {
     // Validação estrita: produto de Revenda Comercial
     if (product.productType !== 'revenda') {
       toast.warning('Apenas produtos do tipo Revenda Comercial podem ser vendidos no Vendas Mobile.', 'Produto Não Permitido');
@@ -341,14 +347,47 @@ export const ExternalSalesView: React.FC<ExternalSalesViewProps> = ({
       return;
     }
 
+    const catalogPrice = StockEngine.getProductPriceForCompany(product, currentCompany.id);
+    const effectiveCost = StockEngine.getProductCostForCompany(product, currentCompany.id);
+    const hasAuthorizedOverride =
+      canAlterUnitPrice &&
+      customUnitPriceOverride !== undefined &&
+      !isNaN(customUnitPriceOverride) &&
+      customUnitPriceOverride > 0 &&
+      Math.abs(customUnitPriceOverride - catalogPrice) > 0.004;
+    const finalInitialPrice = hasAuthorizedOverride
+      ? Math.round(customUnitPriceOverride! * 100) / 100
+      : catalogPrice;
+
     if (existing) {
       setCart((prev) =>
-        prev.map((item) => (item.productId === product.id ? recalculateCartItem(item, targetQty) : item))
+        prev.map((item) => {
+          if (item.productId !== product.id) return item;
+          if (hasAuthorizedOverride) {
+            if (item.discountAuthorization?.operationId) {
+              revokeDiscountAuthorization(item.discountAuthorization.operationId);
+            }
+            return {
+              ...item,
+              quantity: targetQty,
+              unitPrice: finalInitialPrice,
+              referenceUnitPrice: finalInitialPrice,
+              originalUnitPrice: item.originalUnitPrice ?? catalogPrice,
+              priceOverridden: true,
+              priceOverriddenByRole: unitPriceOverrideRole,
+              discountPercent: 0,
+              discountValue: 0,
+              additionPercent: 0,
+              additionValue: 0,
+              totalPrice: Math.round(targetQty * finalInitialPrice * 100) / 100,
+              discountAuthorization: undefined,
+            };
+          }
+          return recalculateCartItem(item, targetQty);
+        })
       );
     } else {
-      const effectivePrice = StockEngine.getProductPriceForCompany(product, currentCompany.id);
-      const effectiveCost = StockEngine.getProductCostForCompany(product, currentCompany.id);
-      const gross = qtyToAdd * effectivePrice;
+      const gross = qtyToAdd * finalInitialPrice;
 
       const newItem: OrderItem = {
         id: 'ITM-' + Date.now(),
@@ -357,8 +396,11 @@ export const ExternalSalesView: React.FC<ExternalSalesViewProps> = ({
         description: product.description,
         unit: product.unit,
         quantity: qtyToAdd,
-        unitPrice: effectivePrice,
-        referenceUnitPrice: effectivePrice,
+        unitPrice: finalInitialPrice,
+        referenceUnitPrice: finalInitialPrice,
+        originalUnitPrice: catalogPrice,
+        priceOverridden: hasAuthorizedOverride ? true : undefined,
+        priceOverriddenByRole: hasAuthorizedOverride ? unitPriceOverrideRole : undefined,
         discountPercent: 0,
         discountValue: 0,
         additionPercent: 0,
@@ -381,6 +423,13 @@ export const ExternalSalesView: React.FC<ExternalSalesViewProps> = ({
       return next;
     });
     setCartQtyDrafts((prev) => {
+      if (!(product.id in prev)) return prev;
+      const next = { ...prev };
+      delete next[product.id];
+      return next;
+    });
+    setEditingCatalogPriceId(null);
+    setCatalogPriceDrafts((prev) => {
       if (!(product.id in prev)) return prev;
       const next = { ...prev };
       delete next[product.id];
@@ -483,26 +532,85 @@ export const ExternalSalesView: React.FC<ExternalSalesViewProps> = ({
     });
   };
 
-  // Ajuste por item (Desconto / Acréscimo)
+  const handleCommitInlineCartPrice = (productId: string, rawPriceStr: string) => {
+    if (!canAlterUnitPrice) return;
+    const parsed = parseFloat(rawPriceStr.replace(',', '.'));
+    if (!Number.isFinite(parsed) || parsed <= 0) return;
+    const roundedPrice = Math.round(parsed * 100) / 100;
+    const product = dbState.products.find((p) => p.id === productId);
+    const catalogPrice = product
+      ? StockEngine.getProductPriceForCompany(product, currentCompany.id)
+      : undefined;
+
+    setCart((prev) =>
+      prev.map((i) => {
+        if (i.productId !== productId) return i;
+        if (Math.abs(i.unitPrice - roundedPrice) <= 0.004) return i;
+        if (i.discountAuthorization?.operationId) {
+          revokeDiscountAuthorization(i.discountAuthorization.operationId);
+        }
+        const origPrice = i.originalUnitPrice ?? catalogPrice ?? i.unitPrice;
+        const isOverridden = Math.abs(roundedPrice - origPrice) > 0.004;
+        return {
+          ...i,
+          unitPrice: roundedPrice,
+          referenceUnitPrice: roundedPrice,
+          originalUnitPrice: origPrice,
+          priceOverridden: isOverridden,
+          priceOverriddenByRole: isOverridden ? unitPriceOverrideRole : undefined,
+          discountPercent: 0,
+          discountValue: 0,
+          additionPercent: 0,
+          additionValue: 0,
+          totalPrice: Math.round(i.quantity * roundedPrice * 100) / 100,
+          discountAuthorization: undefined,
+        };
+      })
+    );
+  };
+
+  // Ajuste por item (Desconto / Acréscimo / Alterar Preço Unitário)
   const [showItemAdjustmentModal, setShowItemAdjustmentModal] = useState<boolean>(false);
   const [adjustingItemId, setAdjustingItemId] = useState<string | null>(null);
-  const [itemAdjustmentMode, setItemAdjustmentMode] = useState<'desconto' | 'acrescimo'>('desconto');
+  const [itemAdjustmentMode, setItemAdjustmentMode] = useState<'desconto' | 'acrescimo' | 'alterar_preco'>('desconto');
   const [itemAdjustmentType, setItemAdjustmentType] = useState<'percent' | 'value'>('percent');
   const [itemAdjustmentInput, setItemAdjustmentInput] = useState<string>('');
 
-  const handleOpenItemAdjustment = (item: OrderItem) => {
+  const handleOpenItemAdjustment = (
+    item: OrderItem,
+    initialMode?: 'desconto' | 'acrescimo' | 'alterar_preco'
+  ) => {
     setAdjustingItemId(item.productId);
-    if (item.additionValue && item.additionValue > 0) {
-      setItemAdjustmentMode('acrescimo');
+    const resolvedMode: 'desconto' | 'acrescimo' | 'alterar_preco' =
+      initialMode === 'alterar_preco' && canAlterUnitPrice
+        ? 'alterar_preco'
+        : initialMode === 'acrescimo'
+        ? 'acrescimo'
+        : initialMode === 'desconto'
+        ? 'desconto'
+        : item.additionValue && item.additionValue > 0
+        ? 'acrescimo'
+        : item.priceOverridden && canAlterUnitPrice && !(item.discountValue > 0)
+        ? 'alterar_preco'
+        : 'desconto';
+
+    setItemAdjustmentMode(resolvedMode);
+
+    if (resolvedMode === 'alterar_preco') {
+      setItemAdjustmentType('value');
+      setItemAdjustmentInput(item.unitPrice.toFixed(2).replace('.', ','));
+    } else if (resolvedMode === 'acrescimo') {
       if (item.additionPercent && item.additionPercent > 0) {
         setItemAdjustmentType('percent');
         setItemAdjustmentInput(item.additionPercent.toString().replace('.', ','));
-      } else {
+      } else if (item.additionValue && item.additionValue > 0) {
         setItemAdjustmentType('value');
         setItemAdjustmentInput(item.additionValue.toFixed(2).replace('.', ','));
+      } else {
+        setItemAdjustmentType('percent');
+        setItemAdjustmentInput('');
       }
     } else if (item.discountValue > 0 || item.discountPercent > 0) {
-      setItemAdjustmentMode('desconto');
       if (item.discountPercent > 0) {
         setItemAdjustmentType('percent');
         setItemAdjustmentInput(item.discountPercent.toString().replace('.', ','));
@@ -511,7 +619,6 @@ export const ExternalSalesView: React.FC<ExternalSalesViewProps> = ({
         setItemAdjustmentInput(item.discountValue.toFixed(2).replace('.', ','));
       }
     } else {
-      setItemAdjustmentMode('desconto');
       setItemAdjustmentType('percent');
       setItemAdjustmentInput('');
     }
@@ -524,8 +631,56 @@ export const ExternalSalesView: React.FC<ExternalSalesViewProps> = ({
     if (!target) return;
 
     const product = dbState.products.find((p) => p.id === target.productId);
-    const gross = target.quantity * target.unitPrice;
     const rawVal = Math.max(0, parseFloat(itemAdjustmentInput.replace(',', '.')) || 0);
+
+    // Modo 3: Alteração Direta de Preço Unitário (somente Admin / Gerente Geral)
+    if (itemAdjustmentMode === 'alterar_preco') {
+      if (!canAlterUnitPrice) {
+        toast.error(
+          'Apenas usuários com perfil Administrador Geral ou Gerente Geral podem alterar o preço unitário.',
+          'Permissão Restrita'
+        );
+        return;
+      }
+      const roundedPrice = Math.round(rawVal * 100) / 100;
+      if (isNaN(roundedPrice) || roundedPrice <= 0) {
+        toast.warning('Informe um preço unitário válido maior que zero.', 'Preço Inválido');
+        return;
+      }
+      const catalogPrice = product
+        ? StockEngine.getProductPriceForCompany(product, currentCompany.id)
+        : target.unitPrice;
+      const origPrice = target.originalUnitPrice ?? catalogPrice;
+      const isOverridden = Math.abs(roundedPrice - origPrice) > 0.004;
+
+      setCart((prev) =>
+        prev.map((i) => {
+          if (i.productId !== adjustingItemId) return i;
+          if (i.discountAuthorization?.operationId) {
+            revokeDiscountAuthorization(i.discountAuthorization.operationId);
+          }
+          return {
+            ...i,
+            unitPrice: roundedPrice,
+            referenceUnitPrice: roundedPrice,
+            originalUnitPrice: origPrice,
+            priceOverridden: isOverridden,
+            priceOverriddenByRole: isOverridden ? unitPriceOverrideRole : undefined,
+            discountPercent: 0,
+            discountValue: 0,
+            additionPercent: 0,
+            additionValue: 0,
+            totalPrice: Math.round(i.quantity * roundedPrice * 100) / 100,
+            discountAuthorization: undefined,
+          };
+        })
+      );
+      setShowItemAdjustmentModal(false);
+      toast.success(`Preço unitário alterado para ${formatCurrency(roundedPrice)} nesta venda.`, 'Preço Atualizado');
+      return;
+    }
+
+    const gross = target.quantity * target.unitPrice;
     const maxPercent = currentUser.permissions.maxDiscountPercent;
 
     let appliedDiscountPercent = 0;
@@ -609,6 +764,8 @@ export const ExternalSalesView: React.FC<ExternalSalesViewProps> = ({
         quantity: target.quantity,
         unitPrice: target.unitPrice,
         referenceUnitPrice: target.referenceUnitPrice,
+        priceOverridden: target.priceOverridden,
+        priceOverriddenByRole: target.priceOverriddenByRole,
         itemDiscountValue: appliedDiscountValue,
         itemDiscountPercent: appliedDiscountPercent,
         explicitPercentRequested,
@@ -1381,105 +1538,294 @@ export const ExternalSalesView: React.FC<ExternalSalesViewProps> = ({
                         </div>
                       </div>
 
-                      {/* Rodapé do Card: Preço e Botão de Ação Touch + Digitação de Quantidade */}
-                      <div className="flex items-center justify-between gap-2 pt-1.5 border-t border-slate-100">
-                        <div className="text-[22px] font-black text-emerald-700 font-mono">
-                          {formatCurrency(price)}
-                        </div>
+                      {/* Rodapé do Card: Preço Unit. (Clique p/ editar) + Quantidade + Incluir */}
+                      {(() => {
+                        const draftStr = catalogPriceDrafts[p.id];
+                        const parsedDraft =
+                          canAlterUnitPrice && draftStr !== undefined && draftStr.trim() !== ''
+                            ? parseFloat(draftStr.replace(',', '.'))
+                            : NaN;
+                        const activeDisplayPrice = inCart
+                          ? inCart.unitPrice
+                          : !isNaN(parsedDraft) && parsedDraft > 0
+                          ? parsedDraft
+                          : price;
+                        const isPriceOverridden = inCart
+                          ? Boolean(inCart.priceOverridden)
+                          : canAlterUnitPrice &&
+                            !isNaN(parsedDraft) &&
+                            parsedDraft > 0 &&
+                            Math.abs(parsedDraft - price) > 0.004;
+                        const isEditingCardPrice = canAlterUnitPrice && editingCatalogPriceId === p.id;
+                        const parsedCardQty = Math.max(
+                          1,
+                          parseFloat((catalogQtyDrafts[p.id] ?? '1').replace(',', '.')) || 1
+                        );
 
-                        {inCart ? (
-                          <div className="flex items-center gap-1.5 bg-emerald-50/80 border border-emerald-200/90 p-1 rounded-xl">
-                            <button
-                              type="button"
-                              onClick={() => handleUpdateQty(p.id, -1)}
-                              className="w-11 h-11 min-w-[44px] min-h-[44px] bg-white text-emerald-800 border border-emerald-200 rounded-lg flex items-center justify-center font-bold shadow-2xs hover:bg-slate-50 active:scale-95 transition-all cursor-pointer"
-                              aria-label="Diminuir quantidade"
-                            >
-                              <Minus size={16} />
-                            </button>
-                            <input
-                              type="text"
-                              inputMode="decimal"
-                              aria-label={`Quantidade de ${p.description}`}
-                              value={
-                                cartQtyDrafts[p.id] !== undefined
-                                  ? cartQtyDrafts[p.id]
-                                  : String(inCart.quantity).replace('.', ',')
-                              }
-                              onFocus={(e) => {
-                                setCartQtyDrafts((prev) => ({
-                                  ...prev,
-                                  [p.id]: String(inCart.quantity).replace('.', ','),
-                                }));
-                                e.currentTarget.select();
-                              }}
-                              onChange={(e) => handleCartQtyDraftChange(p.id, e.target.value)}
-                              onBlur={() => handleCommitCartQtyDraft(p.id)}
-                              onKeyDown={(e) => {
-                                if (e.key === 'Enter') {
-                                  e.currentTarget.blur();
-                                }
-                              }}
-                              className="w-14 h-11 text-center text-base font-extrabold text-emerald-950 font-mono bg-white border border-emerald-300 rounded-lg focus:outline-hidden focus:ring-2 focus:ring-emerald-500"
-                            />
-                            <button
-                              type="button"
-                              onClick={() => handleAddToCart(p)}
-                              className="w-11 h-11 min-w-[44px] min-h-[44px] bg-emerald-600 text-white rounded-lg flex items-center justify-center font-bold shadow-xs hover:bg-emerald-700 active:scale-95 transition-all cursor-pointer"
-                              aria-label="Aumentar quantidade"
-                            >
-                              <Plus size={16} />
-                            </button>
-                          </div>
-                        ) : (
-                          <div className="flex items-center gap-1.5">
-                            <input
-                              type="text"
-                              inputMode="decimal"
-                              aria-label={`Quantidade inicial de ${p.description}`}
-                              value={catalogQtyDrafts[p.id] ?? '1'}
-                              onFocus={(e) => e.currentTarget.select()}
-                              onChange={(e) => {
-                                const val = e.target.value.replace(/[^0-9.,]/g, '');
-                                setCatalogQtyDrafts((prev) => ({ ...prev, [p.id]: val }));
-                              }}
-                              onBlur={() => {
-                                const raw = (catalogQtyDrafts[p.id] ?? '1').trim();
-                                const num = parseFloat(raw.replace(',', '.'));
-                                if (!raw || isNaN(num) || num <= 0) {
-                                  setCatalogQtyDrafts((prev) => {
-                                    const next = { ...prev };
-                                    delete next[p.id];
-                                    return next;
-                                  });
-                                }
-                              }}
-                              onKeyDown={(e) => {
-                                if (e.key === 'Enter') {
+                        return (
+                          <div className="pt-2 border-t border-slate-100 space-y-2">
+                            <div className="grid grid-cols-2 gap-2 items-end">
+                              {/* Coluna 1: Preço Unit. (Clique p/ editar) */}
+                              <div className="space-y-1 min-w-0">
+                                <div className="flex items-center justify-between gap-1">
+                                  <span className="text-[11px] font-bold text-slate-700">Preço Unit.:</span>
+                                  {canAlterUnitPrice && (
+                                    isPriceOverridden ? (
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          if (inCart) {
+                                            handleCommitInlineCartPrice(p.id, price.toFixed(2));
+                                          }
+                                          setCatalogPriceDrafts((prev) => {
+                                            const next = { ...prev };
+                                            delete next[p.id];
+                                            return next;
+                                          });
+                                          setEditingCatalogPriceId(null);
+                                        }}
+                                        className="text-[10px] font-bold text-indigo-600 hover:underline cursor-pointer"
+                                        title={`Restaurar preço original (${formatCurrency(price)})`}
+                                      >
+                                        Restaurar
+                                      </button>
+                                    ) : (
+                                      <span className="text-[10px] font-bold text-emerald-700">
+                                        Clique p/ editar
+                                      </span>
+                                    )
+                                  )}
+                                </div>
+
+                                {canAlterUnitPrice ? (
+                                  isEditingCardPrice ? (
+                                    <div className="flex items-center justify-between gap-1.5 w-full h-11 bg-white border-2 border-blue-500 ring-2 ring-blue-500/20 rounded-xl px-2.5">
+                                      <Pencil size={13} className="text-blue-600 shrink-0" />
+                                      <div className="flex items-center justify-end gap-1 flex-1 min-w-0">
+                                        <span className="text-xs font-extrabold text-slate-500 font-mono">R$</span>
+                                        <input
+                                          type="text"
+                                          inputMode="decimal"
+                                          autoFocus
+                                          aria-label={`Novo preço unitário de ${p.description}`}
+                                          value={draftStr ?? activeDisplayPrice.toFixed(2).replace('.', ',')}
+                                          onFocus={(e) => e.currentTarget.select()}
+                                          onChange={(e) =>
+                                            setCatalogPriceDrafts((prev) => ({
+                                              ...prev,
+                                              [p.id]: e.target.value.replace(/[^0-9.,]/g, ''),
+                                            }))
+                                          }
+                                          onBlur={() => {
+                                            if (inCart && catalogPriceDrafts[p.id] !== undefined) {
+                                              handleCommitInlineCartPrice(p.id, catalogPriceDrafts[p.id]);
+                                              setCatalogPriceDrafts((prev) => {
+                                                const next = { ...prev };
+                                                delete next[p.id];
+                                                return next;
+                                              });
+                                            }
+                                            setEditingCatalogPriceId(null);
+                                          }}
+                                          onKeyDown={(e) => {
+                                            if (e.key === 'Enter') {
+                                              e.preventDefault();
+                                              if (inCart && catalogPriceDrafts[p.id] !== undefined) {
+                                                handleCommitInlineCartPrice(p.id, catalogPriceDrafts[p.id]);
+                                                setCatalogPriceDrafts((prev) => {
+                                                  const next = { ...prev };
+                                                  delete next[p.id];
+                                                  return next;
+                                                });
+                                              }
+                                              setEditingCatalogPriceId(null);
+                                            } else if (e.key === 'Escape') {
+                                              setCatalogPriceDrafts((prev) => {
+                                                const next = { ...prev };
+                                                delete next[p.id];
+                                                return next;
+                                              });
+                                              setEditingCatalogPriceId(null);
+                                            }
+                                          }}
+                                          className="w-full text-right text-sm font-black text-slate-900 font-mono bg-transparent focus:outline-hidden"
+                                        />
+                                      </div>
+                                    </div>
+                                  ) : (
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setCatalogPriceDrafts((prev) => ({
+                                          ...prev,
+                                          [p.id]: activeDisplayPrice.toFixed(2).replace('.', ','),
+                                        }));
+                                        setEditingCatalogPriceId(p.id);
+                                      }}
+                                      className={`flex items-center justify-between gap-1.5 w-full h-11 rounded-xl px-3 border transition-colors cursor-pointer ${
+                                        isPriceOverridden
+                                          ? 'bg-indigo-50/70 border-indigo-400 text-indigo-950'
+                                          : 'bg-white border-slate-300 text-slate-900 hover:border-blue-400'
+                                      }`}
+                                      title={`Toque para alterar o preço unitário (Original: ${formatCurrency(price)})`}
+                                    >
+                                      <Pencil
+                                        size={13}
+                                        className={isPriceOverridden ? 'text-indigo-600 shrink-0' : 'text-slate-400 shrink-0'}
+                                      />
+                                      <span className="font-mono text-sm font-black truncate">
+                                        {formatCurrency(activeDisplayPrice)}
+                                      </span>
+                                    </button>
+                                  )
+                                ) : (
+                                  <div className="flex items-center justify-end w-full h-11 bg-slate-50 border border-slate-200 rounded-xl px-3 font-mono text-sm font-black text-slate-800 select-none">
+                                    {formatCurrency(activeDisplayPrice)}
+                                  </div>
+                                )}
+                              </div>
+
+                              {/* Coluna 2: Quantidade (- 1 +) */}
+                              <div className="space-y-1 min-w-0">
+                                <span className="text-[11px] font-bold text-slate-700 block">
+                                  Quantidade:
+                                </span>
+                                {inCart ? (
+                                  <div className="flex items-center justify-between h-11 bg-emerald-50/80 border border-emerald-300 rounded-xl px-1">
+                                    <button
+                                      type="button"
+                                      onClick={() => handleUpdateQty(p.id, -1)}
+                                      className="w-9 h-9 bg-white text-emerald-800 border border-emerald-200 rounded-lg flex items-center justify-center font-bold shadow-2xs active:scale-95 transition-all cursor-pointer shrink-0"
+                                      aria-label="Diminuir quantidade"
+                                    >
+                                      <Minus size={14} />
+                                    </button>
+                                    <input
+                                      type="text"
+                                      inputMode="decimal"
+                                      aria-label={`Quantidade de ${p.description}`}
+                                      value={
+                                        cartQtyDrafts[p.id] !== undefined
+                                          ? cartQtyDrafts[p.id]
+                                          : String(inCart.quantity).replace('.', ',')
+                                      }
+                                      onFocus={(e) => {
+                                        setCartQtyDrafts((prev) => ({
+                                          ...prev,
+                                          [p.id]: String(inCart.quantity).replace('.', ','),
+                                        }));
+                                        e.currentTarget.select();
+                                      }}
+                                      onChange={(e) => handleCartQtyDraftChange(p.id, e.target.value)}
+                                      onBlur={() => handleCommitCartQtyDraft(p.id)}
+                                      onKeyDown={(e) => {
+                                        if (e.key === 'Enter') {
+                                          e.currentTarget.blur();
+                                        }
+                                      }}
+                                      className="w-full min-w-0 text-center text-sm font-extrabold text-emerald-950 font-mono bg-transparent focus:outline-hidden"
+                                    />
+                                    <button
+                                      type="button"
+                                      onClick={() => handleAddToCart(p)}
+                                      className="w-9 h-9 bg-emerald-600 text-white rounded-lg flex items-center justify-center font-bold shadow-xs active:scale-95 transition-all cursor-pointer shrink-0"
+                                      aria-label="Aumentar quantidade"
+                                    >
+                                      <Plus size={14} />
+                                    </button>
+                                  </div>
+                                ) : (
+                                  <div className="flex items-center justify-between h-11 bg-white border border-slate-300 rounded-xl px-1">
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        const next = Math.max(1, parsedCardQty - 1);
+                                        setCatalogQtyDrafts((prev) => ({
+                                          ...prev,
+                                          [p.id]: String(next).replace('.', ','),
+                                        }));
+                                      }}
+                                      className="w-9 h-9 text-slate-600 hover:bg-slate-100 rounded-lg flex items-center justify-center cursor-pointer shrink-0"
+                                      aria-label="Diminuir quantidade inicial"
+                                    >
+                                      <Minus size={14} />
+                                    </button>
+                                    <input
+                                      type="text"
+                                      inputMode="decimal"
+                                      aria-label={`Quantidade inicial de ${p.description}`}
+                                      value={catalogQtyDrafts[p.id] ?? '1'}
+                                      onFocus={(e) => e.currentTarget.select()}
+                                      onChange={(e) => {
+                                        const val = e.target.value.replace(/[^0-9.,]/g, '');
+                                        setCatalogQtyDrafts((prev) => ({ ...prev, [p.id]: val }));
+                                      }}
+                                      onBlur={() => {
+                                        const raw = (catalogQtyDrafts[p.id] ?? '1').trim();
+                                        const num = parseFloat(raw.replace(',', '.'));
+                                        if (!raw || isNaN(num) || num <= 0) {
+                                          setCatalogQtyDrafts((prev) => {
+                                            const next = { ...prev };
+                                            delete next[p.id];
+                                            return next;
+                                          });
+                                        }
+                                      }}
+                                      onKeyDown={(e) => {
+                                        if (e.key === 'Enter') {
+                                          const raw = (catalogQtyDrafts[p.id] ?? '1').trim();
+                                          const parsed = parseFloat(raw.replace(',', '.'));
+                                          handleAddToCart(
+                                            p,
+                                            !isNaN(parsed) && parsed > 0 ? parsed : 1,
+                                            isPriceOverridden ? activeDisplayPrice : undefined
+                                          );
+                                        }
+                                      }}
+                                      placeholder="1"
+                                      className="w-full min-w-0 text-center text-sm font-extrabold text-slate-900 font-mono bg-transparent focus:outline-hidden"
+                                      title="Digite a quantidade desejada"
+                                    />
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        const next = parsedCardQty + 1;
+                                        setCatalogQtyDrafts((prev) => ({
+                                          ...prev,
+                                          [p.id]: String(next).replace('.', ','),
+                                        }));
+                                      }}
+                                      className="w-9 h-9 text-slate-600 hover:bg-slate-100 rounded-lg flex items-center justify-center cursor-pointer shrink-0"
+                                      aria-label="Aumentar quantidade inicial"
+                                    >
+                                      <Plus size={14} />
+                                    </button>
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+
+                            {!inCart && (
+                              <button
+                                type="button"
+                                onClick={() => {
                                   const raw = (catalogQtyDrafts[p.id] ?? '1').trim();
                                   const parsed = parseFloat(raw.replace(',', '.'));
-                                  handleAddToCart(p, !isNaN(parsed) && parsed > 0 ? parsed : 1);
-                                }
-                              }}
-                              placeholder="1"
-                              className="w-14 h-11 text-center text-sm font-extrabold text-slate-900 font-mono bg-slate-50 border border-slate-300 rounded-xl focus:outline-hidden focus:bg-white focus:ring-2 focus:ring-emerald-500"
-                              title="Digite a quantidade desejada"
-                            />
-                            <button
-                              type="button"
-                              onClick={() => {
-                                const raw = (catalogQtyDrafts[p.id] ?? '1').trim();
-                                const parsed = parseFloat(raw.replace(',', '.'));
-                                handleAddToCart(p, !isNaN(parsed) && parsed > 0 ? parsed : 1);
-                              }}
-                              className="h-11 min-h-[44px] px-3.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-sm font-bold flex items-center gap-1.5 shadow-xs active:scale-95 transition-all cursor-pointer"
-                            >
-                              <Plus size={16} />
-                              <span>Adicionar</span>
-                            </button>
+                                  handleAddToCart(
+                                    p,
+                                    !isNaN(parsed) && parsed > 0 ? parsed : 1,
+                                    isPriceOverridden ? activeDisplayPrice : undefined
+                                  );
+                                }}
+                                className="w-full h-11 min-h-[44px] px-3.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-sm font-bold flex items-center justify-center gap-1.5 shadow-xs active:scale-95 transition-all cursor-pointer"
+                              >
+                                <Plus size={16} />
+                                <span>Incluir Item</span>
+                              </button>
+                            )}
                           </div>
-                        )}
-                      </div>
+                        );
+                      })()}
                     </div>
                   );
                 })
@@ -1614,9 +1960,32 @@ export const ExternalSalesView: React.FC<ExternalSalesViewProps> = ({
                           <h4 className="text-[17px] font-bold text-slate-900 leading-snug">
                             {item.description}
                           </h4>
-                          <p className="text-[13px] text-slate-500 font-mono mt-0.5">
-                            {formatCurrency(item.unitPrice)} / {item.unit}
-                          </p>
+                          <div className="flex items-center gap-2 flex-wrap mt-0.5">
+                            {canAlterUnitPrice ? (
+                              <button
+                                type="button"
+                                onClick={() => handleOpenItemAdjustment(item, 'alterar_preco')}
+                                className={`inline-flex items-center gap-1 text-[13px] font-mono px-1.5 py-0.5 rounded-lg transition-colors cursor-pointer ${
+                                  item.priceOverridden
+                                    ? 'bg-indigo-50 text-indigo-800 border border-indigo-200 font-bold'
+                                    : 'text-slate-600 hover:bg-indigo-50 hover:text-indigo-700'
+                                }`}
+                                title="Toque para alterar o preço unitário deste item"
+                              >
+                                <span>{formatCurrency(item.unitPrice)} / {item.unit}</span>
+                                <Pencil size={11} className="text-indigo-500" />
+                              </button>
+                            ) : (
+                              <p className="text-[13px] text-slate-500 font-mono">
+                                {formatCurrency(item.unitPrice)} / {item.unit}
+                              </p>
+                            )}
+                            {item.priceOverridden && item.originalUnitPrice !== undefined && (
+                              <span className="text-[11px] text-slate-400 font-mono line-through">
+                                {formatCurrency(item.originalUnitPrice)}
+                              </span>
+                            )}
+                          </div>
                         </div>
                         <button
                           type="button"
@@ -1688,6 +2057,10 @@ export const ExternalSalesView: React.FC<ExternalSalesViewProps> = ({
                               ? `+Acréscimo (${formatCurrency(item.additionValue)})`
                               : item.discountValue > 0
                               ? `-Desconto (${formatCurrency(item.discountValue)})`
+                              : item.priceOverridden
+                              ? 'Preço Alterado'
+                              : canAlterUnitPrice
+                              ? 'Desconto / Alterar Preço'
                               : 'Ajustar Preço'}
                           </button>
                         </div>
@@ -2315,19 +2688,31 @@ export const ExternalSalesView: React.FC<ExternalSalesViewProps> = ({
       {/* 4. MODAIS E RECURSOS AUXILIARES                         */}
       {/* ======================================================== */}
 
-      {/* Modal de Ajuste (Desconto ou Acréscimo) por Item */}
+      {/* Modal de Ajuste (Desconto / Acréscimo / Alterar Preço) por Item */}
       {showItemAdjustmentModal && (() => {
         const target = cart.find((i) => i.productId === adjustingItemId);
         if (!target) return null;
+        const catalogProduct = dbState.products.find((p) => p.id === target.productId);
+        const originalCatalogPrice =
+          target.originalUnitPrice ??
+          (catalogProduct
+            ? StockEngine.getProductPriceForCompany(catalogProduct, currentCompany.id)
+            : target.unitPrice);
+
         const gross = target.quantity * target.unitPrice;
         const raw = parseFloat(itemAdjustmentInput.replace(',', '.')) || 0;
+        const isPriceMode = itemAdjustmentMode === 'alterar_preco';
         let previewVal = 0;
-        if (itemAdjustmentType === 'percent') {
-          previewVal = (gross * Math.max(0, raw)) / 100;
-        } else {
-          previewVal = Math.max(0, raw);
+        if (!isPriceMode) {
+          if (itemAdjustmentType === 'percent') {
+            previewVal = (gross * Math.max(0, raw)) / 100;
+          } else {
+            previewVal = Math.max(0, raw);
+          }
         }
-        const net = itemAdjustmentMode === 'desconto'
+        const net = isPriceMode
+          ? Math.max(0, Math.round(target.quantity * (raw > 0 ? raw : target.unitPrice) * 100) / 100)
+          : itemAdjustmentMode === 'desconto'
           ? Math.max(0, gross - previewVal)
           : gross + previewVal;
 
@@ -2335,7 +2720,9 @@ export const ExternalSalesView: React.FC<ExternalSalesViewProps> = ({
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-xs p-4">
             <div className="bg-white rounded-2xl max-w-sm w-full border border-slate-200 shadow-2xl p-4 space-y-3.5">
               <div className="flex items-center justify-between pb-2 border-b border-slate-100">
-                <h4 className="text-base font-bold text-slate-900">Ajustar Preço do Item</h4>
+                <h4 className="text-base font-bold text-slate-900">
+                  {isPriceMode ? 'Alterar Preço Unitário' : 'Ajustar Preço do Item'}
+                </h4>
                 <button
                   type="button"
                   onClick={() => setShowItemAdjustmentModal(false)}
@@ -2348,16 +2735,24 @@ export const ExternalSalesView: React.FC<ExternalSalesViewProps> = ({
               <div>
                 <p className="text-sm font-bold text-slate-800 leading-snug">{target.description}</p>
                 <p className="text-xs text-slate-500 mt-0.5">
-                  Valor Bruto: {formatCurrency(gross)} ({target.quantity} un x {formatCurrency(target.unitPrice)})
+                  {isPriceMode
+                    ? `Preço Original Cadastrado: ${formatCurrency(originalCatalogPrice)} • Qtd: ${formatQuantity(target.quantity)} ${target.unit}`
+                    : `Valor Bruto: ${formatCurrency(gross)} (${formatQuantity(target.quantity)} ${target.unit} x ${formatCurrency(target.unitPrice)})`}
                 </p>
               </div>
 
-              {/* Modo: Desconto vs Acréscimo */}
-              <div className="flex bg-slate-100 p-1 rounded-xl">
+              {/* Modo: Desconto vs Acréscimo vs Alterar Preço (RBAC) */}
+              <div className={`grid gap-1 bg-slate-100 p-1 rounded-xl ${canAlterUnitPrice ? 'grid-cols-3' : 'grid-cols-2'}`}>
                 <button
                   type="button"
-                  onClick={() => setItemAdjustmentMode('desconto')}
-                  className={`flex-1 py-1.5 text-xs font-bold rounded-lg cursor-pointer transition-colors ${
+                  onClick={() => {
+                    setItemAdjustmentMode('desconto');
+                    setItemAdjustmentType('percent');
+                    setItemAdjustmentInput(
+                      target.discountPercent > 0 ? target.discountPercent.toString().replace('.', ',') : ''
+                    );
+                  }}
+                  className={`py-1.5 px-1 text-xs font-bold rounded-lg cursor-pointer transition-colors ${
                     itemAdjustmentMode === 'desconto' ? 'bg-amber-600 text-white shadow-2xs' : 'text-slate-600'
                   }`}
                 >
@@ -2365,48 +2760,111 @@ export const ExternalSalesView: React.FC<ExternalSalesViewProps> = ({
                 </button>
                 <button
                   type="button"
-                  onClick={() => setItemAdjustmentMode('acrescimo')}
-                  className={`flex-1 py-1.5 text-xs font-bold rounded-lg cursor-pointer transition-colors ${
+                  onClick={() => {
+                    setItemAdjustmentMode('acrescimo');
+                    setItemAdjustmentType('percent');
+                    setItemAdjustmentInput(
+                      (target.additionPercent || 0) > 0
+                        ? (target.additionPercent || 0).toString().replace('.', ',')
+                        : ''
+                    );
+                  }}
+                  className={`py-1.5 px-1 text-xs font-bold rounded-lg cursor-pointer transition-colors ${
                     itemAdjustmentMode === 'acrescimo' ? 'bg-blue-600 text-white shadow-2xs' : 'text-slate-600'
                   }`}
                 >
                   Acréscimo (+)
                 </button>
+                {canAlterUnitPrice && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setItemAdjustmentMode('alterar_preco');
+                      setItemAdjustmentType('value');
+                      setItemAdjustmentInput(target.unitPrice.toFixed(2).replace('.', ','));
+                    }}
+                    className={`py-1.5 px-1 text-xs font-bold rounded-lg cursor-pointer transition-colors ${
+                      itemAdjustmentMode === 'alterar_preco' ? 'bg-indigo-600 text-white shadow-2xs' : 'text-slate-600'
+                    }`}
+                  >
+                    Alterar Preço
+                  </button>
+                )}
               </div>
 
               {/* Input e % / R$ */}
-              <div className="flex gap-2">
-                <input
-                  type="text"
-                  inputMode="decimal"
-                  value={itemAdjustmentInput}
-                  onChange={(e) => setItemAdjustmentInput(e.target.value.replace(/[^0-9.,]/g, ''))}
-                  placeholder={itemAdjustmentType === 'percent' ? '0' : '0,00'}
-                  className="flex-1 bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-base font-bold text-right"
-                />
-                <div className="flex bg-slate-100 rounded-xl p-0.5 border border-slate-200">
-                  <button
-                    type="button"
-                    onClick={() => setItemAdjustmentType('percent')}
-                    className={`px-3 py-1 text-xs font-bold rounded-lg cursor-pointer ${
-                      itemAdjustmentType === 'percent' ? 'bg-white text-slate-900 shadow-2xs' : 'text-slate-500'
-                    }`}
-                  >
-                    %
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setItemAdjustmentType('value')}
-                    className={`px-3 py-1 text-xs font-bold rounded-lg cursor-pointer ${
-                      itemAdjustmentType === 'value' ? 'bg-white text-slate-900 shadow-2xs' : 'text-slate-500'
-                    }`}
-                  >
-                    R$
-                  </button>
+              {isPriceMode ? (
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between">
+                    <label className="text-xs font-bold text-slate-700">Novo Preço Unitário (R$):</label>
+                    {Math.abs(target.unitPrice - originalCatalogPrice) > 0.004 && (
+                      <button
+                        type="button"
+                        onClick={() => setItemAdjustmentInput(originalCatalogPrice.toFixed(2).replace('.', ','))}
+                        className="inline-flex items-center gap-1 text-[11px] font-bold text-indigo-600 hover:text-indigo-800 cursor-pointer"
+                      >
+                        <RotateCcw size={11} />
+                        Restaurar Original
+                      </button>
+                    )}
+                  </div>
+                  <div className="relative">
+                    <span className="absolute left-3 top-1/2 -translate-y-1/2 text-sm font-black text-slate-400">
+                      R$
+                    </span>
+                    <input
+                      type="text"
+                      inputMode="decimal"
+                      value={itemAdjustmentInput}
+                      onChange={(e) => setItemAdjustmentInput(e.target.value.replace(/[^0-9.,]/g, ''))}
+                      placeholder={originalCatalogPrice.toFixed(2).replace('.', ',')}
+                      className="w-full bg-slate-50 border-2 border-indigo-200 focus:border-indigo-500 rounded-xl pl-10 pr-3 py-2 text-lg font-black text-right font-mono focus:outline-hidden focus:bg-white"
+                    />
+                  </div>
+                  <p className="text-[11px] text-slate-500">
+                    Substitui o valor unitário apenas nesta venda, sem alterar o cadastro do produto.
+                  </p>
                 </div>
-              </div>
+              ) : (
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    inputMode="decimal"
+                    value={itemAdjustmentInput}
+                    onChange={(e) => setItemAdjustmentInput(e.target.value.replace(/[^0-9.,]/g, ''))}
+                    placeholder={itemAdjustmentType === 'percent' ? '0' : '0,00'}
+                    className="flex-1 bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-base font-bold text-right"
+                  />
+                  <div className="flex bg-slate-100 rounded-xl p-0.5 border border-slate-200">
+                    <button
+                      type="button"
+                      onClick={() => setItemAdjustmentType('percent')}
+                      className={`px-3 py-1 text-xs font-bold rounded-lg cursor-pointer ${
+                        itemAdjustmentType === 'percent' ? 'bg-white text-slate-900 shadow-2xs' : 'text-slate-500'
+                      }`}
+                    >
+                      %
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setItemAdjustmentType('value')}
+                      className={`px-3 py-1 text-xs font-bold rounded-lg cursor-pointer ${
+                        itemAdjustmentType === 'value' ? 'bg-white text-slate-900 shadow-2xs' : 'text-slate-500'
+                      }`}
+                    >
+                      R$
+                    </button>
+                  </div>
+                </div>
+              )}
 
               <div className="bg-slate-50 p-2.5 rounded-xl text-xs space-y-1">
+                {isPriceMode && (
+                  <div className="flex justify-between text-slate-500">
+                    <span>Preço Original Cadastrado:</span>
+                    <span className="font-mono font-semibold">{formatCurrency(originalCatalogPrice)}</span>
+                  </div>
+                )}
                 <div className="flex justify-between text-slate-600">
                   <span>Novo Total do Item:</span>
                   <span className="font-bold text-slate-900 font-mono">{formatCurrency(net)}</span>
@@ -2424,9 +2882,13 @@ export const ExternalSalesView: React.FC<ExternalSalesViewProps> = ({
                 <button
                   type="button"
                   onClick={handleApplyItemAdjustment}
-                  className="px-4 py-2 text-xs font-bold text-white bg-emerald-600 hover:bg-emerald-700 rounded-lg cursor-pointer"
+                  className={`px-4 py-2 text-xs font-bold text-white rounded-lg cursor-pointer ${
+                    isPriceMode
+                      ? 'bg-indigo-600 hover:bg-indigo-700'
+                      : 'bg-emerald-600 hover:bg-emerald-700'
+                  }`}
                 >
-                  Confirmar
+                  {isPriceMode ? 'Confirmar Preço' : 'Confirmar'}
                 </button>
               </div>
             </div>

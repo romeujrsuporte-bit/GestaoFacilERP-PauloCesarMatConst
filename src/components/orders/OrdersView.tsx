@@ -202,10 +202,14 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
   const [quickCustCpfCnpj, setQuickCustCpfCnpj] = useState('');
   const [quickCustCreditLimit, setQuickCustCreditLimit] = useState('');
 
-  // Modal de Ajuste (Desconto ou Acréscimo) por Item
+  // Permissão estrita para alteração direta de preço unitário: apenas Administrador Geral ou Gerente Geral
+  const canAlterUnitPrice = Database.canCurrentUserAlterUnitPrice(currentUser);
+  const unitPriceOverrideRole: 'admin' | 'gerente' = Database.isAdmin(currentUser) ? 'admin' : 'gerente';
+
+  // Modal de Ajuste (Desconto, Acréscimo ou Alterar Preço) por Item
   const [showItemDiscountModal, setShowItemDiscountModal] = useState<boolean>(false);
   const [discountingItemId, setDiscountingItemId] = useState<string | null>(null);
-  const [itemAdjustmentMode, setItemAdjustmentMode] = useState<'desconto' | 'acrescimo'>('desconto');
+  const [itemAdjustmentMode, setItemAdjustmentMode] = useState<'desconto' | 'acrescimo' | 'alterar_preco'>('desconto');
   const [itemDiscountType, setItemDiscountType] = useState<'percent' | 'value'>('percent');
   const [itemDiscountInput, setItemDiscountInput] = useState<string>('');
 
@@ -220,9 +224,14 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
   const [fastProductSearchTerm, setFastProductSearchTerm] = useState<string>('');
   const [fastItemQtyInput, setFastItemQtyInput] = useState<string>('1');
   const fastItemQty = Math.max(0, parseFloat(fastItemQtyInput.replace(',', '.')) || 0);
-  const [fastItemAdjustmentMode, setFastItemAdjustmentMode] = useState<'desconto' | 'acrescimo'>('desconto');
+  const [fastItemAdjustmentMode, setFastItemAdjustmentMode] = useState<'desconto' | 'acrescimo' | 'alterar_preco'>('desconto');
   const [fastItemAdjustmentInput, setFastItemAdjustmentInput] = useState<string>('');
   const [fastItemAdjustmentType, setFastItemAdjustmentType] = useState<'percent' | 'value'>('percent');
+  // Edição rápida inline de preço unitário antes da quantidade (Admin/Gerente Geral)
+  const [isEditingFastUnitPrice, setIsEditingFastUnitPrice] = useState<boolean>(false);
+  const [fastCustomUnitPriceInput, setFastCustomUnitPriceInput] = useState<string>('');
+  const [editingCatalogPriceId, setEditingCatalogPriceId] = useState<string | null>(null);
+  const [catalogPriceDrafts, setCatalogPriceDrafts] = useState<Record<string, string>>({});
   const [showProductLookupModal, setShowProductLookupModal] = useState<boolean>(false);
   const [showPriceLookupModal, setShowPriceLookupModal] = useState<boolean>(false);
   const [productLookupSearch, setProductLookupSearch] = useState<string>('');
@@ -230,6 +239,7 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
   const [productFeedback, setProductFeedback] = useState<{ type: 'success' | 'error' | 'warning'; text: string } | null>(null);
   const fastProductInputRef = useRef<HTMLInputElement>(null);
   const fastQtyInputRef = useRef<HTMLInputElement>(null);
+  const fastUnitPriceInputRef = useRef<HTMLInputElement>(null);
   const priceLookupBtnRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
@@ -547,8 +557,8 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
   const orderTotal = Math.max(0, subtotalAfterItemDiscounts - orderDiscountVal);
   const combinedDiscounts = totalItemDiscounts + orderDiscountVal;
 
-  // Adicionar produto ao carrinho
-  const handleAddToCart = (product: Product, forcedQty?: number) => {
+  // Adicionar produto ao carrinho (Catálogo Visual)
+  const handleAddToCart = (product: Product, forcedQty?: number, customUnitPriceOverride?: number) => {
     const qty = forcedQty || qtyToAddMap[product.id] || 1;
     if (qty <= 0) return;
 
@@ -564,30 +574,49 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
       if (!proceed) return;
     }
 
+    const catalogPrice = StockEngine.getProductPriceForCompany(product, currentCompany.id);
+    const effectiveCost = StockEngine.getProductCostForCompany(product, currentCompany.id);
+    const hasAuthorizedOverride =
+      canAlterUnitPrice &&
+      customUnitPriceOverride !== undefined &&
+      Number.isFinite(customUnitPriceOverride) &&
+      customUnitPriceOverride >= 0 &&
+      Math.abs(customUnitPriceOverride - catalogPrice) > 0.005;
+    const appliedPrice = hasAuthorizedOverride
+      ? Math.round(customUnitPriceOverride! * 100) / 100
+      : catalogPrice;
+
     if (existing) {
       if (existing.discountAuthorization?.operationId) {
         revokeDiscountAuthorization(existing.discountAuthorization.operationId);
       }
       const newQty = existing.quantity + qty;
-      const newGross = newQty * existing.unitPrice;
-      const newDiscVal = (newGross * (existing.discountPercent || 0)) / 100;
+      const nextUnitPrice = hasAuthorizedOverride ? appliedPrice : existing.unitPrice;
+      const newGross = newQty * nextUnitPrice;
+      const newDiscVal = hasAuthorizedOverride ? 0 : (newGross * (existing.discountPercent || 0)) / 100;
+      const newAddVal = hasAuthorizedOverride ? 0 : (newGross * (existing.additionPercent || 0)) / 100;
       setCart((prev) =>
         prev.map((i) =>
           i.productId === product.id
             ? {
                 ...i,
                 quantity: newQty,
+                unitPrice: nextUnitPrice,
+                referenceUnitPrice: hasAuthorizedOverride ? nextUnitPrice : i.referenceUnitPrice,
+                originalUnitPrice: hasAuthorizedOverride ? (i.originalUnitPrice ?? catalogPrice) : i.originalUnitPrice,
+                priceOverridden: hasAuthorizedOverride ? true : i.priceOverridden,
+                priceOverriddenByRole: hasAuthorizedOverride ? unitPriceOverrideRole : i.priceOverriddenByRole,
+                discountPercent: hasAuthorizedOverride ? 0 : i.discountPercent,
                 discountValue: Math.round(newDiscVal * 100) / 100,
-                totalPrice: Math.round((newGross - newDiscVal) * 100) / 100,
+                additionPercent: hasAuthorizedOverride ? 0 : i.additionPercent,
+                additionValue: Math.round(newAddVal * 100) / 100,
+                totalPrice: Math.round((newGross + newAddVal - newDiscVal) * 100) / 100,
                 discountAuthorization: undefined,
               }
             : i
         )
       );
     } else {
-      const effectivePrice = StockEngine.getProductPriceForCompany(product, currentCompany.id);
-      const effectiveCost = StockEngine.getProductCostForCompany(product, currentCompany.id);
-
       const newItem: OrderItem = {
         id: 'ITEM-' + Date.now() + '-' + Math.random().toString(36).substring(2, 5),
         productId: product.id,
@@ -595,11 +624,16 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
         description: product.description,
         unit: product.unit,
         quantity: qty,
-        unitPrice: effectivePrice,
-        referenceUnitPrice: effectivePrice,
+        unitPrice: appliedPrice,
+        referenceUnitPrice: appliedPrice,
+        originalUnitPrice: hasAuthorizedOverride ? catalogPrice : undefined,
+        priceOverridden: hasAuthorizedOverride || undefined,
+        priceOverriddenByRole: hasAuthorizedOverride ? unitPriceOverrideRole : undefined,
         discountPercent: 0,
         discountValue: 0,
-        totalPrice: qty * effectivePrice,
+        additionPercent: 0,
+        additionValue: 0,
+        totalPrice: Math.round(qty * appliedPrice * 100) / 100,
         unitCost: effectiveCost,
         locationId: selectedLocationId,
         isMasterPack: product.isMasterPack,
@@ -610,8 +644,17 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
       setCart((prev) => [...prev, newItem]);
     }
 
-    // Reset qty selector map for this product
+    // Reset qty selector & draft custom price for this product
     setQtyToAddMap((prev) => ({ ...prev, [product.id]: 1 }));
+    setCatalogPriceDrafts((prev) => {
+      if (!(product.id in prev)) return prev;
+      const next = { ...prev };
+      delete next[product.id];
+      return next;
+    });
+    if (editingCatalogPriceId === product.id) {
+      setEditingCatalogPriceId(null);
+    }
 
     const prodObsAlert = getProductSaleAlert(product);
     if (prodObsAlert) {
@@ -623,6 +666,12 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
   const handleSelectFastProduct = (product: Product) => {
     setFastSelectedProductId(product.id);
     setFastProductSearchTerm('');
+    setIsEditingFastUnitPrice(false);
+    setFastCustomUnitPriceInput('');
+    if (fastItemAdjustmentMode === 'alterar_preco') {
+      const catalogPrice = StockEngine.getProductPriceForCompany(product, currentCompany.id);
+      setFastItemAdjustmentInput(catalogPrice.toFixed(2).replace('.', ','));
+    }
     setProductFeedback(null);
     const prodObsAlert = getProductSaleAlert(product);
     if (prodObsAlert) {
@@ -679,8 +728,30 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
       if (!proceed) return;
     }
 
-    const effectivePrice = StockEngine.getProductPriceForCompany(product, currentCompany.id);
+    const catalogPrice = StockEngine.getProductPriceForCompany(product, currentCompany.id);
     const effectiveCost = StockEngine.getProductCostForCompany(product, currentCompany.id);
+
+    // Determina se houve alteração direta de preço unitário (exclusivo Admin / Gerente Geral)
+    let directOverridePrice: number | null = null;
+    if (canAlterUnitPrice && !forcedProduct) {
+      if (fastItemAdjustmentMode === 'alterar_preco' && fastItemAdjustmentInput.trim() !== '') {
+        const parsed = parseFloat(fastItemAdjustmentInput.replace(',', '.'));
+        if (!Number.isFinite(parsed) || parsed < 0) {
+          toast.warning('Informe um preço unitário válido.', 'Preço Inválido');
+          return;
+        }
+        directOverridePrice = Math.round(parsed * 100) / 100;
+      } else if (fastCustomUnitPriceInput.trim() !== '') {
+        const parsed = parseFloat(fastCustomUnitPriceInput.replace(',', '.'));
+        if (Number.isFinite(parsed) && parsed >= 0) {
+          directOverridePrice = Math.round(parsed * 100) / 100;
+        }
+      }
+    }
+
+    const isDirectPriceOverride =
+      directOverridePrice !== null && Math.abs(directOverridePrice - catalogPrice) > 0.005;
+    const effectivePrice = directOverridePrice !== null ? directOverridePrice : catalogPrice;
     const rawVal = Math.max(0, parseFloat(fastItemAdjustmentInput.replace(',', '.')) || 0);
     const grossItem = qty * effectivePrice;
     let itemDiscVal = 0;
@@ -689,7 +760,7 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
     let itemAddPercent = 0;
     let explicitPercentRequested: number | undefined;
 
-    if (rawVal > 0) {
+    if (rawVal > 0 && fastItemAdjustmentMode !== 'alterar_preco' && !isDirectPriceOverride) {
       if (fastItemAdjustmentMode === 'desconto') {
         const maxPercent = currentUser.permissions.maxDiscountPercent;
         if (fastItemAdjustmentType === 'percent') {
@@ -726,11 +797,12 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
           revokeDiscountAuthorization(existing.discountAuthorization.operationId);
         }
         const newQty = existing.quantity + qty;
-        const newGross = newQty * existing.unitPrice;
-        const combinedAddVal = (existing.additionValue || 0) + itemAddVal;
+        const nextUnitPrice = isDirectPriceOverride ? effectivePrice : existing.unitPrice;
+        const newGross = newQty * nextUnitPrice;
+        const combinedAddVal = isDirectPriceOverride ? 0 : (existing.additionValue || 0) + itemAddVal;
         const combinedAddPercent = newGross > 0 ? (combinedAddVal / newGross) * 100 : 0;
-        const roundedDiscVal = Math.round(finalTotalDiscVal * 100) / 100;
-        const roundedDiscPct = Math.round(finalTotalDiscPct * 100) / 100;
+        const roundedDiscVal = isDirectPriceOverride ? 0 : Math.round(finalTotalDiscVal * 100) / 100;
+        const roundedDiscPct = isDirectPriceOverride ? 0 : Math.round(finalTotalDiscPct * 100) / 100;
 
         setCart((prev) =>
           prev.map((i) =>
@@ -738,6 +810,11 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
               ? {
                   ...i,
                   quantity: newQty,
+                  unitPrice: nextUnitPrice,
+                  referenceUnitPrice: isDirectPriceOverride ? nextUnitPrice : i.referenceUnitPrice,
+                  originalUnitPrice: isDirectPriceOverride ? (i.originalUnitPrice ?? catalogPrice) : i.originalUnitPrice,
+                  priceOverridden: isDirectPriceOverride ? true : i.priceOverridden,
+                  priceOverriddenByRole: isDirectPriceOverride ? unitPriceOverrideRole : i.priceOverriddenByRole,
                   discountValue: roundedDiscVal,
                   discountPercent: roundedDiscPct,
                   additionValue: Math.round(combinedAddVal * 100) / 100,
@@ -749,8 +826,8 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
           )
         );
       } else {
-        const roundedDiscVal = Math.round(finalTotalDiscVal * 100) / 100;
-        const roundedDiscPct = Math.round(finalTotalDiscPct * 100) / 100;
+        const roundedDiscVal = isDirectPriceOverride ? 0 : Math.round(finalTotalDiscVal * 100) / 100;
+        const roundedDiscPct = isDirectPriceOverride ? 0 : Math.round(finalTotalDiscPct * 100) / 100;
         const netTotal = Math.max(0, grossItem + itemAddVal - roundedDiscVal);
         const newItem: OrderItem = {
           id: 'ITEM-' + Date.now() + '-' + Math.random().toString(36).substring(2, 5),
@@ -761,6 +838,9 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
           quantity: qty,
           unitPrice: effectivePrice,
           referenceUnitPrice: effectivePrice,
+          originalUnitPrice: isDirectPriceOverride ? catalogPrice : undefined,
+          priceOverridden: isDirectPriceOverride || undefined,
+          priceOverriddenByRole: isDirectPriceOverride ? unitPriceOverrideRole : undefined,
           discountPercent: roundedDiscPct,
           discountValue: roundedDiscVal,
           additionPercent: Math.round(itemAddPercent * 100) / 100,
@@ -779,7 +859,7 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
 
       setProductFeedback({
         type: stock.quantity < requestedTotal ? 'warning' : 'success',
-        text: `✓ +${formatQuantity(qty)} ${product.unit}: "${product.description}" incluído no pedido!`,
+        text: `✓ +${formatQuantity(qty)} ${product.unit}: "${product.description}" incluído${isDirectPriceOverride ? ` a ${formatCurrency(effectivePrice)}` : ''} no pedido!`,
       });
 
       const alreadyAlertedOnSelect = !forcedProduct && lastAlertedFastProductIdRef.current === product.id;
@@ -794,6 +874,11 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
       setFastProductSearchTerm('');
       setFastItemQtyInput('1');
       setFastItemAdjustmentInput('');
+      setIsEditingFastUnitPrice(false);
+      setFastCustomUnitPriceInput('');
+      if (fastItemAdjustmentMode === 'alterar_preco') {
+        setFastItemAdjustmentMode('desconto');
+      }
 
       if (!prodObsAlert) {
         setTimeout(() => {
@@ -803,12 +888,12 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
     };
 
     const resultQty = existing ? existing.quantity + qty : qty;
-    const resultUnitPrice = existing ? existing.unitPrice : effectivePrice;
+    const resultUnitPrice = isDirectPriceOverride ? effectivePrice : existing ? existing.unitPrice : effectivePrice;
     const resultGross = resultQty * resultUnitPrice;
-    const resultDiscVal = existing ? (existing.discountValue || 0) + itemDiscVal : itemDiscVal;
+    const resultDiscVal = isDirectPriceOverride ? 0 : existing ? (existing.discountValue || 0) + itemDiscVal : itemDiscVal;
     const resultDiscPct = resultGross > 0 ? (resultDiscVal / resultGross) * 100 : 0;
 
-    if (product.maxDiscountEnabled && (resultDiscVal > 0 || (explicitPercentRequested && explicitPercentRequested > 0))) {
+    if (!isDirectPriceOverride && product.maxDiscountEnabled && (resultDiscVal > 0 || (explicitPercentRequested && explicitPercentRequested > 0))) {
       const evaluation = evaluateItemMaxDiscount({
         product,
         companyId: currentCompany.id,
@@ -816,6 +901,8 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
         quantity: resultQty,
         unitPrice: resultUnitPrice,
         referenceUnitPrice: existing?.referenceUnitPrice ?? effectivePrice,
+        priceOverridden: existing?.priceOverridden,
+        priceOverriddenByRole: existing?.priceOverriddenByRole,
         itemDiscountValue: resultDiscVal,
         itemDiscountPercent: resultDiscPct,
         explicitPercentRequested: existing ? undefined : explicitPercentRequested,
@@ -963,10 +1050,14 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
     setCart((prev) => prev.filter((i) => i.productId !== productId));
   };
 
-  // Modal de Ajuste (Desconto ou Acréscimo) no Item
-  const handleOpenItemDiscount = (item: OrderItem) => {
+  // Modal de Ajuste (Desconto, Acréscimo ou Alterar Preço) no Item
+  const handleOpenItemDiscount = (item: OrderItem, initialMode?: 'desconto' | 'acrescimo' | 'alterar_preco') => {
     setDiscountingItemId(item.productId);
-    if (item.additionValue && item.additionValue > 0) {
+    if (initialMode === 'alterar_preco' && canAlterUnitPrice) {
+      setItemAdjustmentMode('alterar_preco');
+      setItemDiscountType('value');
+      setItemDiscountInput(item.unitPrice.toFixed(2).replace('.', ','));
+    } else if (item.additionValue && item.additionValue > 0) {
       setItemAdjustmentMode('acrescimo');
       if (item.additionPercent && item.additionPercent > 0) {
         setItemDiscountType('percent');
@@ -984,8 +1075,12 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
         setItemDiscountType('value');
         setItemDiscountInput(item.discountValue.toFixed(2).replace('.', ','));
       }
+    } else if (item.priceOverridden && canAlterUnitPrice && !initialMode) {
+      setItemAdjustmentMode('alterar_preco');
+      setItemDiscountType('value');
+      setItemDiscountInput(item.unitPrice.toFixed(2).replace('.', ','));
     } else {
-      setItemAdjustmentMode('desconto');
+      setItemAdjustmentMode(initialMode && initialMode !== 'alterar_preco' ? initialMode : 'desconto');
       setItemDiscountType('percent');
       setItemDiscountInput('');
     }
@@ -998,6 +1093,53 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
     if (!target) return;
 
     const product = dbState.products.find((p) => p.id === target.productId);
+
+    // Modo independente: Alterar Preço Unitário (exclusivo Administrador Geral ou Gerente Geral)
+    if (itemAdjustmentMode === 'alterar_preco') {
+      if (!canAlterUnitPrice) {
+        toast.error(
+          'Somente usuários com perfil Administrador Geral ou Gerente Geral podem alterar o preço unitário.',
+          'Permissão Negada'
+        );
+        return;
+      }
+      const parsedNewPrice = parseFloat(itemDiscountInput.replace(',', '.'));
+      if (!Number.isFinite(parsedNewPrice) || parsedNewPrice < 0) {
+        toast.warning('Informe um preço unitário válido.', 'Preço Inválido');
+        return;
+      }
+      const cleanNewPrice = Math.round(parsedNewPrice * 100) / 100;
+      const catalogPrice = product
+        ? StockEngine.getProductPriceForCompany(product, currentCompany.id)
+        : target.originalUnitPrice ?? target.referenceUnitPrice ?? target.unitPrice;
+      const isDifferentFromCatalog = Math.abs(cleanNewPrice - catalogPrice) > 0.005;
+
+      setCart((prev) =>
+        prev.map((i) => {
+          if (i.productId !== discountingItemId) return i;
+          if (i.discountAuthorization?.operationId) {
+            revokeDiscountAuthorization(i.discountAuthorization.operationId);
+          }
+          return {
+            ...i,
+            unitPrice: cleanNewPrice,
+            referenceUnitPrice: cleanNewPrice,
+            originalUnitPrice: isDifferentFromCatalog ? (i.originalUnitPrice ?? catalogPrice) : undefined,
+            priceOverridden: isDifferentFromCatalog || undefined,
+            priceOverriddenByRole: isDifferentFromCatalog ? unitPriceOverrideRole : undefined,
+            discountPercent: 0,
+            discountValue: 0,
+            additionPercent: 0,
+            additionValue: 0,
+            totalPrice: Math.round(i.quantity * cleanNewPrice * 100) / 100,
+            discountAuthorization: undefined,
+          };
+        })
+      );
+      setShowItemDiscountModal(false);
+      return;
+    }
+
     const gross = target.quantity * target.unitPrice;
     const rawVal = Math.max(0, parseFloat(itemDiscountInput.replace(',', '.')) || 0);
     const maxPercent = currentUser.permissions.maxDiscountPercent;
@@ -1083,6 +1225,8 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
         quantity: target.quantity,
         unitPrice: target.unitPrice,
         referenceUnitPrice: target.referenceUnitPrice,
+        priceOverridden: target.priceOverridden,
+        priceOverriddenByRole: target.priceOverriddenByRole,
         itemDiscountValue: appliedDiscountValue,
         itemDiscountPercent: appliedDiscountPercent,
         explicitPercentRequested,
@@ -2354,13 +2498,13 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
             {itemsEntryMode === 'insercao_rapida' ? (
               <div className="bg-slate-50/80 p-3.5 sm:p-4 rounded-xl border border-slate-200 space-y-3 relative">
                 <div className="grid grid-cols-1 md:grid-cols-12 gap-3 items-end">
-                  {/* Busca e Seleção do Produto (6 Colunas) */}
-                  <div className="md:col-span-6 space-y-1 relative">
-                    <div className="flex items-center justify-between">
-                      <label className="text-[11px] font-bold text-slate-700 block">
+                  {/* Busca e Seleção do Produto (4 Colunas) */}
+                  <div className="md:col-span-4 space-y-1 relative">
+                    <div className="flex items-center justify-between gap-1">
+                      <label className="text-[11px] font-bold text-slate-700 block truncate">
                         Produto (Código, Barras ou Nome) *:
                       </label>
-                      <span className="text-[10px] font-bold text-emerald-800 bg-emerald-100/90 px-1.5 py-0.2 rounded border border-emerald-300">
+                      <span className="text-[10px] font-bold text-emerald-800 bg-emerald-100/90 px-1.5 py-0.2 rounded border border-emerald-300 shrink-0">
                         Depósito: <strong>{selectedLocationName}</strong>
                       </span>
                     </div>
@@ -2371,18 +2515,14 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
                         : null;
 
                       if (selectedFastProd) {
-                        const selectedPrice = StockEngine.getProductPriceForCompany(selectedFastProd, currentCompany.id);
                         return (
-                          <div className="flex items-center justify-between gap-2 w-full bg-blue-50/80 border-2 border-blue-400 rounded-xl py-1.5 px-2.5">
-                            <div className="flex items-center gap-2 min-w-0 flex-1">
+                          <div className="flex items-center justify-between gap-1.5 w-full bg-blue-50/80 border-2 border-blue-400 rounded-xl py-1.5 px-2.5 h-[40px]">
+                            <div className="flex items-center gap-1.5 min-w-0 flex-1">
                               <span className="font-mono text-[11px] font-extrabold text-blue-700 bg-white px-1.5 py-0.5 rounded border border-blue-200 shrink-0">
                                 {selectedFastProd.code}
                               </span>
                               <span className="text-xs font-extrabold text-slate-900 truncate" title={selectedFastProd.description}>
                                 {selectedFastProd.description}
-                              </span>
-                              <span className="text-[11px] font-mono font-bold text-emerald-700 shrink-0 hidden sm:inline">
-                                ({formatCurrency(selectedPrice)}/{selectedFastProd.unit})
                               </span>
                             </div>
 
@@ -2392,10 +2532,12 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
                                 onClick={() => {
                                   setFastSelectedProductId('');
                                   setFastProductSearchTerm('');
+                                  setIsEditingFastUnitPrice(false);
+                                  setFastCustomUnitPriceInput('');
                                   setTimeout(() => fastProductInputRef.current?.focus(), 20);
                                 }}
                                 className="p-1 text-slate-500 hover:text-rose-600 hover:bg-rose-50 rounded-md cursor-pointer"
-                                title="Trocar produto selecionado"
+                                title="Limpar produto selecionado"
                               >
                                 <X size={14} />
                               </button>
@@ -2414,7 +2556,7 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
 
                       return (
                         <div className="relative">
-                          <Barcode className="absolute left-2.5 top-2 text-slate-400 pointer-events-none" size={18} />
+                          <Barcode className="absolute left-2.5 top-2.5 text-slate-400 pointer-events-none" size={18} />
                           <input
                             ref={fastProductInputRef}
                             type="text"
@@ -2450,7 +2592,7 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
                                 setFastSelectedProductId('');
                               }
                             }}
-                            className="w-full pl-8 pr-28 py-2 bg-white border border-slate-300 rounded-xl text-xs font-semibold text-slate-900 placeholder-slate-400 focus:outline-hidden focus:ring-2 focus:ring-blue-500 transition-all"
+                            className="w-full h-[40px] pl-8 pr-28 bg-white border border-slate-300 rounded-xl text-xs font-semibold text-slate-900 placeholder-slate-400 focus:outline-hidden focus:ring-2 focus:ring-blue-500 transition-all"
                           />
 
                           <div className="absolute right-1 top-1 bottom-1 flex items-center gap-1">
@@ -2524,6 +2666,146 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
                     })()}
                   </div>
 
+                  {/* Preço Unitário — Campo Dedicado Antes da Quantidade (2 Colunas) */}
+                  <div className="md:col-span-2 space-y-1">
+                    {(() => {
+                      const selectedFastProd = fastSelectedProductId
+                        ? dbState.products.find((p) => p.id === fastSelectedProductId)
+                        : null;
+                      const catalogPrice = selectedFastProd
+                        ? StockEngine.getProductPriceForCompany(selectedFastProd, currentCompany.id)
+                        : 0;
+                      const parsedInline = parseFloat(fastCustomUnitPriceInput.replace(',', '.'));
+                      const parsedModePrice =
+                        fastItemAdjustmentMode === 'alterar_preco' && fastItemAdjustmentInput.trim() !== ''
+                          ? parseFloat(fastItemAdjustmentInput.replace(',', '.'))
+                          : NaN;
+                      const displayedPrice = !selectedFastProd
+                        ? 0
+                        : canAlterUnitPrice && Number.isFinite(parsedModePrice) && parsedModePrice >= 0
+                        ? parsedModePrice
+                        : canAlterUnitPrice &&
+                          fastCustomUnitPriceInput.trim() !== '' &&
+                          Number.isFinite(parsedInline) &&
+                          parsedInline >= 0
+                        ? parsedInline
+                        : catalogPrice;
+                      const isOverriddenNow =
+                        Boolean(selectedFastProd) && Math.abs(displayedPrice - catalogPrice) > 0.005;
+
+                      return (
+                        <>
+                          <div className="flex items-center justify-between gap-1">
+                            <label className="text-[11px] font-bold text-slate-700 block">
+                              Preço Unit.:
+                            </label>
+                            {canAlterUnitPrice && selectedFastProd && (
+                              isOverriddenNow ? (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setFastCustomUnitPriceInput('');
+                                    if (fastItemAdjustmentMode === 'alterar_preco') {
+                                      setFastItemAdjustmentInput('');
+                                      setFastItemAdjustmentMode('desconto');
+                                    }
+                                    setIsEditingFastUnitPrice(false);
+                                  }}
+                                  className="text-[10px] font-bold text-indigo-600 hover:text-indigo-800 hover:underline cursor-pointer"
+                                  title={`Restaurar preço original (${formatCurrency(catalogPrice)})`}
+                                >
+                                  Restaurar
+                                </button>
+                              ) : (
+                                <span className="text-[10px] font-bold text-emerald-700">
+                                  Clique p/ editar
+                                </span>
+                              )
+                            )}
+                          </div>
+
+                          {canAlterUnitPrice && selectedFastProd ? (
+                            isEditingFastUnitPrice ? (
+                              <div className="flex items-center justify-between gap-1.5 w-full h-[40px] bg-white border-2 border-blue-500 ring-2 ring-blue-500/20 rounded-xl px-2.5 transition-all">
+                                <Pencil size={13} className="text-blue-600 shrink-0" />
+                                <div className="flex items-center justify-end gap-1 flex-1 min-w-0">
+                                  <span className="text-xs font-extrabold text-slate-500 font-mono">R$</span>
+                                  <input
+                                    ref={fastUnitPriceInputRef}
+                                    type="text"
+                                    inputMode="decimal"
+                                    value={fastCustomUnitPriceInput}
+                                    onChange={(e) =>
+                                      setFastCustomUnitPriceInput(e.target.value.replace(/[^0-9.,]/g, ''))
+                                    }
+                                    onBlur={() => setIsEditingFastUnitPrice(false)}
+                                    onKeyDown={(e) => {
+                                      if (e.key === 'Enter') {
+                                        e.preventDefault();
+                                        setIsEditingFastUnitPrice(false);
+                                        setTimeout(() => {
+                                          fastQtyInputRef.current?.focus();
+                                          fastQtyInputRef.current?.select();
+                                        }, 15);
+                                      } else if (e.key === 'Escape') {
+                                        e.preventDefault();
+                                        setFastCustomUnitPriceInput('');
+                                        setIsEditingFastUnitPrice(false);
+                                      }
+                                    }}
+                                    className="w-full text-right font-mono text-xs font-black text-slate-900 bg-transparent focus:outline-hidden"
+                                    aria-label="Novo preço unitário"
+                                  />
+                                </div>
+                              </div>
+                            ) : (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setFastCustomUnitPriceInput(displayedPrice.toFixed(2).replace('.', ','));
+                                  if (fastItemAdjustmentMode === 'alterar_preco') {
+                                    setFastItemAdjustmentMode('desconto');
+                                    setFastItemAdjustmentInput('');
+                                  }
+                                  setIsEditingFastUnitPrice(true);
+                                  setTimeout(() => {
+                                    fastUnitPriceInputRef.current?.focus();
+                                    fastUnitPriceInputRef.current?.select();
+                                  }, 20);
+                                }}
+                                className={`flex items-center justify-between gap-1.5 w-full h-[40px] rounded-xl px-3 border transition-all cursor-pointer ${
+                                  isOverriddenNow
+                                    ? 'bg-indigo-50/70 border-indigo-400 text-indigo-950 hover:border-indigo-500'
+                                    : 'bg-white border-slate-300 text-slate-900 hover:border-blue-400'
+                                }`}
+                                title={`Clique para alterar o preço unitário nesta venda (Original: ${formatCurrency(catalogPrice)})`}
+                              >
+                                <Pencil
+                                  size={13}
+                                  className={isOverriddenNow ? 'text-indigo-600 shrink-0' : 'text-slate-400 shrink-0'}
+                                />
+                                <span className="font-mono text-xs font-extrabold truncate">
+                                  {formatCurrency(displayedPrice)}
+                                </span>
+                              </button>
+                            )
+                          ) : (
+                            <div className="flex items-center justify-between gap-1.5 w-full h-[40px] bg-slate-50 border border-slate-200 rounded-xl px-3 text-slate-500 select-none">
+                              {canAlterUnitPrice ? (
+                                <Pencil size={13} className="text-slate-300 shrink-0" />
+                              ) : (
+                                <span />
+                              )}
+                              <span className="font-mono text-xs font-bold">
+                                {formatCurrency(selectedFastProd ? catalogPrice : 0)}
+                              </span>
+                            </div>
+                          )}
+                        </>
+                      );
+                    })()}
+                  </div>
+
                   {/* Quantidade (2 Colunas) */}
                   <div className="md:col-span-2 space-y-1">
                     <label className="text-[11px] font-bold text-slate-700 block">
@@ -2573,46 +2855,74 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
                     </div>
                   </div>
 
-                  {/* Desconto ou Acréscimo no Item (2 Colunas) */}
+                  {/* Desconto, Acréscimo ou Alterar Preço no Item (2 Colunas) */}
                   <div className="md:col-span-2 space-y-1">
-                    <div className="flex items-center justify-between">
+                    <div className="flex items-center justify-between gap-1">
                       <select
                         value={fastItemAdjustmentMode}
-                        onChange={(e) => setFastItemAdjustmentMode(e.target.value as any)}
+                        onChange={(e) => {
+                          const nextMode = e.target.value as 'desconto' | 'acrescimo' | 'alterar_preco';
+                          setFastItemAdjustmentMode(nextMode);
+                          if (nextMode === 'alterar_preco' && canAlterUnitPrice) {
+                            const sel = dbState.products.find((p) => p.id === fastSelectedProductId);
+                            const basePrice = sel ? StockEngine.getProductPriceForCompany(sel, currentCompany.id) : 0;
+                            setFastItemAdjustmentInput(basePrice > 0 ? basePrice.toFixed(2).replace('.', ',') : '');
+                            setFastCustomUnitPriceInput('');
+                            setIsEditingFastUnitPrice(false);
+                          } else {
+                            setFastItemAdjustmentInput('');
+                          }
+                        }}
                         className={`text-[11px] font-black rounded-lg px-1.5 py-0.5 border cursor-pointer focus:outline-hidden transition-colors ${
-                          fastItemAdjustmentMode === 'acrescimo'
+                          fastItemAdjustmentMode === 'alterar_preco'
+                            ? 'bg-indigo-50 text-indigo-800 border-indigo-300'
+                            : fastItemAdjustmentMode === 'acrescimo'
                             ? 'bg-blue-50 text-blue-800 border-blue-300'
                             : 'bg-amber-50 text-amber-800 border-amber-300'
                         }`}
-                        title="Selecione no mesmo campo se deseja aplicar Desconto ou Acréscimo"
+                        title="Selecione o tipo de ajuste do item"
                       >
                         <option value="desconto">Desconto (-)</option>
                         <option value="acrescimo">Acréscimo (+)</option>
+                        {canAlterUnitPrice && <option value="alterar_preco">Alterar Preço</option>}
                       </select>
-                      <div className="inline-flex rounded-md bg-slate-200 p-0.5 text-[9px] font-bold">
-                        <button
-                          type="button"
-                          onClick={() => setFastItemAdjustmentType('percent')}
-                          className={`px-1.5 py-0.2 rounded cursor-pointer ${
-                            fastItemAdjustmentType === 'percent' ? 'bg-blue-600 text-white' : 'text-slate-600'
-                          }`}
-                        >
-                          %
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => setFastItemAdjustmentType('value')}
-                          className={`px-1.5 py-0.2 rounded cursor-pointer ${
-                            fastItemAdjustmentType === 'value' ? 'bg-blue-600 text-white' : 'text-slate-600'
-                          }`}
-                        >
-                          R$
-                        </button>
-                      </div>
+                      {fastItemAdjustmentMode === 'alterar_preco' ? (
+                        <span className="text-[9px] font-black text-indigo-700 bg-indigo-50 border border-indigo-200 px-1.5 py-0.5 rounded-md">
+                          R$ Unit.
+                        </span>
+                      ) : (
+                        <div className="inline-flex rounded-md bg-slate-200 p-0.5 text-[9px] font-bold">
+                          <button
+                            type="button"
+                            onClick={() => setFastItemAdjustmentType('percent')}
+                            className={`px-1.5 py-0.2 rounded cursor-pointer ${
+                              fastItemAdjustmentType === 'percent' ? 'bg-blue-600 text-white' : 'text-slate-600'
+                            }`}
+                          >
+                            %
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setFastItemAdjustmentType('value')}
+                            className={`px-1.5 py-0.2 rounded cursor-pointer ${
+                              fastItemAdjustmentType === 'value' ? 'bg-blue-600 text-white' : 'text-slate-600'
+                            }`}
+                          >
+                            R$
+                          </button>
+                        </div>
+                      )}
                     </div>
                     <input
                       type="text"
-                      placeholder={fastItemAdjustmentType === 'percent' ? '0' : '0,00'}
+                      inputMode="decimal"
+                      placeholder={
+                        fastItemAdjustmentMode === 'alterar_preco'
+                          ? 'Novo R$'
+                          : fastItemAdjustmentType === 'percent'
+                          ? '0'
+                          : '0,00'
+                      }
                       value={fastItemAdjustmentInput}
                       onChange={(e) => setFastItemAdjustmentInput(e.target.value.replace(/[^0-9.,]/g, ''))}
                       onKeyDown={(e) => {
@@ -2622,7 +2932,9 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
                         }
                       }}
                       className={`w-full bg-white border rounded-xl py-2 px-2.5 text-right font-black text-xs text-slate-900 focus:outline-hidden focus:ring-2 ${
-                        fastItemAdjustmentMode === 'acrescimo'
+                        fastItemAdjustmentMode === 'alterar_preco'
+                          ? 'border-indigo-300 focus:ring-indigo-500'
+                          : fastItemAdjustmentMode === 'acrescimo'
                           ? 'border-blue-300 focus:ring-blue-500'
                           : 'border-slate-300 focus:ring-amber-500'
                       }`}
@@ -2679,10 +2991,28 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
                   const stock = StockEngine.getBalance(dbState.stockBalances, selProd.id, selectedLocationId);
                   const rawVal = parseFloat(fastItemAdjustmentInput.replace(',', '.')) || 0;
                   const companyPrice = StockEngine.getProductPriceForCompany(selProd, currentCompany.id);
-                  const grossItem = fastItemQty * companyPrice;
+                  const parsedInline = parseFloat(fastCustomUnitPriceInput.replace(',', '.'));
+                  const isModePriceOverride =
+                    canAlterUnitPrice &&
+                    fastItemAdjustmentMode === 'alterar_preco' &&
+                    fastItemAdjustmentInput.trim() !== '' &&
+                    Number.isFinite(parseFloat(fastItemAdjustmentInput.replace(',', '.')));
+                  const isInlinePriceOverride =
+                    canAlterUnitPrice &&
+                    !isModePriceOverride &&
+                    fastCustomUnitPriceInput.trim() !== '' &&
+                    Number.isFinite(parsedInline) &&
+                    parsedInline >= 0;
+                  const effectiveUnitPricePreview = isModePriceOverride
+                    ? Math.max(0, parseFloat(fastItemAdjustmentInput.replace(',', '.')) || 0)
+                    : isInlinePriceOverride
+                    ? parsedInline
+                    : companyPrice;
+                  const isPriceChanged = Math.abs(effectiveUnitPricePreview - companyPrice) > 0.005;
+                  const grossItem = fastItemQty * effectiveUnitPricePreview;
                   let calculatedDisc = 0;
                   let calculatedAdd = 0;
-                  if (rawVal > 0) {
+                  if (rawVal > 0 && fastItemAdjustmentMode !== 'alterar_preco' && !isPriceChanged) {
                     if (fastItemAdjustmentMode === 'desconto') {
                       if (fastItemAdjustmentType === 'percent') {
                         const effectivePct = selProd.maxDiscountEnabled
@@ -2719,8 +3049,13 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
                         </span>
                         <span className="text-slate-400">•</span>
                         <span className="text-[11px] text-slate-500">
-                          Tabela: <strong className="text-slate-800 font-mono">{formatCurrency(companyPrice)}</strong>
+                          Original: <strong className="text-slate-800 font-mono">{formatCurrency(companyPrice)}</strong>
                         </span>
+                        {isPriceChanged && (
+                          <span className="text-[11px] font-bold text-indigo-800 bg-indigo-50 border border-indigo-200 px-1.5 py-0.5 rounded font-mono">
+                            Novo Unit.: {formatCurrency(effectiveUnitPricePreview)}
+                          </span>
+                        )}
                       </div>
 
                       <div className="flex items-center gap-3 text-right shrink-0">
@@ -2801,6 +3136,16 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
                       const stock = StockEngine.getBalance(dbState.stockBalances, prod.id, selectedLocationId);
                       const isOutOfStock = stock.quantity <= 0;
                       const itemInCart = cart.find((i) => i.productId === prod.id);
+                      const catalogPrice = StockEngine.getProductPriceForCompany(prod, currentCompany.id);
+                      const draftPriceStr = catalogPriceDrafts[prod.id];
+                      const parsedDraftPrice =
+                        draftPriceStr !== undefined && draftPriceStr.trim() !== ''
+                          ? parseFloat(draftPriceStr.replace(',', '.'))
+                          : NaN;
+                      const hasDraftPrice =
+                        canAlterUnitPrice && Number.isFinite(parsedDraftPrice) && parsedDraftPrice >= 0;
+                      const displayCardPrice = hasDraftPrice ? parsedDraftPrice : catalogPrice;
+                      const isCardPriceOverridden = hasDraftPrice && Math.abs(displayCardPrice - catalogPrice) > 0.005;
 
                       return (
                         <div
@@ -2816,33 +3161,125 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
                                 Saldo ({selectedLocationName}): {formatQuantity(stock.quantity)} {prod.unit}
                               </span>
                             </div>
-                          <h4 className="text-xs font-extrabold text-slate-900 line-clamp-1">{prod.description}</h4>
-                          <span className="text-xs font-black text-slate-900 font-mono block mt-1">
-                            {formatCurrency(StockEngine.getProductPriceForCompany(prod, currentCompany.id))}
-                          </span>
-                        </div>
+                            <h4 className="text-xs font-extrabold text-slate-900 line-clamp-1">{prod.description}</h4>
+                            <div className="mt-2 space-y-1">
+                              <div className="flex items-center justify-between gap-1">
+                                <span className="text-[10px] font-bold text-slate-600">Preço Unit.:</span>
+                                {canAlterUnitPrice && (
+                                  isCardPriceOverridden ? (
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        setCatalogPriceDrafts((prev) => {
+                                          const next = { ...prev };
+                                          delete next[prod.id];
+                                          return next;
+                                        })
+                                      }
+                                      className="text-[10px] font-bold text-indigo-600 hover:underline cursor-pointer"
+                                      title={`Restaurar preço original (${formatCurrency(catalogPrice)})`}
+                                    >
+                                      Restaurar
+                                    </button>
+                                  ) : (
+                                    <span className="text-[10px] font-bold text-emerald-700">
+                                      Clique p/ editar
+                                    </span>
+                                  )
+                                )}
+                              </div>
 
-                        <div className="flex items-center justify-between pt-1.5 border-t border-slate-100">
-                          {itemInCart ? (
-                            <span className="text-[10px] font-bold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200">
-                              ✓ {itemInCart.quantity} no pedido
-                            </span>
-                          ) : (
-                            <span className="text-[10px] text-slate-400">UN: {prod.unit}</span>
-                          )}
+                              {canAlterUnitPrice ? (
+                                editingCatalogPriceId === prod.id ? (
+                                  <div className="flex items-center justify-between gap-1.5 w-full h-9 bg-white border-2 border-blue-500 ring-2 ring-blue-500/20 rounded-xl px-2.5">
+                                    <Pencil size={12} className="text-blue-600 shrink-0" />
+                                    <div className="flex items-center justify-end gap-1 flex-1 min-w-0">
+                                      <span className="text-[11px] font-extrabold text-slate-500 font-mono">R$</span>
+                                      <input
+                                        type="text"
+                                        inputMode="decimal"
+                                        autoFocus
+                                        value={draftPriceStr ?? catalogPrice.toFixed(2).replace('.', ',')}
+                                        onFocus={(e) => e.currentTarget.select()}
+                                        onChange={(e) =>
+                                          setCatalogPriceDrafts((prev) => ({
+                                            ...prev,
+                                            [prod.id]: e.target.value.replace(/[^0-9.,]/g, ''),
+                                          }))
+                                        }
+                                        onBlur={() => setEditingCatalogPriceId(null)}
+                                        onKeyDown={(e) => {
+                                          if (e.key === 'Enter') {
+                                            e.preventDefault();
+                                            setEditingCatalogPriceId(null);
+                                          } else if (e.key === 'Escape') {
+                                            setCatalogPriceDrafts((prev) => {
+                                              const next = { ...prev };
+                                              delete next[prod.id];
+                                              return next;
+                                            });
+                                            setEditingCatalogPriceId(null);
+                                          }
+                                        }}
+                                        className="w-full text-xs font-black font-mono text-right text-slate-900 bg-transparent focus:outline-hidden"
+                                      />
+                                    </div>
+                                  </div>
+                                ) : (
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setCatalogPriceDrafts((prev) => ({
+                                        ...prev,
+                                        [prod.id]: displayCardPrice.toFixed(2).replace('.', ','),
+                                      }));
+                                      setEditingCatalogPriceId(prod.id);
+                                    }}
+                                    className={`flex items-center justify-between gap-1.5 w-full h-9 rounded-xl px-2.5 border transition-colors cursor-pointer ${
+                                      isCardPriceOverridden
+                                        ? 'bg-indigo-50/70 text-indigo-950 border-indigo-400'
+                                        : 'bg-white text-slate-900 border-slate-300 hover:border-blue-400'
+                                    }`}
+                                    title={`Clique para alterar o preço unitário antes de adicionar (Original: ${formatCurrency(catalogPrice)})`}
+                                  >
+                                    <Pencil
+                                      size={12}
+                                      className={isCardPriceOverridden ? 'text-indigo-600 shrink-0' : 'text-slate-400 shrink-0'}
+                                    />
+                                    <span className="text-xs font-extrabold font-mono">
+                                      {formatCurrency(displayCardPrice)}
+                                    </span>
+                                  </button>
+                                )
+                              ) : (
+                                <div className="flex items-center justify-end w-full h-9 bg-slate-50 border border-slate-200 rounded-xl px-2.5 text-xs font-extrabold text-slate-700 font-mono select-none">
+                                  {formatCurrency(catalogPrice)}
+                                </div>
+                              )}
+                            </div>
+                          </div>
 
-                          <button
-                            type="button"
-                            onClick={() => handleAddToCart(prod, 1)}
-                            className="flex items-center gap-1 px-2.5 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-bold transition-colors cursor-pointer"
-                          >
-                            <Plus size={13} />
-                            <span>Adicionar</span>
-                          </button>
+                          <div className="flex items-center justify-between pt-1.5 border-t border-slate-100">
+                            {itemInCart ? (
+                              <span className="text-[10px] font-bold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200">
+                                ✓ {itemInCart.quantity} no pedido
+                              </span>
+                            ) : (
+                              <span className="text-[10px] text-slate-400">UN: {prod.unit}</span>
+                            )}
+
+                            <button
+                              type="button"
+                              onClick={() => handleAddToCart(prod, 1, hasDraftPrice ? displayCardPrice : undefined)}
+                              className="flex items-center gap-1 px-2.5 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-bold transition-colors cursor-pointer"
+                            >
+                              <Plus size={13} />
+                              <span>Adicionar</span>
+                            </button>
+                          </div>
                         </div>
-                      </div>
-                    );
-                  })}
+                      );
+                    })}
                 </div>
               )}
             </div>
@@ -2970,8 +3407,28 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
                                 </button>
                               </div>
                             </td>
-                            <td className="py-2 px-2 text-right font-mono text-slate-600 text-[11px]">
-                              {formatCurrency(item.unitPrice)}
+                            <td className="py-2 px-2 text-right font-mono text-[11px]">
+                              {canAlterUnitPrice ? (
+                                <button
+                                  type="button"
+                                  onClick={() => handleOpenItemDiscount(item, 'alterar_preco')}
+                                  className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded transition-colors cursor-pointer ${
+                                    item.priceOverridden
+                                      ? 'bg-indigo-100 text-indigo-900 border border-indigo-300 font-bold'
+                                      : 'text-slate-600 hover:bg-indigo-50 hover:text-indigo-800'
+                                  }`}
+                                  title={
+                                    item.priceOverridden && item.originalUnitPrice !== undefined
+                                      ? `Preço alterado (Original: ${formatCurrency(item.originalUnitPrice)}). Clique para alterar`
+                                      : 'Clique para alterar o preço unitário deste item'
+                                  }
+                                >
+                                  <span>{formatCurrency(item.unitPrice)}</span>
+                                  <Pencil size={10} className="opacity-70" />
+                                </button>
+                              ) : (
+                                <span className="text-slate-600">{formatCurrency(item.unitPrice)}</span>
+                              )}
                             </td>
                             <td className="py-2 px-2 text-right">
                               <button
@@ -2982,14 +3439,22 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
                                     ? 'bg-blue-100 text-blue-800 border border-blue-300'
                                     : discVal > 0
                                     ? 'bg-amber-100 text-amber-800 border border-amber-300'
+                                    : item.priceOverridden
+                                    ? 'bg-indigo-50 text-indigo-700 border border-indigo-200'
                                     : 'text-slate-400 hover:text-slate-700 hover:bg-slate-100'
                                 }`}
-                                title="Editar desconto ou acréscimo deste item"
+                                title={
+                                  canAlterUnitPrice
+                                    ? 'Desconto, Acréscimo ou Alterar Preço deste item'
+                                    : 'Editar desconto ou acréscimo deste item'
+                                }
                               >
                                 {addVal > 0
                                   ? `+${formatCurrency(addVal)}`
                                   : discVal > 0
                                   ? `-${formatCurrency(discVal)}`
+                                  : item.priceOverridden
+                                  ? 'Preço alt.'
                                   : '0,00'}
                               </button>
                             </td>
@@ -4026,23 +4491,33 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
       />
 
       {/* ========================================================================= */}
-      {/* MODAL: AJUSTE (DESCONTO OU ACRÉSCIMO) POR ITEM NO PEDIDO                   */}
+      {/* MODAL: AJUSTE (DESCONTO, ACRÉSCIMO OU ALTERAR PREÇO) POR ITEM NO PEDIDO   */}
       {/* ========================================================================= */}
       {showItemDiscountModal && (() => {
         const target = cart.find((i) => i.productId === discountingItemId);
         if (!target) return null;
+        const targetProduct = dbState.products.find((p) => p.id === target.productId);
+        const originalCatalogPrice = targetProduct
+          ? StockEngine.getProductPriceForCompany(targetProduct, currentCompany.id)
+          : target.originalUnitPrice ?? target.referenceUnitPrice ?? target.unitPrice;
         const gross = target.quantity * target.unitPrice;
         const raw = parseFloat(itemDiscountInput.replace(',', '.')) || 0;
+        const isAlterPriceMode = itemAdjustmentMode === 'alterar_preco' && canAlterUnitPrice;
         let previewVal = 0;
         let previewPct = 0;
-        if (itemDiscountType === 'percent') {
-          previewPct = Math.max(0, raw);
-          previewVal = (gross * previewPct) / 100;
-        } else {
-          previewVal = Math.max(0, raw);
-          previewPct = gross > 0 ? (previewVal / gross) * 100 : 0;
+        if (!isAlterPriceMode) {
+          if (itemDiscountType === 'percent') {
+            previewPct = Math.max(0, raw);
+            previewVal = (gross * previewPct) / 100;
+          } else {
+            previewVal = Math.max(0, raw);
+            previewPct = gross > 0 ? (previewVal / gross) * 100 : 0;
+          }
         }
-        const net = itemAdjustmentMode === 'desconto'
+        const previewNewUnitPrice = Math.max(0, raw);
+        const net = isAlterPriceMode
+          ? Math.round(target.quantity * previewNewUnitPrice * 100) / 100
+          : itemAdjustmentMode === 'desconto'
           ? Math.max(0, gross - previewVal)
           : gross + previewVal;
 
@@ -4051,109 +4526,222 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
             <div className="bg-white rounded-2xl max-w-sm w-full border border-slate-200 shadow-2xl p-5 space-y-3.5 text-xs">
               <div className="flex justify-between items-center pb-2 border-b border-slate-100">
                 <h3 className="font-extrabold text-sm text-slate-900 flex items-center gap-1.5">
-                  <Tag size={16} className={itemAdjustmentMode === 'acrescimo' ? 'text-blue-600' : 'text-amber-600'} />
-                  <span>Ajuste no Produto ({itemAdjustmentMode === 'acrescimo' ? 'Acréscimo' : 'Desconto'})</span>
+                  {isAlterPriceMode ? (
+                    <Pencil size={16} className="text-indigo-600" />
+                  ) : (
+                    <Tag size={16} className={itemAdjustmentMode === 'acrescimo' ? 'text-blue-600' : 'text-amber-600'} />
+                  )}
+                  <span>
+                    {isAlterPriceMode
+                      ? 'Alterar Preço Unitário'
+                      : `Ajuste no Produto (${itemAdjustmentMode === 'acrescimo' ? 'Acréscimo' : 'Desconto'})`}
+                  </span>
                 </h3>
                 <button
                   type="button"
                   onClick={() => setShowItemDiscountModal(false)}
-                  className="text-slate-400 hover:text-slate-600 p-1"
+                  className="text-slate-400 hover:text-slate-600 p-1 cursor-pointer"
                 >
                   <X size={16} />
                 </button>
               </div>
 
-              <div className="bg-slate-50 p-2.5 rounded-xl border border-slate-200">
+              <div className="bg-slate-50 p-2.5 rounded-xl border border-slate-200 space-y-1">
                 <div className="font-bold text-slate-900">{target.description}</div>
-                <div className="text-[11px] text-slate-500 mt-0.5">
-                  Bruto: {formatQuantity(target.quantity)} {target.unit} x {formatCurrency(target.unitPrice)} = <strong>{formatCurrency(gross)}</strong>
+                <div className="text-[11px] text-slate-500 flex items-center justify-between gap-2">
+                  <span>
+                    {formatQuantity(target.quantity)} {target.unit} × {formatCurrency(target.unitPrice)}
+                  </span>
+                  <strong className="text-slate-800 font-mono">{formatCurrency(gross)}</strong>
                 </div>
+                {isAlterPriceMode && (
+                  <div className="text-[11px] text-indigo-700 font-semibold flex items-center justify-between pt-1 border-t border-slate-200/80">
+                    <span>Preço Original Cadastrado:</span>
+                    <span className="font-mono font-bold">{formatCurrency(originalCatalogPrice)}</span>
+                  </div>
+                )}
               </div>
 
-              {/* Seletor Desconto ou Acréscimo no mesmo campo */}
-              <div>
-                <div className="flex justify-between items-center mb-1.5">
-                  <span className="font-bold text-slate-700">Operação:</span>
-                  <div className="inline-flex rounded-lg bg-slate-100 p-0.5 border border-slate-200">
+              {/* Seletor de Operação: Desconto, Acréscimo ou Alterar Preço (Admin/Gerente Geral) */}
+              <div className="space-y-2.5">
+                <div className="grid grid-cols-2 sm:flex rounded-lg bg-slate-100 p-0.5 border border-slate-200 gap-0.5">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setItemAdjustmentMode('desconto');
+                      setItemDiscountInput(
+                        target.discountPercent > 0
+                          ? target.discountPercent.toString().replace('.', ',')
+                          : target.discountValue > 0
+                          ? target.discountValue.toFixed(2).replace('.', ',')
+                          : ''
+                      );
+                    }}
+                    className={`flex-1 px-2 py-1.5 text-[11px] font-bold rounded cursor-pointer transition-all ${
+                      itemAdjustmentMode === 'desconto' ? 'bg-amber-600 text-white shadow-xs' : 'text-slate-600 hover:text-slate-900'
+                    }`}
+                  >
+                    Desconto (-)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setItemAdjustmentMode('acrescimo');
+                      setItemDiscountInput(
+                        target.additionPercent && target.additionPercent > 0
+                          ? target.additionPercent.toString().replace('.', ',')
+                          : target.additionValue && target.additionValue > 0
+                          ? target.additionValue.toFixed(2).replace('.', ',')
+                          : ''
+                      );
+                    }}
+                    className={`flex-1 px-2 py-1.5 text-[11px] font-bold rounded cursor-pointer transition-all ${
+                      itemAdjustmentMode === 'acrescimo' ? 'bg-blue-600 text-white shadow-xs' : 'text-slate-600 hover:text-slate-900'
+                    }`}
+                  >
+                    Acréscimo (+)
+                  </button>
+                  {canAlterUnitPrice && (
                     <button
                       type="button"
-                      onClick={() => setItemAdjustmentMode('desconto')}
-                      className={`px-2.5 py-1 text-xs font-bold rounded cursor-pointer transition-all ${
-                        itemAdjustmentMode === 'desconto' ? 'bg-amber-600 text-white shadow-xs' : 'text-slate-600'
+                      onClick={() => {
+                        setItemAdjustmentMode('alterar_preco');
+                        setItemDiscountType('value');
+                        setItemDiscountInput(target.unitPrice.toFixed(2).replace('.', ','));
+                      }}
+                      className={`col-span-2 sm:col-span-1 flex-1 px-2 py-1.5 text-[11px] font-bold rounded cursor-pointer transition-all ${
+                        itemAdjustmentMode === 'alterar_preco' ? 'bg-indigo-600 text-white shadow-xs' : 'text-slate-600 hover:text-slate-900'
                       }`}
                     >
-                      Desconto (-)
+                      Alterar Preço
                     </button>
-                    <button
-                      type="button"
-                      onClick={() => setItemAdjustmentMode('acrescimo')}
-                      className={`px-2.5 py-1 text-xs font-bold rounded cursor-pointer transition-all ${
-                        itemAdjustmentMode === 'acrescimo' ? 'bg-blue-600 text-white shadow-xs' : 'text-slate-600'
-                      }`}
-                    >
-                      Acréscimo (+)
-                    </button>
-                  </div>
+                  )}
                 </div>
 
-                <div className="flex justify-between items-center mb-1">
-                  <span className="font-bold text-slate-700">Tipo de Valor:</span>
-                  <div className="inline-flex rounded-lg bg-slate-100 p-0.5 border border-slate-200">
-                    <button
-                      type="button"
-                      onClick={() => setItemDiscountType('percent')}
-                      className={`px-2 py-0.5 font-bold rounded ${
-                        itemDiscountType === 'percent'
-                          ? itemAdjustmentMode === 'acrescimo' ? 'bg-blue-600 text-white' : 'bg-amber-600 text-white'
-                          : 'text-slate-600'
-                      }`}
-                    >
-                      %
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setItemDiscountType('value')}
-                      className={`px-2 py-0.5 font-bold rounded ${
-                        itemDiscountType === 'value'
-                          ? itemAdjustmentMode === 'acrescimo' ? 'bg-blue-600 text-white' : 'bg-amber-600 text-white'
-                          : 'text-slate-600'
-                      }`}
-                    >
-                      R$
-                    </button>
+                {isAlterPriceMode ? (
+                  <div className="space-y-1.5">
+                    <div className="flex items-center justify-between">
+                      <label className="font-bold text-slate-700">Novo Preço Unitário (R$):</label>
+                      {Math.abs(previewNewUnitPrice - originalCatalogPrice) > 0.005 && (
+                        <button
+                          type="button"
+                          onClick={() => setItemDiscountInput(originalCatalogPrice.toFixed(2).replace('.', ','))}
+                          className="text-[10px] font-bold text-indigo-700 hover:underline cursor-pointer flex items-center gap-1"
+                        >
+                          <RotateCcw size={10} />
+                          Restaurar Original
+                        </button>
+                      )}
+                    </div>
+                    <div className="relative">
+                      <span className="absolute left-3 top-1/2 -translate-y-1/2 text-xs font-black text-indigo-500">
+                        R$
+                      </span>
+                      <input
+                        type="text"
+                        inputMode="decimal"
+                        placeholder="0,00"
+                        value={itemDiscountInput}
+                        onFocus={(e) => e.currentTarget.select()}
+                        onChange={(e) => setItemDiscountInput(e.target.value.replace(/[^0-9.,]/g, ''))}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') {
+                            e.preventDefault();
+                            handleApplyItemDiscount();
+                          }
+                        }}
+                        className="w-full bg-indigo-50/40 border-2 border-indigo-300 focus:border-indigo-500 rounded-xl py-2 pl-9 pr-3 font-black text-base text-slate-900 text-right font-mono focus:outline-hidden focus:bg-white"
+                        autoFocus
+                      />
+                    </div>
+                    <p className="text-[10px] text-slate-500 leading-snug">
+                      Aplica somente neste item da venda (não altera o cadastro do produto e não registra desconto ou acréscimo).
+                    </p>
                   </div>
-                </div>
+                ) : (
+                  <>
+                    <div className="flex justify-between items-center mb-1">
+                      <span className="font-bold text-slate-700">Tipo de Valor:</span>
+                      <div className="inline-flex rounded-lg bg-slate-100 p-0.5 border border-slate-200">
+                        <button
+                          type="button"
+                          onClick={() => setItemDiscountType('percent')}
+                          className={`px-2 py-0.5 font-bold rounded cursor-pointer ${
+                            itemDiscountType === 'percent'
+                              ? itemAdjustmentMode === 'acrescimo' ? 'bg-blue-600 text-white' : 'bg-amber-600 text-white'
+                              : 'text-slate-600'
+                          }`}
+                        >
+                          %
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setItemDiscountType('value')}
+                          className={`px-2 py-0.5 font-bold rounded cursor-pointer ${
+                            itemDiscountType === 'value'
+                              ? itemAdjustmentMode === 'acrescimo' ? 'bg-blue-600 text-white' : 'bg-amber-600 text-white'
+                              : 'text-slate-600'
+                          }`}
+                        >
+                          R$
+                        </button>
+                      </div>
+                    </div>
 
-                <input
-                  type="text"
-                  placeholder={itemDiscountType === 'percent' ? 'Ex: 10' : 'Ex: 15,00'}
-                  value={itemDiscountInput}
-                  onChange={(e) => setItemDiscountInput(e.target.value.replace(/[^0-9.,]/g, ''))}
-                  className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2 font-black text-slate-900 text-right focus:outline-hidden focus:bg-white"
-                  autoFocus
-                />
+                    <input
+                      type="text"
+                      inputMode="decimal"
+                      placeholder={itemDiscountType === 'percent' ? 'Ex: 10' : 'Ex: 15,00'}
+                      value={itemDiscountInput}
+                      onChange={(e) => setItemDiscountInput(e.target.value.replace(/[^0-9.,]/g, ''))}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          e.preventDefault();
+                          handleApplyItemDiscount();
+                        }
+                      }}
+                      className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2 font-black text-slate-900 text-right focus:outline-hidden focus:bg-white"
+                      autoFocus
+                    />
 
-                {itemAdjustmentMode === 'acrescimo' && (
-                  <p className="text-[10px] text-blue-600 mt-1 italic">
-                    * Informação de acréscimo não sairá na impressão do pedido (apenas preço final).
-                  </p>
+                    {itemAdjustmentMode === 'acrescimo' && (
+                      <p className="text-[10px] text-blue-600 mt-1 italic">
+                        * Informação de acréscimo não sairá na impressão do pedido (apenas preço final).
+                      </p>
+                    )}
+                  </>
                 )}
               </div>
 
               <div className="bg-slate-900 text-white p-2.5 rounded-xl font-mono space-y-1">
-                <div className={`flex justify-between text-[11px] ${
-                  itemAdjustmentMode === 'acrescimo' ? 'text-blue-400' : 'text-amber-400'
-                }`}>
-                  <span>{itemAdjustmentMode === 'acrescimo' ? 'Acréscimo:' : 'Desconto:'}</span>
-                  <span>
-                    {itemAdjustmentMode === 'acrescimo' ? '+' : '-'}
-                    {formatCurrency(previewVal)} ({previewPct.toFixed(1).replace('.0', '')}%)
-                  </span>
-                </div>
-                <div className="flex justify-between font-bold text-emerald-400 text-sm pt-1 border-t border-slate-800">
-                  <span>Líquido do Item:</span>
-                  <span>{formatCurrency(net)}</span>
-                </div>
+                {isAlterPriceMode ? (
+                  <>
+                    <div className="flex justify-between text-[11px] text-indigo-300">
+                      <span>Novo Preço Unitário:</span>
+                      <span className="font-bold">{formatCurrency(previewNewUnitPrice)}</span>
+                    </div>
+                    <div className="flex justify-between font-bold text-emerald-400 text-sm pt-1 border-t border-slate-800">
+                      <span>Subtotal do Item:</span>
+                      <span>{formatCurrency(net)}</span>
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <div className={`flex justify-between text-[11px] ${
+                      itemAdjustmentMode === 'acrescimo' ? 'text-blue-400' : 'text-amber-400'
+                    }`}>
+                      <span>{itemAdjustmentMode === 'acrescimo' ? 'Acréscimo:' : 'Desconto:'}</span>
+                      <span>
+                        {itemAdjustmentMode === 'acrescimo' ? '+' : '-'}
+                        {formatCurrency(previewVal)} ({previewPct.toFixed(1).replace('.0', '')}%)
+                      </span>
+                    </div>
+                    <div className="flex justify-between font-bold text-emerald-400 text-sm pt-1 border-t border-slate-800">
+                      <span>Líquido do Item:</span>
+                      <span>{formatCurrency(net)}</span>
+                    </div>
+                  </>
+                )}
               </div>
 
               <div className="flex justify-end gap-2 pt-2 border-t border-slate-100">
@@ -4168,10 +4756,18 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
                   type="button"
                   onClick={handleApplyItemDiscount}
                   className={`px-4 py-1.5 text-white font-bold rounded-lg cursor-pointer transition-colors ${
-                    itemAdjustmentMode === 'acrescimo' ? 'bg-blue-600 hover:bg-blue-700' : 'bg-amber-600 hover:bg-amber-700'
+                    isAlterPriceMode
+                      ? 'bg-indigo-600 hover:bg-indigo-700'
+                      : itemAdjustmentMode === 'acrescimo'
+                      ? 'bg-blue-600 hover:bg-blue-700'
+                      : 'bg-amber-600 hover:bg-amber-700'
                   }`}
                 >
-                  {itemAdjustmentMode === 'acrescimo' ? 'Aplicar Acréscimo' : 'Aplicar Desconto'}
+                  {isAlterPriceMode
+                    ? 'Confirmar Novo Preço'
+                    : itemAdjustmentMode === 'acrescimo'
+                    ? 'Aplicar Acréscimo'
+                    : 'Aplicar Desconto'}
                 </button>
               </div>
             </div>

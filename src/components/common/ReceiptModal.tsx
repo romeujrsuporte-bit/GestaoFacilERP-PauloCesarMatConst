@@ -174,15 +174,71 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
   const paymentMethodLabel = formatPaymentMethodLabel(order.paymentMethod);
   const paymentTermLabel = formatPaymentTermLabel(order);
 
+  // Calcula preços unitários e subtotais para impressão:
+  // - Acréscimo (por item ou geral) é incorporado silenciosamente ao preço unitário/subtotal (nunca exibido ao cliente).
+  // - Alteração direta de preço unitário mostra apenas o preço unitário praticado e seu subtotal.
+  // - Desconto continua sendo exibido normalmente quando aplicado.
+  const { printableItems, printableSubtotal } = React.useMemo(() => {
+    const rawItems = order.items || [];
+    const baseEntries = rawItems.map((item) => {
+      const qty = item.quantity > 0 ? item.quantity : 1;
+      const discVal = isBonus ? 0 : Math.max(0, item.discountValue || 0);
+      const baseNet = Math.max(0, item.totalPrice ?? qty * item.unitPrice - discVal);
+      const baseGross =
+        item.additionValue && item.additionValue > 0
+          ? baseNet + discVal
+          : Math.round(qty * item.unitPrice * 100) / 100;
+      return {
+        item,
+        qty,
+        discVal,
+        baseGross,
+        baseNet,
+      };
+    });
+
+    const sumBaseNet = baseEntries.reduce((s, e) => s + e.baseNet, 0);
+    const sumBaseGross = baseEntries.reduce((s, e) => s + e.baseGross, 0);
+    const itemDiscountsSum = baseEntries.reduce((s, e) => s + e.discVal, 0);
+    const globalDiscount = isBonus ? 0 : Math.max(0, (order.discountTotal || 0) - itemDiscountsSum);
+    const freightVal = isBonus ? 0 : Math.max(0, Number((order as any).freightTotal || 0));
+    const extraGlobalAddition = isBonus
+      ? 0
+      : Math.max(0, Math.round((order.total - (sumBaseNet - globalDiscount + freightVal)) * 100) / 100);
+
+    let distributedExtra = 0;
+    const computed = baseEntries.map((entry, idx) => {
+      let itemExtraAdd = 0;
+      if (extraGlobalAddition > 0.005 && sumBaseGross > 0) {
+        if (idx === baseEntries.length - 1) {
+          itemExtraAdd = Math.max(0, Math.round((extraGlobalAddition - distributedExtra) * 100) / 100);
+        } else {
+          itemExtraAdd = Math.round((extraGlobalAddition * (entry.baseGross / sumBaseGross)) * 100) / 100;
+          distributedExtra = Math.round((distributedExtra + itemExtraAdd) * 100) / 100;
+        }
+      }
+      const printedGross = Math.round((entry.baseGross + itemExtraAdd) * 100) / 100;
+      const printedTotal = Math.round((entry.baseNet + itemExtraAdd) * 100) / 100;
+      const printedUnitPrice = entry.qty > 0 ? printedGross / entry.qty : entry.item.unitPrice;
+
+      return {
+        ...entry.item,
+        printedUnitPrice,
+        printedTotal,
+        printedGross,
+        printedDiscountValue: entry.discVal,
+      };
+    });
+
+    const computedSubtotal = Math.round(computed.reduce((s, it) => s + it.printedGross, 0) * 100) / 100;
+    return {
+      printableItems: computed,
+      printableSubtotal: computedSubtotal > 0 ? computedSubtotal : order.subtotal,
+    };
+  }, [order, isBonus]);
+
   const getWhatsAppText = () => {
     const isQuote = order.type === 'orcamento';
-    const printableSubtotal = order.items.reduce((s, itm) => {
-      const effUnit =
-        itm.additionValue && itm.additionValue > 0
-          ? (itm.totalPrice + (itm.discountValue || 0)) / (itm.quantity || 1)
-          : itm.unitPrice;
-      return s + effUnit * itm.quantity;
-    }, 0);
 
     let text = `*${activeCompany.tradeName || activeCompany.name}*\n`;
     text += `${
@@ -200,15 +256,11 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
     text += `Cliente: ${order.customerName}\n`;
     text += `--------------------------------\n`;
     text += `ITENS${isBonus ? ' BONIFICADOS' : ''}:\n`;
-    order.items.forEach((item, i) => {
-      const effectiveUnitPrice =
-        item.additionValue && item.additionValue > 0
-          ? (item.totalPrice + (item.discountValue || 0)) / (item.quantity || 1)
-          : item.unitPrice;
+    printableItems.forEach((item, i) => {
       text += `${i + 1}. ${item.description}\n   ${formatQuantity(item.quantity)} ${item.unit} x ${formatCurrency(
-        effectiveUnitPrice
-      )}${!isBonus && item.discountValue > 0 ? ` (-${formatCurrency(item.discountValue)})` : ''} = ${formatCurrency(
-        item.totalPrice
+        item.printedUnitPrice
+      )}${!isBonus && item.printedDiscountValue > 0 ? ` (-${formatCurrency(item.printedDiscountValue)})` : ''} = ${formatCurrency(
+        item.printedTotal
       )}${isBonus ? ' (Ref.)' : ''}\n`;
     });
     text += `--------------------------------\n`;
@@ -217,7 +269,7 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
       text += `*TOTAL FINANCEIRO A COBRAR: ${formatCurrency(0)}*\n`;
       text += `Natureza: BONIFICAÇÃO — SEM COBRANÇA FINANCEIRA`;
     } else {
-      text += `Subtotal: ${formatCurrency(printableSubtotal || order.subtotal)}\n`;
+      text += `Subtotal: ${formatCurrency(printableSubtotal)}\n`;
       if (order.discountTotal > 0) {
         text += `Desconto: -${formatCurrency(order.discountTotal)}\n`;
       }
@@ -641,27 +693,20 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-slate-200">
-                          {order.items.map((item, idx) => {
-                            const effectiveUnitPrice =
-                              item.additionValue && item.additionValue > 0
-                                ? (item.totalPrice + (item.discountValue || 0)) / (item.quantity || 1)
-                                : item.unitPrice;
-
-                            return (
-                              <tr key={item.id || idx} className={idx % 2 === 0 ? 'bg-white' : 'bg-slate-50/70'}>
-                                <td className="py-1.5 px-2.5 text-center text-slate-400 font-mono text-[10px]">{idx + 1}</td>
-                                <td className="py-1.5 px-2.5 font-mono font-bold text-slate-600 text-[10px]">{item.productCode || '-'}</td>
-                                <td className="py-1.5 px-2.5 font-medium text-slate-800">{item.description}</td>
-                                <td className="py-1.5 px-2 text-center text-slate-500 font-semibold">{item.unit}</td>
-                                <td className="py-1.5 px-2.5 text-right font-bold text-slate-900 font-mono">{formatQuantity(item.quantity)}</td>
-                                <td className="py-1.5 px-2.5 text-right font-mono text-slate-600">{formatCurrency(effectiveUnitPrice)}</td>
-                                <td className="py-1.5 px-2 text-right font-mono text-rose-600">
-                                  {item.discountValue > 0 ? `-${formatCurrency(item.discountValue)}` : '-'}
-                                </td>
-                                <td className="py-1.5 px-3 text-right font-bold font-mono text-slate-900">{formatCurrency(item.totalPrice)}</td>
-                              </tr>
-                            );
-                          })}
+                          {printableItems.map((item, idx) => (
+                            <tr key={item.id || idx} className={idx % 2 === 0 ? 'bg-white' : 'bg-slate-50/70'}>
+                              <td className="py-1.5 px-2.5 text-center text-slate-400 font-mono text-[10px]">{idx + 1}</td>
+                              <td className="py-1.5 px-2.5 font-mono font-bold text-slate-600 text-[10px]">{item.productCode || '-'}</td>
+                              <td className="py-1.5 px-2.5 font-medium text-slate-800">{item.description}</td>
+                              <td className="py-1.5 px-2 text-center text-slate-500 font-semibold">{item.unit}</td>
+                              <td className="py-1.5 px-2.5 text-right font-bold text-slate-900 font-mono">{formatQuantity(item.quantity)}</td>
+                              <td className="py-1.5 px-2.5 text-right font-mono text-slate-600">{formatCurrency(item.printedUnitPrice)}</td>
+                              <td className="py-1.5 px-2 text-right font-mono text-rose-600">
+                                {item.printedDiscountValue > 0 ? `-${formatCurrency(item.printedDiscountValue)}` : '-'}
+                              </td>
+                              <td className="py-1.5 px-3 text-right font-bold font-mono text-slate-900">{formatCurrency(item.printedTotal)}</td>
+                            </tr>
+                          ))}
                         </tbody>
                       </table>
                     </div>
@@ -752,7 +797,7 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
                           <>
                             <div className={`flex justify-between text-[11px] ${isBw ? 'text-slate-700' : 'text-slate-300'}`}>
                               <span>Subtotal dos Itens:</span>
-                              <span className="font-mono">{formatCurrency(order.subtotal)}</span>
+                              <span className="font-mono">{formatCurrency(printableSubtotal)}</span>
                             </div>
                             {order.discountTotal > 0 && (
                               <div className={`flex justify-between text-[11px] ${isBw ? 'text-slate-800 font-semibold' : 'text-rose-300'}`}>
@@ -937,24 +982,18 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
                         <span>TOTAL</span>
                       </div>
                       <div className="space-y-1.5">
-                        {order.items.map((item, idx) => {
-                          const effectiveUnitPrice =
-                            item.additionValue && item.additionValue > 0
-                              ? (item.totalPrice + (item.discountValue || 0)) / (item.quantity || 1)
-                              : item.unitPrice;
-                          return (
-                            <div key={item.id || idx} className="text-[11px]">
-                              <div className="font-semibold text-slate-800">{item.description}</div>
-                              <div className="flex justify-between text-slate-500">
-                                <span>
-                                  {formatQuantity(item.quantity)} {item.unit} x {formatCurrency(effectiveUnitPrice)}
-                                  {item.discountValue > 0 && ` (-${formatCurrency(item.discountValue)})`}
-                                </span>
-                                <span className="font-medium text-slate-800">{formatCurrency(item.totalPrice)}</span>
-                              </div>
+                        {printableItems.map((item, idx) => (
+                          <div key={item.id || idx} className="text-[11px]">
+                            <div className="font-semibold text-slate-800">{item.description}</div>
+                            <div className="flex justify-between text-slate-500">
+                              <span>
+                                {formatQuantity(item.quantity)} {item.unit} x {formatCurrency(item.printedUnitPrice)}
+                                {item.printedDiscountValue > 0 && ` (-${formatCurrency(item.printedDiscountValue)})`}
+                              </span>
+                              <span className="font-medium text-slate-800">{formatCurrency(item.printedTotal)}</span>
                             </div>
-                          );
-                        })}
+                          </div>
+                        ))}
                       </div>
                     </div>
 
@@ -975,7 +1014,7 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
                         <>
                           <div className="flex justify-between text-slate-600">
                             <span>Subtotal Itens:</span>
-                            <span>{formatCurrency(order.subtotal)}</span>
+                            <span>{formatCurrency(printableSubtotal)}</span>
                           </div>
                           {order.discountTotal > 0 && (
                             <div className="flex justify-between text-rose-600 font-medium">
