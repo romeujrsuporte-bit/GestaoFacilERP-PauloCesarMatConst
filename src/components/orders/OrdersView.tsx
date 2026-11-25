@@ -2238,7 +2238,7 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
                 }`}
               >
                 <CheckCircle2 size={14} />
-                <span>Venda Normal</span>
+                <span>Venda</span>
               </button>
               <button
                 type="button"
