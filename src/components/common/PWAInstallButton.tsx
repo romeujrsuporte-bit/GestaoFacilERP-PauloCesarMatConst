@@ -4,7 +4,7 @@ import { Download, Smartphone, Share, PlusSquare, X, CheckCircle2 } from 'lucide
 import { usePWAInstall } from '../../hooks/usePWAInstall';
 
 interface PWAInstallButtonProps {
-  variant?: 'menu-item' | 'header-button' | 'dashboard-banner' | 'login-button';
+  variant?: 'menu-item' | 'header-button' | 'dashboard-banner' | 'login-button' | 'settings-button';
   onActionComplete?: () => void;
 }
 
@@ -166,6 +166,23 @@ export const PWAInstallButton: React.FC<PWAInstallButtonProps> = ({
         >
           <Download size={15} className="text-emerald-400" />
           <span>Instalar Gestão Fácil no Celular</span>
+        </button>
+        {renderIOSModal()}
+      </>
+    );
+  }
+
+  if (variant === 'settings-button') {
+    return (
+      <>
+        <button
+          type="button"
+          onClick={handleInstallClick}
+          className="flex items-center gap-2 text-xs font-bold text-white bg-emerald-600 hover:bg-emerald-700 px-3.5 py-2 rounded-xl shadow-xs transition-colors cursor-pointer select-none shrink-0"
+          title="Instalar Gestão Fácil como aplicativo"
+        >
+          <Download size={15} className="shrink-0" />
+          <span>Instalar Gestão Fácil</span>
         </button>
         {renderIOSModal()}
       </>

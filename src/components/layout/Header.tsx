@@ -15,7 +15,6 @@ import {
 import { Database } from '../../services/db';
 import { toast } from '../../services/toast';
 import { GestaoFacilLogo } from '../common/AppLogo';
-import { PWAInstallButton } from '../common/PWAInstallButton';
 import { ChangePasswordModal } from '../auth/ChangePasswordModal';
 import { logoutFirebase } from '../../services/firebase';
 
@@ -169,10 +168,8 @@ export const Header: React.FC<HeaderProps> = ({
         </div>
       </div>
 
-      {/* Lado Direito: Instalar PWA, Atalhos F1, Notificações & Perfil de Usuário */}
+      {/* Lado Direito: Atalhos F1, Notificações & Perfil de Usuário */}
       <div className="flex items-center gap-1.5 sm:gap-3">
-        <PWAInstallButton variant="header-button" />
-
         {/* Botão Atalhos de Teclado F1 */}
         {onOpenShortcuts && (
           <button
@@ -280,11 +277,6 @@ export const Header: React.FC<HeaderProps> = ({
                     <span>Empresas, Usuários & Auditoria</span>
                   </button>
                 )}
-
-                <PWAInstallButton
-                  variant="menu-item"
-                  onActionComplete={() => setIsProfileMenuOpen(false)}
-                />
 
                 <div className="my-1 border-t border-slate-100" />
 

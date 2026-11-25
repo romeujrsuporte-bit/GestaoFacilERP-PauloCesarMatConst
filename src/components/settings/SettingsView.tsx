@@ -59,6 +59,7 @@ import { ThermalPrinterSettings } from './ThermalPrinterSettings';
 import { ProductLabelsView } from './ProductLabelsView';
 import { DataCleanupView } from './DataCleanupView';
 import { ChangePasswordModal } from '../auth/ChangePasswordModal';
+import { PWAInstallButton } from '../common/PWAInstallButton';
 import { formatCurrency } from '../../services/pricingEngine';
 import { toast } from '../../services/toast';
 import { FirebaseSyncService } from '../../services/firebaseSync';
@@ -1109,15 +1110,18 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ initialTab = 'empres
   return (
     <div className="space-y-4">
       {/* Topo / Sub-Abas */}
-      <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-xs flex flex-col md:flex-row md:items-center justify-between gap-3">
-        <div>
-          <h2 className="text-base font-bold text-slate-800 flex items-center gap-2">
-            <Settings className="text-blue-600" size={20} />
-            <span>Configurações, Empresas, Usuários & Auditoria</span>
-          </h2>
-          <p className="text-xs text-slate-500">
-            Administração de filiais, perfis de acesso, políticas de segurança, log de auditoria e backup do sistema.
-          </p>
+      <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-xs space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h2 className="text-base font-bold text-slate-800 flex items-center gap-2">
+              <Settings className="text-blue-600" size={20} />
+              <span>Configurações, Empresas, Usuários & Auditoria</span>
+            </h2>
+            <p className="text-xs text-slate-500">
+              Administração de filiais, perfis de acesso, políticas de segurança, log de auditoria e backup do sistema.
+            </p>
+          </div>
+          <PWAInstallButton variant="settings-button" />
         </div>
 
         <div className="flex flex-wrap bg-slate-100 p-1 rounded-xl text-xs font-bold gap-1">

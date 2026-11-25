@@ -45,7 +45,6 @@ import { StockEngine } from '../../services/stockEngine';
 import { formatCurrency, formatQuantity } from '../../services/pricingEngine';
 import { Order, Product } from '../../types';
 import { CashRegister } from '../common/icons/CashRegisterIcon';
-import { PWAInstallButton } from '../common/PWAInstallButton';
 import { toast } from '../../services/toast';
 import { FirebaseSyncService } from '../../services/firebaseSync';
 import { processLogoFile } from '../../services/imageUtils';
@@ -754,7 +753,6 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               F7
             </kbd>
           </button>
-          <PWAInstallButton variant="dashboard-banner" />
         </div>
       </div>
 
