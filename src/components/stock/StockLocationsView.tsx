@@ -30,6 +30,7 @@ import { FirebaseSyncService } from '../../services/firebaseSync';
 import { StockLocation, Product, StockMovement, ProductStockBalance, Company, CompanyStockTransfer } from '../../types';
 import { StockEngine } from '../../services/stockEngine';
 import { formatCurrency, formatQuantity } from '../../services/pricingEngine';
+import { getStockMovementTypeLabel } from '../../utils/orderUtils';
 import { toast } from '../../services/toast';
 
 export const StockLocationsView: React.FC<{
@@ -1828,6 +1829,8 @@ export const StockLocationsView: React.FC<{
                     >
                       <option value="todos">Todos os Tipos</option>
                       <option value="saida_venda">Saída por Venda</option>
+                      <option value="saida_bonificacao">Saída por Bonificação</option>
+                      <option value="estorno_bonificacao">Estorno de Bonificação</option>
                       <option value="entrada_compra">Entrada por Compra</option>
                       <option value="consumo_producao">Consumo de Insumos (Produção)</option>
                       <option value="entrada_producao">Entrada de Produto Acabado</option>
@@ -2212,13 +2215,15 @@ export const StockLocationsView: React.FC<{
                           </td>
                           <td className="p-3">
                             <span className={`text-[10px] px-2 py-0.5 rounded-full font-bold uppercase ${
-                              m.type.includes('entrada')
+                              m.type === 'saida_bonificacao' || m.type === 'estorno_bonificacao'
+                                ? 'bg-sky-100 text-sky-900 border border-sky-300'
+                                : m.type.includes('entrada')
                                 ? 'bg-emerald-100 text-emerald-800'
                                 : m.type.includes('saida') || m.type.includes('consumo')
                                 ? 'bg-rose-100 text-rose-800'
                                 : 'bg-blue-100 text-blue-800'
                             }`}>
-                              {m.type.replace('_', ' ')}
+                              {getStockMovementTypeLabel(m.type)}
                             </span>
                           </td>
                           <td className="p-3 text-slate-600 font-medium">

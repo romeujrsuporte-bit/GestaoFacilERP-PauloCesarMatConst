@@ -23,6 +23,7 @@ import {
 import { Database } from '../../services/db';
 import { formatCurrency, formatQuantity } from '../../services/pricingEngine';
 import { GestaoFacilLogo } from '../common/AppLogo';
+import { isBillableSaleOrder } from '../../utils/orderUtils';
 
 export type A4ReportType =
   | 'pedido_modelo'
@@ -71,7 +72,7 @@ export const A4ReportsPreviewModal: React.FC<A4ReportsPreviewModalProps> = ({
   const nowTimeStr = new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
 
   // 1. Dados de Pedidos de Venda
-  const sampleOrder = state.orders?.find((o) => o.type === 'venda' && o.status !== 'cancelado') || {
+  const sampleOrder = state.orders?.find((o) => isBillableSaleOrder(o)) || {
     id: 'ord-sample',
     number: 'PV-2026-00128',
     companyId: company.id,
@@ -146,7 +147,7 @@ export const A4ReportsPreviewModal: React.FC<A4ReportsPreviewModalProps> = ({
   };
 
   // 2. Dados de Vendas Mobile
-  const sampleMobileOrder = state.orders?.find((o) => o.origin === 'externa_celular') || {
+  const sampleMobileOrder = state.orders?.find((o) => o.origin === 'externa_celular' && isBillableSaleOrder(o)) || {
     ...sampleOrder,
     number: 'MOB-2026-00045',
     origin: 'externa_celular',

@@ -41,6 +41,7 @@ import {
 } from '../../types';
 import { Database } from '../../services/db';
 import { formatCurrency, formatQuantity } from '../../services/pricingEngine';
+import { isBonusOrder } from '../../utils/orderUtils';
 import { toast } from '../../services/toast';
 
 interface SalesReturnsViewProps {
@@ -240,10 +241,10 @@ export const SalesReturnsView: React.FC<SalesReturnsViewProps> = ({
         });
       });
 
-    // Faturamento bruto do período para percentual
+    // Faturamento bruto do período para percentual (exclui bonificações sem faturamento)
     const grossSalesInPeriod = (dbState.orders || [])
       .filter((o) => {
-        if (o.type === 'orcamento' || o.status === 'cancelado') return false;
+        if (o.type === 'orcamento' || o.status === 'cancelado' || isBonusOrder(o)) return false;
         if (selectedCompanyId !== 'all' && o.companyId !== selectedCompanyId) return false;
         const d = (o.createdAt || '').slice(0, 10);
         return d >= startDate && d <= endDate;
@@ -261,13 +262,14 @@ export const SalesReturnsView: React.FC<SalesReturnsViewProps> = ({
     };
   }, [salesReturns, dbState.orders, selectedCompanyId, startDate, endDate]);
 
-  // Pedidos elegíveis para devolução (concluídos, não cancelados, com itens que possuem saldo disponível)
+  // Pedidos elegíveis para devolução (concluídos, não cancelados, não bonificação, com itens que possuem saldo disponível)
   const eligibleOrders = useMemo(() => {
     const q = orderSearchQuery.toLowerCase().trim();
     return (dbState.orders || [])
       .filter((ord) => {
         if (ord.type === 'orcamento') return false;
         if (ord.status === 'cancelado') return false;
+        if (isBonusOrder(ord)) return false;
         if (ord.returnStatus === 'devolucao_total') return false;
 
         // Verifica se tem ao menos 1 item com saldo a devolver

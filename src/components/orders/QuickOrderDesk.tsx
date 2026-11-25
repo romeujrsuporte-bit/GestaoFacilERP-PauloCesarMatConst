@@ -23,9 +23,10 @@ import {
   Barcode,
   Boxes,
   Ticket,
+  Gift,
 } from 'lucide-react';
 import { Database } from '../../services/db';
-import { Product, Customer, Order, OrderItem } from '../../types';
+import { Product, Customer, Order, OrderCommercialKind, OrderItem } from '../../types';
 import { StockEngine } from '../../services/stockEngine';
 import { formatCurrency, formatQuantity } from '../../services/pricingEngine';
 import { ReceiptModal } from '../common/ReceiptModal';
@@ -33,6 +34,7 @@ import { SaleConfirmationModal } from '../common/SaleConfirmationModal';
 import { FullCustomerModal } from '../common/FullCustomerModal';
 import { CustomerSearchCombobox } from './CustomerSearchCombobox';
 import { toast } from '../../services/toast';
+import { formatBonusStockExitNote } from '../../utils/orderUtils';
 
 interface QuickOrderDeskProps {
   onOrderFinished?: (order: Order) => void;
@@ -57,6 +59,9 @@ export const QuickOrderDesk: React.FC<QuickOrderDeskProps> = ({
 
   // Tipo de Documento: 'venda' ou 'orcamento'
   const [docType, setDocType] = useState<'venda' | 'orcamento'>(defaultDocType);
+  // Tipo de Pedido: 'venda_normal' (padrão) ou 'bonificacao'
+  const [orderKind, setOrderKind] = useState<OrderCommercialKind>('venda_normal');
+  const isBonusMode = docType === 'venda' && orderKind === 'bonificacao';
 
   // Cliente Selecionado
   const [selectedCustomerId, setSelectedCustomerId] = useState<string>('');
@@ -351,22 +356,27 @@ export const QuickOrderDesk: React.FC<QuickOrderDeskProps> = ({
       return;
     }
     if (!selectedCustomerId || selectedCustomerId.trim() === '') {
-      toast.warning('A seleção do cliente é obrigatória para emitir o Pedido de Venda. Selecione um cliente cadastrado ou clique em "+ Novo Cliente" para cadastrar com dados completos de entrega e romaneio.', 'Cliente Obrigatório');
+      toast.warning(
+        `A seleção do cliente é obrigatória para emitir o ${isBonusMode ? 'Pedido de Bonificação' : 'Pedido de Venda'}. Selecione um cliente cadastrado ou clique em "+ Novo Cliente" para cadastrar.`,
+        'Cliente Obrigatório'
+      );
       return;
     }
-    if (!paymentMethod) {
-      toast.warning('A Forma de Pagamento é obrigatória em todas as modalidades de venda.', 'Forma de Pagamento Obrigatória');
-      return;
-    }
-    if (!paymentTerm || paymentTerm.trim() === '') {
-      toast.warning('O Prazo de Pagamento é obrigatório em todas as modalidades de venda.', 'Prazo Obrigatório');
-      return;
+    if (!isBonusMode) {
+      if (!paymentMethod) {
+        toast.warning('A Forma de Pagamento é obrigatória em todas as modalidades de venda.', 'Forma de Pagamento Obrigatória');
+        return;
+      }
+      if (!paymentTerm || paymentTerm.trim() === '') {
+        toast.warning('O Prazo de Pagamento é obrigatório em todas as modalidades de venda.', 'Prazo Obrigatório');
+        return;
+      }
     }
     setShowSaleConfirmationModal(true);
   };
 
   // ==========================================
-  // FINALIZAR PEDIDO DE VENDA OU ORÇAMENTO (após confirmação na tela)
+  // FINALIZAR PEDIDO DE VENDA, BONIFICAÇÃO OU ORÇAMENTO (após confirmação na tela)
   // ==========================================
   const handleFinalizeOrder = () => {
     setShowSaleConfirmationModal(false);
@@ -376,19 +386,21 @@ export const QuickOrderDesk: React.FC<QuickOrderDeskProps> = ({
       return;
     }
     if (!selectedCustomerId || selectedCustomerId.trim() === '') {
-      toast.warning('A seleção do cliente é obrigatória para emitir o Pedido de Venda.', 'Cliente Obrigatório');
+      toast.warning('A seleção do cliente é obrigatória para emitir o pedido.', 'Cliente Obrigatório');
       return;
     }
-    if (!paymentMethod) {
-      toast.warning('A Forma de Pagamento é obrigatória em todas as modalidades de venda.', 'Forma de Pagamento Obrigatória');
-      return;
-    }
-    if (!paymentTerm || paymentTerm.trim() === '') {
-      toast.warning('O Prazo de Pagamento é obrigatório em todas as modalidades de venda.', 'Prazo Obrigatório');
-      return;
+    if (!isBonusMode) {
+      if (!paymentMethod) {
+        toast.warning('A Forma de Pagamento é obrigatória em todas as modalidades de venda.', 'Forma de Pagamento Obrigatória');
+        return;
+      }
+      if (!paymentTerm || paymentTerm.trim() === '') {
+        toast.warning('O Prazo de Pagamento é obrigatório em todas as modalidades de venda.', 'Prazo Obrigatório');
+        return;
+      }
     }
 
-    const prefix = docType === 'orcamento' ? 'ORC' : 'PED';
+    const prefix = isBonusMode ? 'BON' : docType === 'orcamento' ? 'ORC' : 'PED';
     const now = new Date();
     const orderNumber = `${prefix}-${now.getFullYear()}-${String(dbState.orders.length + 1).padStart(5, '0')}`;
     const nowIso = now.toISOString();
@@ -397,8 +409,8 @@ export const QuickOrderDesk: React.FC<QuickOrderDeskProps> = ({
       let currentBalances = [...dbState.stockBalances];
       const createdMovements = [];
 
-      // Se for VENDA, realiza a baixa física de estoque
-      if (docType === 'venda') {
+      // Se for VENDA ou BONIFICAÇÃO, realiza a baixa física de estoque
+      if (isBonusMode || docType === 'venda') {
         for (const item of cart) {
           const loc =
             dbState.stockLocations.find((l) => l.id === item.locationId) ||
@@ -414,16 +426,18 @@ export const QuickOrderDesk: React.FC<QuickOrderDeskProps> = ({
               productDescription: item.description,
               locationId: loc.id,
               locationName: loc.name,
-              type: 'saida_venda',
+              type: isBonusMode ? 'saida_bonificacao' : 'saida_venda',
               quantity: item.quantity,
               unitCost: item.unitCost,
               totalCost: item.unitCost * item.quantity,
-              originDocType: 'venda',
+              originDocType: isBonusMode ? 'bonificacao' : 'venda',
               originDocId: orderNumber,
               date: nowIso,
               userId: currentUser.id,
               userName: currentUser.name,
-              notes: `Pedido de Venda Retaguarda/Início emitido por ${currentUser.name}`,
+              notes: isBonusMode
+                ? formatBonusStockExitNote(orderNumber, currentCompany.tradeName || currentCompany.name)
+                : `Pedido de Venda Retaguarda/Início emitido por ${currentUser.name}`,
             },
             { allowNegativeStock: Database.canSellNegativeStock() }
           );
@@ -433,15 +447,23 @@ export const QuickOrderDesk: React.FC<QuickOrderDeskProps> = ({
         }
       }
 
-      const targetBoletoAccount = paymentMethod === 'boleto'
+      const targetBoletoAccount = !isBonusMode && paymentMethod === 'boleto'
         ? Database.getBoletoAccounts(currentCompany.id).find((a) => a.id === selectedBoletoAccountId) || Database.getBoletoAccounts(currentCompany.id)[0]
         : undefined;
 
-      const termInfo = Database.resolvePaymentTermInfo(paymentTerm, installments);
+      const termInfo = isBonusMode
+        ? { label: 'Sem Cobrança (Bonificação)', installmentsCount: 0, daysOffsets: [] as number[] }
+        : Database.resolvePaymentTermInfo(paymentTerm, installments);
+
+      const effectivePaymentMethod: Order['paymentMethod'] = isBonusMode
+        ? 'bonificacao'
+        : (paymentMethod as Order['paymentMethod']);
+
       const newOrder: Order = {
         id: 'ORD-' + Date.now(),
         number: orderNumber,
-        type: docType,
+        type: isBonusMode ? 'venda' : docType,
+        orderKind: isBonusMode ? 'bonificacao' : 'venda_normal',
         origin: 'retaguarda_pedido',
         companyId: currentCompany.id,
         customerId: selectedCustomerId || 'CLI-CONSUMIDOR',
@@ -450,31 +472,35 @@ export const QuickOrderDesk: React.FC<QuickOrderDeskProps> = ({
         userId: currentUser.id,
         userName: currentUser.name,
         items: cart,
-        subtotal: grossSubtotal,
-        discountTotal: totalDiscountAll,
-        total: orderFinalTotal,
-        paymentMethod,
-        paymentTerm,
-        bankAccountId: targetBoletoAccount?.id,
-        bankAccountName: targetBoletoAccount?.name,
-        installmentsCount: installments,
-        receivedAmount: docType === 'venda' && (paymentMethod === 'pix' || paymentMethod === 'dinheiro') ? orderFinalTotal : 0,
+        subtotal: isBonusMode ? 0 : grossSubtotal,
+        discountTotal: isBonusMode ? 0 : totalDiscountAll,
+        total: isBonusMode ? 0 : orderFinalTotal,
+        referenceSubtotal: isBonusMode ? grossSubtotal : undefined,
+        referenceTotal: isBonusMode ? orderFinalTotal : undefined,
+        paymentMethod: effectivePaymentMethod,
+        paymentTerm: isBonusMode ? 'Sem Cobrança (Bonificação)' : paymentTerm,
+        bankAccountId: isBonusMode ? undefined : targetBoletoAccount?.id,
+        bankAccountName: isBonusMode ? undefined : targetBoletoAccount?.name,
+        installmentsCount: isBonusMode ? 0 : installments,
+        receivedAmount: !isBonusMode && docType === 'venda' && (paymentMethod === 'pix' || paymentMethod === 'dinheiro') ? orderFinalTotal : 0,
         changeAmount: 0,
-        status: docType === 'orcamento' ? 'aberto' : 'concluido',
+        status: !isBonusMode && docType === 'orcamento' ? 'aberto' : 'concluido',
         validityDate:
-          docType === 'orcamento'
+          !isBonusMode && docType === 'orcamento'
             ? new Date(Date.now() + 15 * 86400000).toISOString().split('T')[0]
             : undefined,
-        notes: (notes ? `${notes} | ` : '') + `Prazo: ${termInfo.label}${installments > 1 && !/\d+\s*x/i.test(termInfo.label) ? ` (${installments}x)` : ''} • Pedido gerado via painel Início por ${currentUser.name}`,
-        stockDeducted: docType === 'venda',
-        financialGenerated: docType === 'venda',
+        notes: isBonusMode
+          ? (notes ? `${notes} | ` : '') + `BONIFICAÇÃO — SEM COBRANÇA FINANCEIRA • Pedido gerado via painel Início por ${currentUser.name}`
+          : (notes ? `${notes} | ` : '') + `Prazo: ${termInfo.label}${installments > 1 && !/\d+\s*x/i.test(termInfo.label) ? ` (${installments}x)` : ''} • Pedido gerado via painel Início por ${currentUser.name}`,
+        stockDeducted: isBonusMode || docType === 'venda',
+        financialGenerated: !isBonusMode && docType === 'venda',
         createdAt: nowIso,
         updatedAt: nowIso,
       };
 
-      // Se venda a prazo, gerar Contas a Receber
+      // Se venda normal a prazo, gerar Contas a Receber (NUNCA para Bonificação)
       let updatedReceivables = [...dbState.accountsReceivable];
-      if (docType === 'venda' && (paymentMethod === 'boleto' || installments > 1)) {
+      if (!isBonusMode && docType === 'venda' && (paymentMethod === 'boleto' || installments > 1)) {
         const valParcela = Number((orderFinalTotal / installments).toFixed(2));
         for (let i = 1; i <= installments; i++) {
           const daysOffset = termInfo.daysOffsets[i - 1] ?? i * 30;
@@ -516,22 +542,25 @@ export const QuickOrderDesk: React.FC<QuickOrderDeskProps> = ({
       Database.persist();
 
       Database.addAuditLog(
-        'PEDIDO_VENDA_CRIADO',
+        isBonusMode ? 'BONIFICACAO_EMITIDA' : 'PEDIDO_VENDA_CRIADO',
         'PEDIDOS_RETAGUARDA',
         newOrder.id,
-        `${docType === 'orcamento' ? 'Orçamento' : 'Pedido de Venda'} ${orderNumber} criado por ${currentUser.name} para ${newOrder.customerName}. Total: ${formatCurrency(orderFinalTotal)}`
+        isBonusMode
+          ? `Pedido de Bonificação ${orderNumber} criado por ${currentUser.name} para ${newOrder.customerName}. Valor Financeiro: R$ 0,00 (Ref.: ${formatCurrency(orderFinalTotal)})`
+          : `${docType === 'orcamento' ? 'Orçamento' : 'Pedido de Venda'} ${orderNumber} criado por ${currentUser.name} para ${newOrder.customerName}. Total: ${formatCurrency(orderFinalTotal)}`
       );
 
       toast.success(
-        `${docType === 'orcamento' ? 'Orçamento' : 'Pedido de Venda'} ${orderNumber} gravado com sucesso!`,
-        'Documento Emitido'
+        `${isBonusMode ? 'Pedido de Bonificação' : docType === 'orcamento' ? 'Orçamento' : 'Pedido de Venda'} ${orderNumber} gravado com sucesso!`,
+        isBonusMode ? 'Bonificação Registrada' : 'Documento Emitido'
       );
 
       setCompletedOrder(newOrder);
       setShowReceiptModal(true);
 
-      // Limpa formulário para próximo pedido
+      // Limpa formulário para próximo pedido (retornando ao padrão Venda Normal)
       setCart([]);
+      setOrderKind('venda_normal');
       setDiscountInput('');
       setNotes('');
       setSelectedCustomerId('');
@@ -569,23 +598,44 @@ export const QuickOrderDesk: React.FC<QuickOrderDeskProps> = ({
           </div>
         </div>
 
-        {/* Alternância Venda vs Orçamento */}
-        <div className="flex items-center gap-1.5 bg-slate-100 p-1 rounded-xl self-start sm:self-auto border border-slate-200">
+        {/* Alternância Venda Normal vs Bonificação vs Orçamento */}
+        <div className="flex items-center gap-1.5 bg-slate-100 p-1 rounded-xl self-start sm:self-auto border border-slate-200 flex-wrap">
           <button
             type="button"
-            onClick={() => setDocType('venda')}
+            onClick={() => {
+              setDocType('venda');
+              setOrderKind('venda_normal');
+            }}
             className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold rounded-lg transition-all cursor-pointer ${
-              docType === 'venda'
+              docType === 'venda' && orderKind === 'venda_normal'
                 ? 'bg-emerald-600 text-white shadow-xs'
                 : 'text-slate-600 hover:text-slate-900'
             }`}
           >
             <CheckCircle2 size={13} />
-            <span>Venda</span>
+            <span>Venda Normal</span>
           </button>
           <button
             type="button"
-            onClick={() => setDocType('orcamento')}
+            onClick={() => {
+              setDocType('venda');
+              setOrderKind('bonificacao');
+            }}
+            className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold rounded-lg transition-all cursor-pointer ${
+              docType === 'venda' && orderKind === 'bonificacao'
+                ? 'bg-sky-600 text-white shadow-xs'
+                : 'text-slate-600 hover:text-sky-700'
+            }`}
+          >
+            <Gift size={13} />
+            <span>Bonificação</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setDocType('orcamento');
+              setOrderKind('venda_normal');
+            }}
             className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold rounded-lg transition-all cursor-pointer ${
               docType === 'orcamento'
                 ? 'bg-blue-600 text-white shadow-xs'
@@ -597,6 +647,16 @@ export const QuickOrderDesk: React.FC<QuickOrderDeskProps> = ({
           </button>
         </div>
       </div>
+
+      {/* Faixa de Identificação de Modo Bonificação */}
+      {isBonusMode && (
+        <div className="bg-sky-50 border-2 border-sky-300 rounded-xl p-3 flex items-center gap-2.5 text-xs text-sky-950">
+          <Gift size={18} className="text-sky-700 shrink-0" />
+          <div>
+            <strong className="uppercase">PEDIDO DE BONIFICAÇÃO ATIVO:</strong> Este pedido realizará a <strong>baixa de estoque por bonificação</strong> sem gerar faturamento, cobrança nem Contas a Receber.
+          </div>
+        </div>
+      )}
 
       {/* Grid Superior: Identificação do Cliente & Local de Saída */}
       <div className="grid grid-cols-1 md:grid-cols-12 gap-3">
@@ -918,226 +978,249 @@ export const QuickOrderDesk: React.FC<QuickOrderDeskProps> = ({
         )}
       </div>
 
-      {/* Condições Comerciais: Forma de Pagamento, Parcelas, Desconto Geral */}
+      {/* Condições Comerciais: Forma de Pagamento, Parcelas, Desconto Geral (ou Resumo de Bonificação) */}
       <div className="pt-2 border-t border-slate-100 space-y-3">
-        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3 text-xs">
-          {/* Forma de Pagamento */}
-          <div>
-            <div className="mb-1">
-              <label className="block text-slate-700 font-bold">Forma de Pagto *</label>
+        {isBonusMode ? (
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+            <div className="bg-sky-50 border border-sky-200 rounded-xl p-3 space-y-1">
+              <span className="font-black text-sky-900 uppercase block text-[11px]">Natureza: Bonificação</span>
+              <p className="text-sky-800 text-[11px]">
+                Sem cobrança financeira (R$ 0,00) • Não gera Contas a Receber • Realiza saída de estoque por bonificação.
+              </p>
             </div>
-            <select
-              value={paymentMethod}
-              onChange={(e) => setPaymentMethod(e.target.value as any)}
-              className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2 font-bold text-xs text-slate-800 focus:outline-hidden focus:bg-white focus:ring-1 focus:ring-blue-500 transition-all cursor-pointer"
-            >
-              <option value="">Selecione a forma de pagamento...</option>
-              <option value="pix">Pix</option>
-              <option value="dinheiro">Dinheiro</option>
-              <option value="cartao_credito">Cartão de Crédito</option>
-              <option value="boleto">Boleto Bancário</option>
-            </select>
-          </div>
-
-          {/* Prazo de Pagamento */}
-          <div>
-            <div className="mb-1">
-              <label className="block text-slate-700 font-bold">Prazo de Pagto *</label>
-            </div>
-            <select
-              value={paymentTerm}
-              onChange={(e) => {
-                const val = e.target.value;
-                setPaymentTerm(val);
-                if (val === 'a_vista') {
-                  setInstallments(1);
-                } else {
-                  const info = Database.resolvePaymentTermInfo(val, 1);
-                  if (info.termRecord) {
-                    setInstallments(info.installmentsCount);
-                  }
-                }
-              }}
-              className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2 font-bold text-xs text-slate-800 focus:outline-hidden focus:bg-white focus:ring-1 focus:ring-blue-500 transition-all cursor-pointer"
-            >
-              <option value="">Selecione o prazo de pagamento...</option>
-              {(() => {
-                const activeTerms = Database.getPaymentTermsList(currentCompany.id).filter(
-                  (t) => t.status === 'ativo'
-                );
-                const aVistaTerm = activeTerms.find(
-                  (t) => t.code.toUpperCase() === 'A_VISTA' || t.id === 'term-avista'
-                );
-                const otherTerms = activeTerms.filter(
-                  (t) => t.code.toUpperCase() !== 'A_VISTA' && t.id !== 'term-avista'
-                );
-                return (
-                  <>
-                    <option value="a_vista">
-                      {aVistaTerm ? aVistaTerm.name : 'À Vista / Imediato'}
-                    </option>
-                    <option value="parcelado">
-                      {installments > 1 ? `Parcelado (${installments}x de ${formatCurrency(orderFinalTotal / installments)})` : 'Parcelado (1x)'}
-                    </option>
-                    {otherTerms.map((term) => (
-                      <option key={term.id} value={term.id}>
-                        {term.name}
-                      </option>
-                    ))}
-                    <option value="personalizado">Personalizado</option>
-                  </>
-                );
-              })()}
-            </select>
-          </div>
-
-          {/* Se Boleto: Conta / Banco Emissor */}
-          {paymentMethod === 'boleto' && (
             <div>
-              <label className="block text-amber-900 font-bold mb-1 flex items-center gap-1">
-                <Barcode size={12} className="text-amber-700" />
-                Conta / Banco do Boleto:
-              </label>
-              <select
-                value={selectedBoletoAccountId}
-                onChange={(e) => setSelectedBoletoAccountId(e.target.value)}
-                className="w-full bg-white border border-amber-300 rounded-xl p-2 font-bold text-slate-800 focus:outline-hidden focus:ring-1 focus:ring-amber-500 shadow-2xs"
-              >
-                {Database.getBoletoAccounts(currentCompany.id).map((acc) => (
-                  <option key={acc.id} value={acc.id}>
-                    {acc.name} {acc.bankCode ? `(${acc.bankCode})` : ''} - Ag: {acc.agency || '-'} C/C: {acc.accountNumber || '-'}
-                  </option>
-                ))}
-              </select>
-            </div>
-          )}
-
-          {/* Se Cartão ou Boleto: Parcelas */}
-          {paymentMethod === 'cartao_credito' || paymentMethod === 'boleto' || paymentTerm === 'parcelado' || Database.resolvePaymentTermInfo(paymentTerm, installments).installmentsCount > 1 || installments > 1 ? (
-            <div>
-              <label className="block text-slate-600 font-semibold mb-1">
-                {paymentMethod === 'boleto' ? 'Parcelas Boleto:' : 'Parcelas:'}
-              </label>
-              <select
-                value={installments}
-                onChange={(e) => setInstallments(Number(e.target.value))}
-                className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2 font-medium text-slate-800"
-              >
-                {[1, 2, 3, 4, 5, 6, 10, 12].map((n) => (
-                  <option key={n} value={n}>
-                    {n}x de {formatCurrency(orderFinalTotal / n)}
-                  </option>
-                ))}
-              </select>
-            </div>
-          ) : (
-            <div>
-              <label className="block text-slate-600 font-semibold mb-1">Observações da Entrega:</label>
+              <label className="block text-slate-600 font-semibold mb-1">Motivo / Observações da Bonificação:</label>
               <input
                 type="text"
-                placeholder="Ex: Entregar à tarde, nota na caixa..."
+                placeholder="Ex: Cortesia promocional, brinde para cliente..."
                 value={notes}
                 onChange={(e) => setNotes(e.target.value)}
                 className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2 text-xs"
               />
             </div>
-          )}
+          </div>
+        ) : (
+          <>
+            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3 text-xs">
+              {/* Forma de Pagamento */}
+              <div>
+                <div className="mb-1">
+                  <label className="block text-slate-700 font-bold">Forma de Pagto *</label>
+                </div>
+                <select
+                  value={paymentMethod}
+                  onChange={(e) => setPaymentMethod(e.target.value as any)}
+                  className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2 font-bold text-xs text-slate-800 focus:outline-hidden focus:bg-white focus:ring-1 focus:ring-blue-500 transition-all cursor-pointer"
+                >
+                  <option value="">Selecione a forma de pagamento...</option>
+                  <option value="pix">Pix</option>
+                  <option value="dinheiro">Dinheiro</option>
+                  <option value="cartao_credito">Cartão de Crédito</option>
+                  <option value="boleto">Boleto Bancário</option>
+                </select>
+              </div>
 
-          {/* Desconto Geral no Total */}
-          <div>
-            <div className="flex items-center justify-between mb-1">
-              <label className="text-slate-600 font-semibold text-xs">Desconto Geral:</label>
-              <div className="inline-flex rounded-md bg-slate-200/80 p-0.5 border border-slate-300">
-                <button
-                  type="button"
-                  onClick={() => handleDiscountTypeChange('percent')}
-                  className={`px-2 py-0.5 text-xs font-bold rounded cursor-pointer transition-all ${
-                    discountType === 'percent'
-                      ? 'bg-emerald-600 text-white shadow-2xs'
-                      : 'text-slate-600 hover:text-slate-900'
-                  }`}
-                  title="Percentual (%)"
+              {/* Prazo de Pagamento */}
+              <div>
+                <div className="mb-1">
+                  <label className="block text-slate-700 font-bold">Prazo de Pagto *</label>
+                </div>
+                <select
+                  value={paymentTerm}
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    setPaymentTerm(val);
+                    if (val === 'a_vista') {
+                      setInstallments(1);
+                    } else {
+                      const info = Database.resolvePaymentTermInfo(val, 1);
+                      if (info.termRecord) {
+                        setInstallments(info.installmentsCount);
+                      }
+                    }
+                  }}
+                  className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2 font-bold text-xs text-slate-800 focus:outline-hidden focus:bg-white focus:ring-1 focus:ring-blue-500 transition-all cursor-pointer"
                 >
-                  %
-                </button>
-                <button
-                  type="button"
-                  onClick={() => handleDiscountTypeChange('value')}
-                  className={`px-2 py-0.5 text-xs font-bold rounded cursor-pointer transition-all ${
-                    discountType === 'value'
-                      ? 'bg-emerald-600 text-white shadow-2xs'
-                      : 'text-slate-600 hover:text-slate-900'
-                  }`}
-                  title="Valor em Reais (R$)"
-                >
-                  R$
-                </button>
+                  <option value="">Selecione o prazo de pagamento...</option>
+                  {(() => {
+                    const activeTerms = Database.getPaymentTermsList(currentCompany.id).filter(
+                      (t) => t.status === 'ativo'
+                    );
+                    const aVistaTerm = activeTerms.find(
+                      (t) => t.code.toUpperCase() === 'A_VISTA' || t.id === 'term-avista'
+                    );
+                    const otherTerms = activeTerms.filter(
+                      (t) => t.code.toUpperCase() !== 'A_VISTA' && t.id !== 'term-avista'
+                    );
+                    return (
+                      <>
+                        <option value="a_vista">
+                          {aVistaTerm ? aVistaTerm.name : 'À Vista / Imediato'}
+                        </option>
+                        <option value="parcelado">
+                          {installments > 1 ? `Parcelado (${installments}x de ${formatCurrency(orderFinalTotal / installments)})` : 'Parcelado (1x)'}
+                        </option>
+                        {otherTerms.map((term) => (
+                          <option key={term.id} value={term.id}>
+                            {term.name}
+                          </option>
+                        ))}
+                        <option value="personalizado">Personalizado</option>
+                      </>
+                    );
+                  })()}
+                </select>
+              </div>
+
+              {/* Se Boleto: Conta / Banco Emissor */}
+              {paymentMethod === 'boleto' && (
+                <div>
+                  <label className="block text-amber-900 font-bold mb-1 flex items-center gap-1">
+                    <Barcode size={12} className="text-amber-700" />
+                    Conta / Banco do Boleto:
+                  </label>
+                  <select
+                    value={selectedBoletoAccountId}
+                    onChange={(e) => setSelectedBoletoAccountId(e.target.value)}
+                    className="w-full bg-white border border-amber-300 rounded-xl p-2 font-bold text-slate-800 focus:outline-hidden focus:ring-1 focus:ring-amber-500 shadow-2xs"
+                  >
+                    {Database.getBoletoAccounts(currentCompany.id).map((acc) => (
+                      <option key={acc.id} value={acc.id}>
+                        {acc.name} {acc.bankCode ? `(${acc.bankCode})` : ''} - Ag: {acc.agency || '-'} C/C: {acc.accountNumber || '-'}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+
+              {/* Se Cartão ou Boleto: Parcelas */}
+              {paymentMethod === 'cartao_credito' || paymentMethod === 'boleto' || paymentTerm === 'parcelado' || Database.resolvePaymentTermInfo(paymentTerm, installments).installmentsCount > 1 || installments > 1 ? (
+                <div>
+                  <label className="block text-slate-600 font-semibold mb-1">
+                    {paymentMethod === 'boleto' ? 'Parcelas Boleto:' : 'Parcelas:'}
+                  </label>
+                  <select
+                    value={installments}
+                    onChange={(e) => setInstallments(Number(e.target.value))}
+                    className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2 font-medium text-slate-800"
+                  >
+                    {[1, 2, 3, 4, 5, 6, 10, 12].map((n) => (
+                      <option key={n} value={n}>
+                        {n}x de {formatCurrency(orderFinalTotal / n)}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              ) : (
+                <div>
+                  <label className="block text-slate-600 font-semibold mb-1">Observações da Entrega:</label>
+                  <input
+                    type="text"
+                    placeholder="Ex: Entregar à tarde, nota na caixa..."
+                    value={notes}
+                    onChange={(e) => setNotes(e.target.value)}
+                    className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2 text-xs"
+                  />
+                </div>
+              )}
+
+              {/* Desconto Geral no Total */}
+              <div>
+                <div className="flex items-center justify-between mb-1">
+                  <label className="text-slate-600 font-semibold text-xs">Desconto Geral:</label>
+                  <div className="inline-flex rounded-md bg-slate-200/80 p-0.5 border border-slate-300">
+                    <button
+                      type="button"
+                      onClick={() => handleDiscountTypeChange('percent')}
+                      className={`px-2 py-0.5 text-xs font-bold rounded cursor-pointer transition-all ${
+                        discountType === 'percent'
+                          ? 'bg-emerald-600 text-white shadow-2xs'
+                          : 'text-slate-600 hover:text-slate-900'
+                      }`}
+                      title="Percentual (%)"
+                    >
+                      %
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleDiscountTypeChange('value')}
+                      className={`px-2 py-0.5 text-xs font-bold rounded cursor-pointer transition-all ${
+                        discountType === 'value'
+                          ? 'bg-emerald-600 text-white shadow-2xs'
+                          : 'text-slate-600 hover:text-slate-900'
+                      }`}
+                      title="Valor em Reais (R$)"
+                    >
+                      R$
+                    </button>
+                  </div>
+                </div>
+
+                <div className="relative flex items-center">
+                  {discountType === 'value' && (
+                    <span className="absolute left-2.5 text-xs font-bold text-slate-500">R$</span>
+                  )}
+                  <input
+                    type="text"
+                    inputMode="decimal"
+                    value={discountInput}
+                    onChange={(e) => setDiscountInput(e.target.value.replace(/[^0-9.,]/g, ''))}
+                    placeholder={
+                      discountType === 'percent'
+                        ? `Ex: 5 (Máx ${currentUser.permissions.maxDiscountPercent}%)`
+                        : `Ex: 10,00 (Máx ${formatCurrency(maxAllowedVal)})`
+                    }
+                    className={`w-full bg-slate-50 border border-slate-200 rounded-xl p-2 font-medium text-right text-xs focus:outline-hidden focus:bg-white focus:ring-1 focus:ring-emerald-500 ${
+                      discountType === 'value' ? 'pl-8' : ''
+                    }`}
+                  />
+                </div>
+                {globalOrderDiscount > 0 && (
+                  <div className="text-[10px] text-emerald-600 font-semibold mt-0.5 text-right">
+                    {discountType === 'percent'
+                      ? `Equivalente a -${formatCurrency(globalOrderDiscount)}`
+                      : `Equivalente a ${effectiveGlobalDiscountPercent.toFixed(1).replace('.0', '')}%`}
+                  </div>
+                )}
               </div>
             </div>
 
-            <div className="relative flex items-center">
-              {discountType === 'value' && (
-                <span className="absolute left-2.5 text-xs font-bold text-slate-500">R$</span>
-              )}
-              <input
-                type="text"
-                inputMode="decimal"
-                value={discountInput}
-                onChange={(e) => setDiscountInput(e.target.value.replace(/[^0-9.,]/g, ''))}
-                placeholder={
-                  discountType === 'percent'
-                    ? `Ex: 5 (Máx ${currentUser.permissions.maxDiscountPercent}%)`
-                    : `Ex: 10,00 (Máx ${formatCurrency(maxAllowedVal)})`
-                }
-                className={`w-full bg-slate-50 border border-slate-200 rounded-xl p-2 font-medium text-right text-xs focus:outline-hidden focus:bg-white focus:ring-1 focus:ring-emerald-500 ${
-                  discountType === 'value' ? 'pl-8' : ''
-                }`}
-              />
-            </div>
-            {globalOrderDiscount > 0 && (
-              <div className="text-[10px] text-emerald-600 font-semibold mt-0.5 text-right">
-                {discountType === 'percent'
-                  ? `Equivalente a -${formatCurrency(globalOrderDiscount)}`
-                  : `Equivalente a ${effectiveGlobalDiscountPercent.toFixed(1).replace('.0', '')}%`}
+            {paymentMethod === 'cartao_credito' && (
+              <div>
+                <label className="block text-slate-600 font-semibold text-xs mb-1">Observações da Entrega:</label>
+                <input
+                  type="text"
+                  placeholder="Ex: Entregar à tarde, nota na caixa..."
+                  value={notes}
+                  onChange={(e) => setNotes(e.target.value)}
+                  className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2 text-xs"
+                />
               </div>
             )}
-          </div>
-        </div>
-
-        {paymentMethod === 'cartao_credito' && (
-          <div>
-            <label className="block text-slate-600 font-semibold text-xs mb-1">Observações da Entrega:</label>
-            <input
-              type="text"
-              placeholder="Ex: Entregar à tarde, nota na caixa..."
-              value={notes}
-              onChange={(e) => setNotes(e.target.value)}
-              className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2 text-xs"
-            />
-          </div>
+          </>
         )}
       </div>
 
       {/* Resumo Financeiro & Botão de Confirmação */}
-      <div className="bg-slate-900 text-white p-3.5 sm:p-4 rounded-xl space-y-2">
+      <div className={`text-white p-3.5 sm:p-4 rounded-xl space-y-2 ${isBonusMode ? 'bg-gradient-to-r from-sky-950 via-blue-950 to-sky-950 border border-sky-700' : 'bg-slate-900'}`}>
         <div className="flex justify-between text-xs text-slate-300">
-          <span>Subtotal dos Produtos:</span>
+          <span>{isBonusMode ? 'Valor de Referência dos Produtos:' : 'Subtotal dos Produtos:'}</span>
           <span className="font-mono">{formatCurrency(grossSubtotal)}</span>
         </div>
 
-        {totalDiscountAll > 0 && (
+        {!isBonusMode && totalDiscountAll > 0 && (
           <div className="flex justify-between text-xs text-rose-300">
             <span>Descontos Concedidos:</span>
             <span className="font-mono">-{formatCurrency(totalDiscountAll)}</span>
           </div>
         )}
 
-        <div className="flex items-center justify-between text-base sm:text-lg font-extrabold pt-2 border-t border-slate-800">
+        <div className={`flex items-center justify-between text-base sm:text-lg font-extrabold pt-2 border-t ${isBonusMode ? 'border-sky-800' : 'border-slate-800'}`}>
           <span className="uppercase text-xs sm:text-sm tracking-wider text-slate-300">
-            Total do Pedido:
+            {isBonusMode ? 'Total a Cobrar (Bonificação):' : 'Total do Pedido:'}
           </span>
-          <span className="text-emerald-400 font-mono text-xl sm:text-2xl">
-            {formatCurrency(orderFinalTotal)}
+          <span className={`font-mono text-xl sm:text-2xl ${isBonusMode ? 'text-sky-200' : 'text-emerald-400'}`}>
+            {formatCurrency(isBonusMode ? 0 : orderFinalTotal)}
           </span>
         </div>
       </div>
@@ -1145,19 +1228,23 @@ export const QuickOrderDesk: React.FC<QuickOrderDeskProps> = ({
       {/* Botão de Ação Principal */}
       <button
         type="button"
-        disabled={cart.length === 0 || !selectedCustomerId || !paymentMethod || !paymentTerm}
+        disabled={cart.length === 0 || !selectedCustomerId || (!isBonusMode && (!paymentMethod || !paymentTerm))}
         onClick={handlePreFinalizeOrder}
         className={`w-full py-3.5 rounded-xl font-black text-sm text-white shadow-md flex items-center justify-center gap-2 transition-all cursor-pointer ${
-          cart.length === 0 || !selectedCustomerId || !paymentMethod || !paymentTerm
+          cart.length === 0 || !selectedCustomerId || (!isBonusMode && (!paymentMethod || !paymentTerm))
             ? 'bg-slate-300 opacity-60 cursor-not-allowed'
+            : isBonusMode
+            ? 'bg-sky-600 hover:bg-sky-700 active:scale-[0.99]'
             : docType === 'orcamento'
             ? 'bg-blue-600 hover:bg-blue-700 active:scale-[0.99]'
             : 'bg-emerald-600 hover:bg-emerald-700 active:scale-[0.99]'
         }`}
       >
-        <Send size={18} />
+        {isBonusMode ? <Gift size={18} /> : <Send size={18} />}
         <span>
-          {docType === 'orcamento'
+          {isBonusMode
+            ? 'CONFIRMAR PEDIDO DE BONIFICAÇÃO'
+            : docType === 'orcamento'
             ? 'GERAR E COMPARTILHAR ORÇAMENTO'
             : 'CONFIRMAR PEDIDO DE VENDA'}
         </span>
@@ -1255,11 +1342,13 @@ export const QuickOrderDesk: React.FC<QuickOrderDeskProps> = ({
         customerName={selectedCustomer ? selectedCustomer.name : 'Consumidor Final (Não Identificado)'}
         customerDocument={selectedCustomer?.cpfCnpj}
         customerPhone={selectedCustomer?.whatsapp || selectedCustomer?.phone}
-        totalAmount={orderFinalTotal}
-        paymentMethod={paymentMethod || 'pix'}
-        paymentTerm={paymentTerm || 'a_vista'}
-        installments={installments}
+        totalAmount={isBonusMode ? 0 : orderFinalTotal}
+        paymentMethod={isBonusMode ? 'bonificacao' : paymentMethod || 'pix'}
+        paymentTerm={isBonusMode ? 'Sem Cobrança (Bonificação)' : paymentTerm || 'a_vista'}
+        installments={isBonusMode ? 0 : installments}
         itemsCount={cart.reduce((s, i) => s + i.quantity, 0)}
+        isBonus={isBonusMode}
+        referenceAmount={isBonusMode ? orderFinalTotal : undefined}
       />
 
       {/* Modal de Comprovante / Recibo do Pedido */}

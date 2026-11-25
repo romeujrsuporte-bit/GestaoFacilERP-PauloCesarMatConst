@@ -5157,6 +5157,10 @@ export class Database {
       globalOrderDiscountValue?: number;
     }
   ): DiscountAuthorizationRecord[] {
+    // Pedidos de Bonificação não geram cobrança nem faturamento comercial
+    if (order.orderKind === 'bonificacao') {
+      return [];
+    }
     const s = this.getState();
     const itemDiscountsSum = (order.items || []).reduce((sum, i) => sum + (i.discountValue || 0), 0);
     const inferredGlobalDiscount =

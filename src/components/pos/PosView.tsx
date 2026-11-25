@@ -50,6 +50,7 @@ import { PriceLookupModal } from '../common/PriceLookupModal';
 import { CashRegisterIcon } from '../common/icons/CashRegisterIcon';
 import { toast } from '../../services/toast';
 import { CustomerSearchCombobox } from '../orders/CustomerSearchCombobox';
+import { isBillableSaleOrder } from '../../utils/orderUtils';
 import {
   SaleObservationAlerts,
   SaleObservationAlertItem,
@@ -606,7 +607,7 @@ export const PosView: React.FC<PosViewProps> = ({
 
   // Métricas do Dashboard Informativo (Faturamento Vendas, Canais de Venda, Previsões Financeiras, Estoque Crítico)
   const companyOrders = dbState.orders.filter(
-    (o) => (!o.companyId || o.companyId === currentCompany.id) && o.type === 'venda' && o.status !== 'cancelado'
+    (o) => (!o.companyId || o.companyId === currentCompany.id) && isBillableSaleOrder(o)
   );
   const totalRevenue = companyOrders.reduce((s, o) => s + o.total, 0);
   const avgTicket = companyOrders.length > 0 ? totalRevenue / companyOrders.length : 0;

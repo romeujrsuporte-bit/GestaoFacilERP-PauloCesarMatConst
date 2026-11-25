@@ -233,12 +233,14 @@ export class StockEngine {
       case 'entrada_compra':
       case 'entrada_producao':
       case 'devolucao':
+      case 'estorno_bonificacao':
       case 'transferencia_entrada':
       case 'transferencia_empresa_entrada':
         updateItemBalance(targetProductId, movement.locationId, effectiveQuantity);
         break;
 
       case 'saida_venda':
+      case 'saida_bonificacao':
       case 'consumo_producao':
       case 'perda_avaria':
       case 'transferencia_saida':

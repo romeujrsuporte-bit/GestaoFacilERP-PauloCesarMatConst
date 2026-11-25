@@ -37,6 +37,11 @@ import {
   revokeDiscountAuthorization,
   validateOrderDiscounts,
 } from '../../services/discountControl';
+import {
+  isBonusOrder,
+  formatBonusStockExitNote,
+  formatBonusStockReversalNote,
+} from '../../utils/orderUtils';
 
 interface EditOrderModalProps {
   isOpen: boolean;
@@ -340,22 +345,26 @@ export const EditOrderModal: React.FC<EditOrderModalProps> = ({
     localStorage.setItem('omni_discount_type', newType);
   };
 
+  const isBonus = isBonusOrder(order);
+
   // Cálculos do Pedido
   const subtotal = items.reduce((sum, item) => sum + item.quantity * item.unitPrice, 0);
 
-  const parsedDiscountNum = Math.max(0, parseFloat(discountInput.replace(',', '.')) || 0);
+  const parsedDiscountNum = isBonus ? 0 : Math.max(0, parseFloat(discountInput.replace(',', '.')) || 0);
   const maxAllowedPercent = currentUser.permissions.maxDiscountPercent;
   const maxAllowedVal = (subtotal * maxAllowedPercent) / 100;
 
   let discountVal = 0;
-  if (discountType === 'percent') {
-    const safePercent = Math.min(maxAllowedPercent, parsedDiscountNum);
-    discountVal = (subtotal * safePercent) / 100;
-  } else {
-    discountVal = Math.min(subtotal, parsedDiscountNum);
+  if (!isBonus) {
+    if (discountType === 'percent') {
+      const safePercent = Math.min(maxAllowedPercent, parsedDiscountNum);
+      discountVal = (subtotal * safePercent) / 100;
+    } else {
+      discountVal = Math.min(subtotal, parsedDiscountNum);
+    }
   }
   const effectiveDiscountPercent = subtotal > 0 ? (discountVal / subtotal) * 100 : 0;
-  const finalTotal = Math.max(0, subtotal - discountVal);
+  const finalTotal = isBonus ? 0 : Math.max(0, subtotal - discountVal);
 
   const commitSaveOrder = (itemsToSave: OrderItem[], globalDiscountToSave: number) => {
     if (!order) return;
@@ -363,37 +372,46 @@ export const EditOrderModal: React.FC<EditOrderModalProps> = ({
     const nowIso = new Date().toISOString();
     const state = Database.getState();
     const saveSubtotal = itemsToSave.reduce((sum, item) => sum + item.quantity * item.unitPrice, 0);
-    const saveFinalTotal = Math.max(0, saveSubtotal - globalDiscountToSave);
+    const saveFinalTotal = isBonus ? 0 : Math.max(0, saveSubtotal - globalDiscountToSave);
 
     try {
-      const targetBoletoAccount = paymentMethod === 'boleto'
+      const targetBoletoAccount = !isBonus && paymentMethod === 'boleto'
         ? Database.getBoletoAccounts().find((a) => a.id === bankAccountId) || Database.getBoletoAccounts()[0]
         : undefined;
 
       const updatedOrderDraft: Order = {
         ...order,
+        orderKind: isBonus ? 'bonificacao' : order.orderKind || 'venda_normal',
         customerId: selectedCustomerId || undefined,
         customerName,
         customerPhone: customerPhone || undefined,
         customerCpfCnpj: customerCpfCnpj || undefined,
-        paymentMethod,
-        bankAccountId: targetBoletoAccount?.id,
-        bankAccountName: targetBoletoAccount?.name,
-        installmentsCount,
+        paymentMethod: isBonus ? 'bonificacao' : paymentMethod,
+        paymentTerm: isBonus ? 'Sem Cobrança (Bonificação)' : order.paymentTerm,
+        bankAccountId: isBonus ? undefined : targetBoletoAccount?.id,
+        bankAccountName: isBonus ? undefined : targetBoletoAccount?.name,
+        installmentsCount: isBonus ? 0 : installmentsCount,
         items: itemsToSave,
-        subtotal: saveSubtotal,
-        discountTotal: globalDiscountToSave,
+        subtotal: isBonus ? 0 : saveSubtotal,
+        discountTotal: isBonus ? 0 : globalDiscountToSave,
         total: saveFinalTotal,
+        referenceSubtotal: isBonus ? saveSubtotal : order.referenceSubtotal,
+        referenceTotal: isBonus ? saveSubtotal : order.referenceTotal,
+        receivedAmount: isBonus ? 0 : order.receivedAmount,
+        changeAmount: isBonus ? 0 : order.changeAmount,
+        financialGenerated: isBonus ? false : order.financialGenerated,
         notes: `${notes || ''} [Editado por ${currentUser.name} em ${new Date().toLocaleString('pt-BR')}]`,
         updatedAt: nowIso,
       };
 
       // Validação obrigatória na camada de persistência antes de alterar estoque ou financeiro
-      const validatedDiscountAuths = Database.validateOrderDiscountsForPersistence(updatedOrderDraft, {
-        saleSessionId: saleSessionIdRef.current,
-        existingOrder: order,
-        globalOrderDiscountValue: globalDiscountToSave,
-      });
+      const validatedDiscountAuths = isBonus
+        ? []
+        : Database.validateOrderDiscountsForPersistence(updatedOrderDraft, {
+            saleSessionId: saleSessionIdRef.current,
+            existingOrder: order,
+            globalOrderDiscountValue: globalDiscountToSave,
+          });
 
       // 1. Reajuste de Estoque (se o pedido original já baixou estoque)
       if (order.stockDeducted) {
@@ -405,22 +423,24 @@ export const EditOrderModal: React.FC<EditOrderModalProps> = ({
           const locId = oldItem.locationId || 'loc-comercial';
           const loc = state.stockLocations.find((l) => l.id === locId) || state.stockLocations[0];
           const { updatedBalances, createdMovement } = StockEngine.applyMovement(currentBalances, {
-            companyId: currentCompany.id,
+            companyId: order.companyId || currentCompany.id,
             productId: oldItem.productId,
             productCode: oldItem.productCode,
             productDescription: oldItem.description,
             locationId: loc.id,
             locationName: loc.name,
-            type: 'ajuste_inventario',
+            type: isBonus ? 'estorno_bonificacao' : 'ajuste_inventario',
             quantity: oldItem.quantity,
             unitCost: oldItem.unitCost,
             totalCost: oldItem.unitCost * oldItem.quantity,
-            originDocType: 'venda',
+            originDocType: isBonus ? 'bonificacao' : 'venda',
             originDocId: order.number,
             date: nowIso,
             userId: currentUser.id,
             userName: currentUser.name,
-            notes: `Estorno para reajuste/edição do pedido ${order.number}`,
+            notes: isBonus
+              ? formatBonusStockReversalNote(order.number, 'Reajuste por edição')
+              : `Estorno para reajuste/edição do pedido ${order.number}`,
           });
           currentBalances = updatedBalances;
           movements.push(createdMovement);
@@ -431,22 +451,24 @@ export const EditOrderModal: React.FC<EditOrderModalProps> = ({
           const locId = newItem.locationId || 'loc-comercial';
           const loc = state.stockLocations.find((l) => l.id === locId) || state.stockLocations[0];
           const { updatedBalances, createdMovement } = StockEngine.applyMovement(currentBalances, {
-            companyId: currentCompany.id,
+            companyId: order.companyId || currentCompany.id,
             productId: newItem.productId,
             productCode: newItem.productCode,
             productDescription: newItem.description,
             locationId: loc.id,
             locationName: loc.name,
-            type: 'saida_venda',
+            type: isBonus ? 'saida_bonificacao' : 'saida_venda',
             quantity: newItem.quantity,
             unitCost: newItem.unitCost,
             totalCost: newItem.unitCost * newItem.quantity,
-            originDocType: 'venda',
+            originDocType: isBonus ? 'bonificacao' : 'venda',
             originDocId: order.number,
             date: nowIso,
             userId: currentUser.id,
             userName: currentUser.name,
-            notes: `Saída recalculada por edição do pedido ${order.number}`,
+            notes: isBonus
+              ? formatBonusStockExitNote(order.number, 'Recalculada por edição')
+              : `Saída recalculada por edição do pedido ${order.number}`,
           });
           currentBalances = updatedBalances;
           movements.push(createdMovement);
@@ -456,8 +478,8 @@ export const EditOrderModal: React.FC<EditOrderModalProps> = ({
         state.stockMovements = [...movements, ...state.stockMovements];
       }
 
-      // 2. Reajuste de Títulos a Receber (se aplicável)
-      if (state.accountsReceivable) {
+      // 2. Reajuste de Títulos a Receber (NUNCA aplicável para pedidos de bonificação)
+      if (!isBonus && state.accountsReceivable) {
         const newInstCount = Math.max(1, installmentsCount);
         const valParcela = Number((saveFinalTotal / newInstCount).toFixed(2));
 
@@ -625,10 +647,15 @@ export const EditOrderModal: React.FC<EditOrderModalProps> = ({
       return;
     }
 
-    if (discountVal > maxAllowedVal + 0.01) {
+    if (!isBonus && discountVal > maxAllowedVal + 0.01) {
       alert(
         `Desconto não autorizado! Seu perfil permite no máximo ${maxAllowedPercent}% (${formatCurrency(maxAllowedVal)}).`
       );
+      return;
+    }
+
+    if (isBonus) {
+      commitSaveOrder(items, 0);
       return;
     }
 
@@ -647,22 +674,26 @@ export const EditOrderModal: React.FC<EditOrderModalProps> = ({
               <ShoppingCart size={20} />
             </div>
             <div>
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 flex-wrap">
                 <h3 className="font-extrabold text-base sm:text-lg text-slate-900">
-                  Editar {order.type === 'orcamento' ? 'Orçamento' : 'Pedido de Venda'}: {order.number}
+                  Editar {isBonus ? 'Pedido de Bonificação' : order.type === 'orcamento' ? 'Orçamento' : 'Pedido de Venda'}: {order.number}
                 </h3>
                 <span
                   className={`text-[10px] font-black uppercase tracking-wider px-2 py-0.5 rounded-full ${
-                    order.type === 'orcamento'
+                    isBonus
+                      ? 'bg-sky-100 text-sky-900 border border-sky-300'
+                      : order.type === 'orcamento'
                       ? 'bg-amber-100 text-amber-800'
                       : 'bg-emerald-100 text-emerald-800'
                   }`}
                 >
-                  {order.type}
+                  {isBonus ? 'BONIFICAÇÃO' : order.type}
                 </span>
               </div>
               <p className="text-xs text-slate-500">
-                Altere clientes, itens, quantidades, valores e descontos com recálculo automático.
+                {isBonus
+                  ? 'Operação sem cobrança financeira — alterações de itens ajustam apenas o estoque de bonificação.'
+                  : 'Altere clientes, itens, quantidades, valores e descontos com recálculo automático.'}
               </p>
             </div>
           </div>
@@ -729,60 +760,68 @@ export const EditOrderModal: React.FC<EditOrderModalProps> = ({
               />
             </div>
 
-            {/* Forma de Pagamento */}
+            {/* Forma de Pagamento (ou indicador de Bonificação) */}
             <div>
               <label className="block text-slate-700 font-bold mb-1 flex items-center gap-1">
                 <CreditCard size={13} />
-                <span>Forma de Pagamento:</span>
+                <span>{isBonus ? 'Natureza Financeira:' : 'Forma de Pagamento:'}</span>
               </label>
-              <div className="flex gap-1.5">
-                <select
-                  value={paymentMethod}
-                  onChange={(e) => setPaymentMethod(e.target.value as any)}
-                  className="w-full bg-white border border-slate-200 rounded-lg p-2 font-medium text-slate-800 focus:outline-hidden focus:ring-1 focus:ring-emerald-500"
-                >
-                  <option value="pix">Pix</option>
-                  <option value="dinheiro">Dinheiro</option>
-                  <option value="cartao_debito">Cartão de Débito</option>
-                  <option value="cartao_credito">Cartão de Crédito</option>
-                  <option value="boleto">Boleto Bancário</option>
-                  <option value="crediario">Crediário Próprio</option>
-                </select>
-
-                {(paymentMethod === 'cartao_credito' || paymentMethod === 'crediario' || paymentMethod === 'boleto') && (
-                  <select
-                    value={installmentsCount}
-                    onChange={(e) => setInstallmentsCount(Number(e.target.value))}
-                    className="w-20 bg-white border border-slate-200 rounded-lg p-2 font-bold text-slate-800 focus:outline-hidden"
-                    title="Quantidade de Parcelas"
-                  >
-                    {[1, 2, 3, 4, 5, 6, 10, 12].map((n) => (
-                      <option key={n} value={n}>
-                        {n}x
-                      </option>
-                    ))}
-                  </select>
-                )}
-              </div>
-
-              {paymentMethod === 'boleto' && (
-                <div className="mt-2 bg-amber-50/70 p-2 rounded-lg border border-amber-200">
-                  <label className="block text-[11px] text-amber-900 font-bold mb-1 flex items-center gap-1">
-                    <Barcode size={12} className="text-amber-700" />
-                    Conta / Banco Vinculado:
-                  </label>
-                  <select
-                    value={bankAccountId}
-                    onChange={(e) => setBankAccountId(e.target.value)}
-                    className="w-full bg-white border border-amber-300 rounded-md p-1.5 text-xs font-bold text-slate-800 cursor-pointer shadow-2xs"
-                  >
-                    {Database.getBoletoAccounts().map((acc) => (
-                      <option key={acc.id} value={acc.id}>
-                        {acc.name} {acc.bankCode ? `(${acc.bankCode})` : ''} - Ag: {acc.agency || '-'} C/C: {acc.accountNumber || '-'}
-                      </option>
-                    ))}
-                  </select>
+              {isBonus ? (
+                <div className="bg-sky-50 border border-sky-200 rounded-lg px-2.5 py-2 text-[11px] font-black text-sky-900 uppercase">
+                  BONIFICAÇÃO — SEM COBRANÇA
                 </div>
+              ) : (
+                <>
+                  <div className="flex gap-1.5">
+                    <select
+                      value={paymentMethod}
+                      onChange={(e) => setPaymentMethod(e.target.value as any)}
+                      className="w-full bg-white border border-slate-200 rounded-lg p-2 font-medium text-slate-800 focus:outline-hidden focus:ring-1 focus:ring-emerald-500"
+                    >
+                      <option value="pix">Pix</option>
+                      <option value="dinheiro">Dinheiro</option>
+                      <option value="cartao_debito">Cartão de Débito</option>
+                      <option value="cartao_credito">Cartão de Crédito</option>
+                      <option value="boleto">Boleto Bancário</option>
+                      <option value="crediario">Crediário Próprio</option>
+                    </select>
+
+                    {(paymentMethod === 'cartao_credito' || paymentMethod === 'crediario' || paymentMethod === 'boleto') && (
+                      <select
+                        value={installmentsCount}
+                        onChange={(e) => setInstallmentsCount(Number(e.target.value))}
+                        className="w-20 bg-white border border-slate-200 rounded-lg p-2 font-bold text-slate-800 focus:outline-hidden"
+                        title="Quantidade de Parcelas"
+                      >
+                        {[1, 2, 3, 4, 5, 6, 10, 12].map((n) => (
+                          <option key={n} value={n}>
+                            {n}x
+                          </option>
+                        ))}
+                      </select>
+                    )}
+                  </div>
+
+                  {paymentMethod === 'boleto' && (
+                    <div className="mt-2 bg-amber-50/70 p-2 rounded-lg border border-amber-200">
+                      <label className="block text-[11px] text-amber-900 font-bold mb-1 flex items-center gap-1">
+                        <Barcode size={12} className="text-amber-700" />
+                        Conta / Banco Vinculado:
+                      </label>
+                      <select
+                        value={bankAccountId}
+                        onChange={(e) => setBankAccountId(e.target.value)}
+                        className="w-full bg-white border border-amber-300 rounded-md p-1.5 text-xs font-bold text-slate-800 cursor-pointer shadow-2xs"
+                      >
+                        {Database.getBoletoAccounts().map((acc) => (
+                          <option key={acc.id} value={acc.id}>
+                            {acc.name} {acc.bankCode ? `(${acc.bankCode})` : ''} - Ag: {acc.agency || '-'} C/C: {acc.accountNumber || '-'}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
+                </>
               )}
             </div>
           </div>
@@ -1033,13 +1072,15 @@ export const EditOrderModal: React.FC<EditOrderModalProps> = ({
           {/* Resumo de Valores */}
           <div className="flex items-center gap-5 sm:gap-8 w-full sm:w-auto justify-between sm:justify-start">
             <div>
-              <span className="text-[10px] uppercase font-bold text-slate-400 block font-mono">Subtotal</span>
+              <span className="text-[10px] uppercase font-bold text-slate-400 block font-mono">
+                {isBonus ? 'Valor de Referência' : 'Subtotal'}
+              </span>
               <span className="text-sm sm:text-base font-extrabold font-mono text-slate-200">
                 {formatCurrency(subtotal)}
               </span>
             </div>
 
-            {discountVal > 0 && (
+            {!isBonus && discountVal > 0 && (
               <div>
                 <span className="text-[10px] uppercase font-bold text-rose-400 block font-mono">Desconto</span>
                 <span className="text-sm sm:text-base font-extrabold font-mono text-rose-400">
@@ -1049,10 +1090,10 @@ export const EditOrderModal: React.FC<EditOrderModalProps> = ({
             )}
 
             <div>
-              <span className="text-[10px] uppercase font-black text-emerald-400 block tracking-wider font-mono">
-                TOTAL DO PEDIDO
+              <span className={`text-[10px] uppercase font-black block tracking-wider font-mono ${isBonus ? 'text-sky-300' : 'text-emerald-400'}`}>
+                {isBonus ? 'TOTAL A COBRAR (BONIFICAÇÃO)' : 'TOTAL DO PEDIDO'}
               </span>
-              <span className="text-xl sm:text-2xl font-black font-mono text-emerald-400 tracking-tight">
+              <span className={`text-xl sm:text-2xl font-black font-mono tracking-tight ${isBonus ? 'text-sky-300' : 'text-emerald-400'}`}>
                 {formatCurrency(finalTotal)}
               </span>
             </div>

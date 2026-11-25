@@ -49,6 +49,7 @@ import { PWAInstallButton } from '../common/PWAInstallButton';
 import { toast } from '../../services/toast';
 import { FirebaseSyncService } from '../../services/firebaseSync';
 import { processLogoFile } from '../../services/imageUtils';
+import { isBillableSaleOrder } from '../../utils/orderUtils';
 
 export interface DashboardNavigateOptions {
   onlyCriticalStock?: boolean;
@@ -181,10 +182,10 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
     return map;
   }, [dbState.products]);
 
-  // Base de todos os pedidos da empresa
+  // Base de todos os pedidos faturáveis da empresa (exclui orçamentos, cancelados e bonificações)
   const companyOrdersAll = useMemo(() => {
     return dbState.orders.filter(
-      (o) => (!o.companyId || o.companyId === currentCompany.id) && o.type === 'venda' && o.status !== 'cancelado'
+      (o) => (!o.companyId || o.companyId === currentCompany.id) && isBillableSaleOrder(o)
     );
   }, [dbState.orders, currentCompany.id]);
 

@@ -24,6 +24,7 @@ import {
 import { Database } from '../../services/db';
 import { Company, Order, AccountPayable, StockMovement, Product } from '../../types';
 import { formatCurrency } from '../../services/pricingEngine';
+import { isBillableSaleOrder } from '../../utils/orderUtils';
 import { toast } from '../../services/toast';
 
 export interface DreItemDetail {
@@ -123,10 +124,9 @@ export const DreGerencialView: React.FC = () => {
     companies.forEach((c) => companyMap.set(c.id, c.name));
 
     // Filtrar pedidos no período
-    // Apenas pedidos de VENDA confirmados (não cancelados, não orçamentos)
+    // Apenas pedidos de VENDA faturáveis confirmados (não cancelados, não orçamentos, não bonificações)
     const validOrders = dbState.orders.filter((ord) => {
-      if (ord.type === 'orcamento') return false;
-      if (ord.status === 'cancelado') return false;
+      if (!isBillableSaleOrder(ord)) return false;
       const orderDate = (ord.createdAt || '').slice(0, 10);
       if (orderDate < startDate || orderDate > endDate) return false;
       return true;

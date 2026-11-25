@@ -58,6 +58,7 @@ import {
   StateItem,
 } from '../../types';
 import { formatCurrency, formatQuantity } from '../../services/pricingEngine';
+import { isBonusOrder } from '../../utils/orderUtils';
 import { toast } from '../../services/toast';
 import { FirebaseSyncService } from '../../services/firebaseSync';
 
@@ -730,10 +731,12 @@ export const ExpeditionView: React.FC<ExpeditionViewProps> = ({
         totalPrice: it.totalPrice,
       }));
 
-      const paymentStatus: 'pago_antecipado' | 'cobrar_na_entrega' =
-        ord.paymentMethod === 'dinheiro' || ord.paymentMethod === 'multiplo'
-          ? 'cobrar_na_entrega'
-          : 'pago_antecipado';
+      const isBonus = isBonusOrder(ord);
+      const paymentStatus: 'pago_antecipado' | 'cobrar_na_entrega' = isBonus
+        ? 'pago_antecipado'
+        : ord.paymentMethod === 'dinheiro' || ord.paymentMethod === 'multiplo'
+        ? 'cobrar_na_entrega'
+        : 'pago_antecipado';
 
       return {
         orderId: ord.id,
@@ -756,10 +759,10 @@ export const ExpeditionView: React.FC<ExpeditionViewProps> = ({
         marketArea: client?.marketArea || 'Geral',
         sellerName: client?.sellerName || ord.userName || 'Carlos Silva',
         sequence: startingSequence + idx + 1,
-        totalValue: ord.total,
-        paymentMethod: ord.paymentMethod,
+        totalValue: isBonus ? 0 : ord.total,
+        paymentMethod: isBonus ? 'bonificacao' : ord.paymentMethod,
         paymentStatus,
-        amountToCollect: paymentStatus === 'cobrar_na_entrega' ? ord.total : 0,
+        amountToCollect: isBonus ? 0 : paymentStatus === 'cobrar_na_entrega' ? ord.total : 0,
         deliveryStatus: 'pendente',
         previousOrderStatus:
           ord.preManifestStatus ||

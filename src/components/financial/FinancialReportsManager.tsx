@@ -28,6 +28,7 @@ import { Database } from '../../services/db';
 import { formatCurrency } from '../../services/pricingEngine';
 import { toast } from '../../services/toast';
 import { AccountReceivable, AccountPayable } from '../../types';
+import { isBillableSaleOrder } from '../../utils/orderUtils';
 
 export type FinancialReportType =
   | 'boletos_por_banco'
@@ -182,7 +183,7 @@ export const FinancialReportsManager: React.FC = () => {
   // =========================================================================
   const salesByPaymentMethod = useMemo(() => {
     const orders = dbState.orders.filter(
-      (o) => o.companyId === currentCompany.id && o.type === 'venda' && o.status !== 'cancelado'
+      (o) => o.companyId === currentCompany.id && isBillableSaleOrder(o)
     );
 
     const grouped: Record<string, { count: number; total: number; feeRate: number; feeAmount: number; netTotal: number }> = {};

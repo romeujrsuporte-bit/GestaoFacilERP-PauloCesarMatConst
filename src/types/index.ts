@@ -217,6 +217,8 @@ export type MovementType =
   | 'inicial'
   | 'entrada_compra'
   | 'saida_venda'
+  | 'saida_bonificacao'
+  | 'estorno_bonificacao'
   | 'consumo_producao'
   | 'entrada_producao'
   | 'ajuste_inventario'
@@ -241,7 +243,7 @@ export interface StockMovement {
   quantity: number;
   unitCost: number;
   totalCost: number;
-  originDocType: 'venda' | 'compra' | 'producao' | 'inventario' | 'transferencia' | 'avulso';
+  originDocType: 'venda' | 'bonificacao' | 'compra' | 'producao' | 'inventario' | 'transferencia' | 'avulso';
   originDocId: string;
   date: string;
   userId: string;
@@ -344,6 +346,7 @@ export interface Supplier {
 }
 
 export type OrderType = 'venda' | 'orcamento';
+export type OrderCommercialKind = 'venda_normal' | 'bonificacao';
 export type OrderOrigin = 'pdv' | 'externa_celular' | 'balcao' | 'retaguarda_pedido' | 'pedidos_venda';
 export type OrderStatus = 
   | 'em_elaboracao'
@@ -394,6 +397,7 @@ export interface Order {
   id: string;
   number: string;
   type: OrderType;
+  orderKind?: OrderCommercialKind; // 'venda_normal' (padrão) | 'bonificacao' (sem cobrança financeira, com saída de estoque)
   origin: OrderOrigin;
   companyId: string;
   customerId?: string;
@@ -408,7 +412,9 @@ export interface Order {
   freightTotal?: number;
   additionTotal?: number;
   total: number;
-  paymentMethod: 'dinheiro' | 'pix' | 'cartao_debito' | 'cartao_credito' | 'boleto' | 'crediario' | 'multiplo';
+  referenceSubtotal?: number; // Subtotal de referência dos itens em pedidos de bonificação (não compõe faturamento)
+  referenceTotal?: number; // Valor total de referência dos itens bonificados (não gera cobrança nem faturamento)
+  paymentMethod: 'dinheiro' | 'pix' | 'cartao_debito' | 'cartao_credito' | 'boleto' | 'crediario' | 'multiplo' | 'bonificacao';
   paymentTerm?: string;
   multiplePayments?: {
     method: string;

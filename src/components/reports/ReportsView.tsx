@@ -13,12 +13,15 @@ import {
   Percent,
   Printer,
   FileText,
-  Building2
+  Building2,
+  Gift
 } from 'lucide-react';
 import { Database } from '../../services/db';
 import { StockEngine } from '../../services/stockEngine';
 import { formatCurrency, formatQuantity } from '../../services/pricingEngine';
+import { isBillableSaleOrder } from '../../utils/orderUtils';
 import { A4ReportsPreviewModal, A4ReportType } from './A4ReportsPreviewModal';
+import { BonificationsReportPanel } from './BonificationsReportPanel';
 
 export const ReportsView: React.FC = () => {
   const [dbState, setDbState] = useState(Database.getState());
@@ -30,16 +33,16 @@ export const ReportsView: React.FC = () => {
   const currentCompany = Database.getCurrentCompany();
   const canViewTotalRevenue = Database.canCurrentUserView('totalRevenue');
 
-  const [reportTab, setReportTab] = useState<'vendas' | 'estoque' | 'financeiro' | 'producao'>('vendas');
+  const [reportTab, setReportTab] = useState<'vendas' | 'bonificacoes' | 'estoque' | 'financeiro' | 'producao'>('vendas');
   const [selectedCompanyFilter, setSelectedCompanyFilter] = useState<string>(currentCompany.id);
   const [a4ReportModal, setA4ReportModal] = useState<A4ReportType | null>(null);
 
   const companies = dbState.companies || [];
 
-  // Vendas da Empresa Selecionada ou Consolidado de Todas
+  // Vendas faturáveis da Empresa Selecionada ou Consolidado de Todas (exclui bonificações)
   const companyOrders = dbState.orders.filter((o) => {
     if (selectedCompanyFilter !== 'todas' && o.companyId !== selectedCompanyFilter) return false;
-    return o.type === 'venda' && o.status !== 'cancelado';
+    return isBillableSaleOrder(o);
   });
 
   const totalRevenue = companyOrders.reduce((s, o) => s + o.total, 0);
@@ -118,18 +121,27 @@ export const ReportsView: React.FC = () => {
             </select>
           </div>
 
-          <div className="flex bg-slate-100 p-1 rounded-xl text-xs font-bold">
+          <div className="flex bg-slate-100 p-1 rounded-xl text-xs font-bold overflow-x-auto">
             <button
               onClick={() => setReportTab('vendas')}
-              className={`px-3 py-1.5 rounded-lg transition-colors ${
+              className={`px-3 py-1.5 rounded-lg transition-colors whitespace-nowrap cursor-pointer ${
                 reportTab === 'vendas' ? 'bg-white text-indigo-700 shadow-xs' : 'text-slate-600 hover:text-slate-900'
               }`}
             >
               Vendas & Canais
             </button>
             <button
+              onClick={() => setReportTab('bonificacoes')}
+              className={`flex items-center gap-1 px-3 py-1.5 rounded-lg transition-colors whitespace-nowrap cursor-pointer ${
+                reportTab === 'bonificacoes' ? 'bg-sky-600 text-white shadow-xs' : 'text-sky-700 hover:bg-sky-50'
+              }`}
+            >
+              <Gift size={13} />
+              <span>Bonificações</span>
+            </button>
+            <button
               onClick={() => setReportTab('estoque')}
-              className={`px-3 py-1.5 rounded-lg transition-colors ${
+              className={`px-3 py-1.5 rounded-lg transition-colors whitespace-nowrap cursor-pointer ${
                 reportTab === 'estoque' ? 'bg-white text-indigo-700 shadow-xs' : 'text-slate-600 hover:text-slate-900'
               }`}
             >
@@ -137,7 +149,7 @@ export const ReportsView: React.FC = () => {
             </button>
             <button
               onClick={() => setReportTab('producao')}
-              className={`px-3 py-1.5 rounded-lg transition-colors ${
+              className={`px-3 py-1.5 rounded-lg transition-colors whitespace-nowrap cursor-pointer ${
                 reportTab === 'producao' ? 'bg-white text-indigo-700 shadow-xs' : 'text-slate-600 hover:text-slate-900'
               }`}
             >
@@ -145,21 +157,28 @@ export const ReportsView: React.FC = () => {
             </button>
           </div>
 
-          <button
-            type="button"
-            onClick={() => {
-              if (reportTab === 'estoque') setA4ReportModal('inventario');
-              else if (reportTab === 'producao') setA4ReportModal('op_modelo');
-              else setA4ReportModal('comissoes_vendedores');
-            }}
-            className="flex items-center gap-1.5 px-3 py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs rounded-xl shadow-xs transition-colors cursor-pointer"
-            title="Visualizar e imprimir este relatório no formato executivo em Folha A4"
-          >
-            <Printer size={14} />
-            <span>Imprimir em Folha A4</span>
-          </button>
+          {reportTab !== 'bonificacoes' && (
+            <button
+              type="button"
+              onClick={() => {
+                if (reportTab === 'estoque') setA4ReportModal('inventario');
+                else if (reportTab === 'producao') setA4ReportModal('op_modelo');
+                else setA4ReportModal('comissoes_vendedores');
+              }}
+              className="flex items-center gap-1.5 px-3 py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs rounded-xl shadow-xs transition-colors cursor-pointer"
+              title="Visualizar e imprimir este relatório no formato executivo em Folha A4"
+            >
+              <Printer size={14} />
+              <span>Imprimir em Folha A4</span>
+            </button>
+          )}
         </div>
       </div>
+
+      {/* ABA BONIFICAÇÕES */}
+      {reportTab === 'bonificacoes' && (
+        <BonificationsReportPanel defaultCompanyId={selectedCompanyFilter} />
+      )}
 
       {/* ABA 1: VENDAS & CANAIS */}
       {reportTab === 'vendas' && (

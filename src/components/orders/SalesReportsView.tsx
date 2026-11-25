@@ -24,13 +24,16 @@ import {
   Info,
   Store,
   UserCheck,
+  Gift,
 } from 'lucide-react';
 import { Database } from '../../services/db';
 import { formatCurrency, formatQuantity } from '../../services/pricingEngine';
 import { Order, Product, Customer, Supplier } from '../../types';
 import { toast } from '../../services/toast';
+import { isBillableSaleOrder } from '../../utils/orderUtils';
+import { BonificationsReportPanel } from '../reports/BonificationsReportPanel';
 
-type AbcReportTab = 'abc_overview' | 'abc_produtos' | 'abc_clientes' | 'abc_fornecedores';
+type AbcReportTab = 'abc_overview' | 'abc_produtos' | 'abc_clientes' | 'abc_fornecedores' | 'bonificacoes';
 type AbcClass = 'A' | 'B' | 'C';
 
 interface AbcRow {
@@ -321,10 +324,10 @@ export const SalesReportsView: React.FC = () => {
     setProductSearch('');
   };
 
-  // Pedidos filtrados em nível de cabeçalho
+  // Pedidos filtrados em nível de cabeçalho (somente vendas faturáveis, excluindo bonificações)
   const filteredOrders = useMemo(() => {
     return (dbState.orders || []).filter((order: Order) => {
-      if (order.type !== 'venda' || order.status === 'cancelado') return false;
+      if (!isBillableSaleOrder(order)) return false;
       if (companyFilter !== 'todas' && order.companyId !== companyFilter) return false;
 
       const orderIsoDay = (order.createdAt || '').slice(0, 10);
@@ -635,6 +638,7 @@ export const SalesReportsView: React.FC = () => {
       abc_produtos: 'Curva_ABC_Produtos',
       abc_clientes: 'Curva_ABC_Clientes',
       abc_fornecedores: 'Curva_ABC_Fornecedores',
+      bonificacoes: 'Relatorio_Bonificacoes',
     };
 
     const sheetData = currentRows.map((row, idx) => ({
@@ -732,7 +736,7 @@ export const SalesReportsView: React.FC = () => {
             </div>
           </div>
 
-          {activeTab !== 'abc_overview' && (
+          {activeTab !== 'abc_overview' && activeTab !== 'bonificacoes' && (
             <div className="flex items-center flex-wrap gap-2">
               <button
                 type="button"
@@ -806,6 +810,19 @@ export const SalesReportsView: React.FC = () => {
           >
             <Truck size={14} />
             <span>Curva ABC de Fornecedores</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setActiveTab('bonificacoes')}
+            className={`flex items-center gap-1.5 px-3.5 py-2 rounded-lg whitespace-nowrap transition-all cursor-pointer ${
+              activeTab === 'bonificacoes'
+                ? 'bg-sky-600 text-white shadow-xs font-extrabold'
+                : 'text-sky-700 hover:bg-sky-50'
+            }`}
+          >
+            <Gift size={14} />
+            <span>Bonificações</span>
           </button>
         </div>
       </div>
@@ -960,9 +977,16 @@ export const SalesReportsView: React.FC = () => {
       )}
 
       {/* ======================================================== */}
+      {/* ABA 5: RELATÓRIO DEDICADO DE BONIFICAÇÕES                */}
+      {/* ======================================================== */}
+      {activeTab === 'bonificacoes' && (
+        <BonificationsReportPanel defaultCompanyId={companyFilter} />
+      )}
+
+      {/* ======================================================== */}
       {/* ABAS 2, 3 E 4: FILTROS + RELATÓRIO DE CURVA ABC          */}
       {/* ======================================================== */}
-      {activeTab !== 'abc_overview' && (
+      {activeTab !== 'abc_overview' && activeTab !== 'bonificacoes' && (
         <div className="space-y-4">
           {/* Painel de Filtros Completo */}
           <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-xs space-y-3 no-print-abc">

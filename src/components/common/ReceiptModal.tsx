@@ -26,6 +26,7 @@ import { Order, Company } from '../../types';
 import { formatCurrency, formatQuantity } from '../../services/pricingEngine';
 import { Database } from '../../services/db';
 import { GestaoFacilLogo } from './AppLogo';
+import { isBonusOrder, getOrderReferenceSubtotal, getOrderReferenceTotal } from '../../utils/orderUtils';
 
 interface ReceiptModalProps {
   order: Order;
@@ -112,7 +113,14 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
     window.print();
   };
 
+  const isBonus = isBonusOrder(order);
+  const referenceSubtotal = getOrderReferenceSubtotal(order);
+  const referenceTotal = getOrderReferenceTotal(order);
+
   const formatPaymentMethodLabel = (method?: string) => {
+    if (isBonus || (method || '').toLowerCase() === 'bonificacao') {
+      return 'Bonificação (Sem Cobrança)';
+    }
     switch ((method || '').toLowerCase()) {
       case 'pix':
         return 'Pix';
@@ -134,6 +142,9 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
   };
 
   const formatPaymentTermLabel = (ord: Order) => {
+    if (isBonusOrder(ord)) {
+      return 'Sem Cobrança Financeira';
+    }
     let rawTerm = ord.paymentTerm || '';
     if (!rawTerm && ord.notes) {
       const match = ord.notes.match(/(?:Prazo de Pagamento|Prazo|Condi[çc][ãa]o)\s*:\s*([^|)\]]+)/i);
@@ -174,12 +185,21 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
     }, 0);
 
     let text = `*${activeCompany.tradeName || activeCompany.name}*\n`;
-    text += `${isQuote ? 'ORÇAMENTO COMERCIAL' : 'COMPROVANTE DE VENDA'} Nº: ${order.number}\n`;
+    text += `${
+      isBonus
+        ? '🎁 *PEDIDO DE BONIFICAÇÃO*'
+        : isQuote
+        ? 'ORÇAMENTO COMERCIAL'
+        : 'COMPROVANTE DE VENDA'
+    } Nº: ${order.number}\n`;
+    if (isBonus) {
+      text += `_Operação de Bonificação / Cortesia — Sem Cobrança Financeira_\n`;
+    }
     text += `Data: ${new Date(order.createdAt).toLocaleString('pt-BR')}\n`;
     text += `Vendedor: ${order.userName}\n`;
     text += `Cliente: ${order.customerName}\n`;
     text += `--------------------------------\n`;
-    text += `ITENS:\n`;
+    text += `ITENS${isBonus ? ' BONIFICADOS' : ''}:\n`;
     order.items.forEach((item, i) => {
       const effectiveUnitPrice =
         item.additionValue && item.additionValue > 0
@@ -187,18 +207,24 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
           : item.unitPrice;
       text += `${i + 1}. ${item.description}\n   ${formatQuantity(item.quantity)} ${item.unit} x ${formatCurrency(
         effectiveUnitPrice
-      )}${item.discountValue > 0 ? ` (-${formatCurrency(item.discountValue)})` : ''} = ${formatCurrency(
+      )}${!isBonus && item.discountValue > 0 ? ` (-${formatCurrency(item.discountValue)})` : ''} = ${formatCurrency(
         item.totalPrice
-      )}\n`;
+      )}${isBonus ? ' (Ref.)' : ''}\n`;
     });
     text += `--------------------------------\n`;
-    text += `Subtotal: ${formatCurrency(printableSubtotal || order.subtotal)}\n`;
-    if (order.discountTotal > 0) {
-      text += `Desconto: -${formatCurrency(order.discountTotal)}\n`;
+    if (isBonus) {
+      text += `Valor de Referência dos Itens: ${formatCurrency(referenceTotal || printableSubtotal)}\n`;
+      text += `*TOTAL FINANCEIRO A COBRAR: ${formatCurrency(0)}*\n`;
+      text += `Natureza: BONIFICAÇÃO — SEM COBRANÇA FINANCEIRA`;
+    } else {
+      text += `Subtotal: ${formatCurrency(printableSubtotal || order.subtotal)}\n`;
+      if (order.discountTotal > 0) {
+        text += `Desconto: -${formatCurrency(order.discountTotal)}\n`;
+      }
+      text += `*TOTAL: ${formatCurrency(order.total)}*\n`;
+      text += `Forma de Pagamento: ${paymentMethodLabel}\n`;
+      text += `Prazo de Pagamento: ${paymentTermLabel}`;
     }
-    text += `*TOTAL: ${formatCurrency(order.total)}*\n`;
-    text += `Forma de Pagamento: ${paymentMethodLabel}\n`;
-    text += `Prazo de Pagamento: ${paymentTermLabel}`;
     text += `\n\n_Documento emitido pelo GestãoFácil ERP_`;
     return encodeURIComponent(text);
   };
@@ -493,8 +519,16 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
 
                       {/* Bloco de Identificação do Documento */}
                       <div className="text-right sm:border-l sm:border-slate-200 sm:pl-4 space-y-0.5 shrink-0">
-                        <span className="inline-block px-2.5 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider bg-blue-100 text-blue-900 border border-blue-200">
-                          {isQuote ? 'Orçamento Comercial' : 'Pedido de Venda'}
+                        <span
+                          className={`inline-block px-2.5 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider border ${
+                            isBonus
+                              ? isBw
+                                ? 'bg-slate-900 text-white border-slate-900'
+                                : 'bg-sky-100 text-sky-900 border-sky-300'
+                              : 'bg-blue-100 text-blue-900 border-blue-200'
+                          }`}
+                        >
+                          {isBonus ? 'Pedido de Bonificação' : isQuote ? 'Orçamento Comercial' : 'Pedido de Venda'}
                         </span>
                         <div className="text-lg font-black font-mono text-slate-900">
                           Nº {order.number}
@@ -528,6 +562,20 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
                         </div>
                       </div>
                     </div>
+
+                    {/* Faixa de Identificação de Bonificação */}
+                    {isBonus && (
+                      <div
+                        className={`rounded-xl px-3.5 py-2 text-center text-[11px] font-black uppercase tracking-wider border-2 ${
+                          isBw
+                            ? 'bg-slate-100 text-slate-950 border-slate-900'
+                            : 'bg-sky-50 text-sky-950 border-sky-300'
+                        }`}
+                        style={{ printColorAdjust: 'exact', WebkitPrintColorAdjust: 'exact' }}
+                      >
+                        PEDIDO DE BONIFICAÇÃO — SEM COBRANÇA FINANCEIRA • SAÍDA EXCLUSIVA DE ESTOQUE
+                      </div>
+                    )}
 
                     {/* 3. DADOS DO CLIENTE & ENTREGA */}
                     <div className="bg-slate-50 border border-slate-200 rounded-xl p-3.5 space-y-2">
@@ -587,9 +635,9 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
                             <th className="py-2 px-2.5">Descrição do Produto</th>
                             <th className="py-2 px-2 text-center w-12">UN</th>
                             <th className="py-2 px-2.5 text-right w-16">Qtd</th>
-                            <th className="py-2 px-2.5 text-right w-24">Unitário</th>
+                            <th className="py-2 px-2.5 text-right w-24">{isBonus ? 'Unit. (Ref.)' : 'Unitário'}</th>
                             <th className="py-2 px-2 text-right w-20">Desconto</th>
-                            <th className="py-2 px-3 text-right w-24">Total Líquido</th>
+                            <th className="py-2 px-3 text-right w-24">{isBonus ? 'Total (Ref.)' : 'Total Líquido'}</th>
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-slate-200">
@@ -680,29 +728,50 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
                         className={`sm:col-span-5 rounded-xl p-3.5 space-y-1.5 text-xs shadow-sm ${
                           isBw
                             ? 'bg-slate-50 text-slate-950 border-2 border-slate-900'
+                            : isBonus
+                            ? 'bg-sky-950 text-white'
                             : 'bg-slate-900 text-white'
                         }`}
                       >
-                        <div className={`flex justify-between text-[11px] ${isBw ? 'text-slate-700' : 'text-slate-300'}`}>
-                          <span>Subtotal dos Itens:</span>
-                          <span className="font-mono">{formatCurrency(order.subtotal)}</span>
-                        </div>
-                        {order.discountTotal > 0 && (
-                          <div className={`flex justify-between text-[11px] ${isBw ? 'text-slate-800 font-semibold' : 'text-rose-300'}`}>
-                            <span>Desconto Total:</span>
-                            <span className="font-mono">-{formatCurrency(order.discountTotal)}</span>
-                          </div>
+                        {isBonus ? (
+                          <>
+                            <div className={`flex justify-between text-[11px] ${isBw ? 'text-slate-700' : 'text-sky-200'}`}>
+                              <span>Valor de Referência (Itens):</span>
+                              <span className="font-mono">{formatCurrency(referenceTotal || referenceSubtotal)}</span>
+                            </div>
+                            <div className={`flex justify-between text-[11px] ${isBw ? 'text-slate-700' : 'text-sky-200'}`}>
+                              <span>Natureza Financeira:</span>
+                              <span className="font-bold uppercase">Bonificação</span>
+                            </div>
+                            <div className={`pt-2 border-t flex justify-between items-center text-sm font-black ${isBw ? 'border-slate-900' : 'border-sky-700'}`}>
+                              <span className={`uppercase ${isBw ? 'text-slate-950' : 'text-sky-200'}`}>Total a Cobrar:</span>
+                              <span className={`text-base font-mono ${isBw ? 'text-slate-950' : 'text-emerald-300'}`}>{formatCurrency(0)}</span>
+                            </div>
+                          </>
+                        ) : (
+                          <>
+                            <div className={`flex justify-between text-[11px] ${isBw ? 'text-slate-700' : 'text-slate-300'}`}>
+                              <span>Subtotal dos Itens:</span>
+                              <span className="font-mono">{formatCurrency(order.subtotal)}</span>
+                            </div>
+                            {order.discountTotal > 0 && (
+                              <div className={`flex justify-between text-[11px] ${isBw ? 'text-slate-800 font-semibold' : 'text-rose-300'}`}>
+                                <span>Desconto Total:</span>
+                                <span className="font-mono">-{formatCurrency(order.discountTotal)}</span>
+                              </div>
+                            )}
+                            {(order as any).freightTotal > 0 && (
+                              <div className={`flex justify-between text-[11px] ${isBw ? 'text-slate-700' : 'text-slate-300'}`}>
+                                <span>Frete / Entrega:</span>
+                                <span className="font-mono">+{formatCurrency((order as any).freightTotal)}</span>
+                              </div>
+                            )}
+                            <div className={`pt-2 border-t flex justify-between items-center text-sm font-black ${isBw ? 'border-slate-900' : 'border-slate-700'}`}>
+                              <span className={`uppercase ${isBw ? 'text-slate-950' : 'text-amber-400'}`}>Total Geral:</span>
+                              <span className={`text-base font-mono ${isBw ? 'text-slate-950' : 'text-emerald-400'}`}>{formatCurrency(order.total)}</span>
+                            </div>
+                          </>
                         )}
-                        {(order as any).freightTotal > 0 && (
-                          <div className={`flex justify-between text-[11px] ${isBw ? 'text-slate-700' : 'text-slate-300'}`}>
-                            <span>Frete / Entrega:</span>
-                            <span className="font-mono">+{formatCurrency((order as any).freightTotal)}</span>
-                          </div>
-                        )}
-                        <div className={`pt-2 border-t flex justify-between items-center text-sm font-black ${isBw ? 'border-slate-900' : 'border-slate-700'}`}>
-                          <span className={`uppercase ${isBw ? 'text-slate-950' : 'text-amber-400'}`}>Total Geral:</span>
-                          <span className={`text-base font-mono ${isBw ? 'text-slate-950' : 'text-emerald-400'}`}>{formatCurrency(order.total)}</span>
-                        </div>
                       </div>
                     </div>
 
@@ -833,8 +902,13 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
 
                     {/* Dados do Pedido */}
                     <div className="py-2.5 border-b border-dashed border-slate-300 space-y-0.5 text-[11px]">
+                      {isBonus && (
+                        <div className="text-center font-black uppercase text-[10px] py-1 mb-1 bg-slate-900 text-white rounded">
+                          *** PEDIDO DE BONIFICAÇÃO ***
+                        </div>
+                      )}
                       <div className="flex justify-between font-bold">
-                        <span>{isQuote ? 'ORÇAMENTO' : 'VENDA'}: {order.number}</span>
+                        <span>{isBonus ? 'BONIFICAÇÃO' : isQuote ? 'ORÇAMENTO' : 'VENDA'}: {order.number}</span>
                         <span>{new Date(order.createdAt).toLocaleDateString('pt-BR')}</span>
                       </div>
                       <div className="flex justify-between text-slate-500">
@@ -886,32 +960,55 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
 
                     {/* Totais */}
                     <div className="py-2.5 border-b border-dashed border-slate-300 space-y-1 text-xs">
-                      <div className="flex justify-between text-slate-600">
-                        <span>Subtotal Itens:</span>
-                        <span>{formatCurrency(order.subtotal)}</span>
-                      </div>
-                      {order.discountTotal > 0 && (
-                        <div className="flex justify-between text-rose-600 font-medium">
-                          <span>Descontos:</span>
-                          <span>-{formatCurrency(order.discountTotal)}</span>
-                        </div>
+                      {isBonus ? (
+                        <>
+                          <div className="flex justify-between text-slate-600 text-[11px]">
+                            <span>Valor Referência:</span>
+                            <span>{formatCurrency(referenceTotal || referenceSubtotal)}</span>
+                          </div>
+                          <div className="flex justify-between font-bold text-sm pt-1 border-t border-slate-200">
+                            <span>TOTAL A COBRAR:</span>
+                            <span>{formatCurrency(0)}</span>
+                          </div>
+                        </>
+                      ) : (
+                        <>
+                          <div className="flex justify-between text-slate-600">
+                            <span>Subtotal Itens:</span>
+                            <span>{formatCurrency(order.subtotal)}</span>
+                          </div>
+                          {order.discountTotal > 0 && (
+                            <div className="flex justify-between text-rose-600 font-medium">
+                              <span>Descontos:</span>
+                              <span>-{formatCurrency(order.discountTotal)}</span>
+                            </div>
+                          )}
+                          <div className="flex justify-between font-bold text-sm pt-1 border-t border-slate-200">
+                            <span>VALOR TOTAL:</span>
+                            <span>{formatCurrency(order.total)}</span>
+                          </div>
+                        </>
                       )}
-                      <div className="flex justify-between font-bold text-sm pt-1 border-t border-slate-200">
-                        <span>VALOR TOTAL:</span>
-                        <span>{formatCurrency(order.total)}</span>
-                      </div>
                     </div>
 
                     {/* Pagamento */}
                     <div className="py-2.5 border-b border-dashed border-slate-300 space-y-1 text-[11px]">
-                      <div className="flex justify-between items-center bg-slate-100 px-1.5 py-0.5 rounded">
-                        <span className="font-semibold text-slate-700">Forma de Pagto:</span>
-                        <span className="font-black uppercase text-slate-900">{paymentMethodLabel}</span>
-                      </div>
-                      <div className="flex justify-between items-center bg-slate-100 px-1.5 py-0.5 rounded">
-                        <span className="font-semibold text-slate-700">Prazo de Pagto:</span>
-                        <span className="font-black uppercase text-slate-900">{paymentTermLabel}</span>
-                      </div>
+                      {isBonus ? (
+                        <div className="text-center bg-slate-100 px-2 py-1 rounded font-black uppercase text-slate-900 text-[10px]">
+                          BONIFICAÇÃO — SEM COBRANÇA FINANCEIRA
+                        </div>
+                      ) : (
+                        <>
+                          <div className="flex justify-between items-center bg-slate-100 px-1.5 py-0.5 rounded">
+                            <span className="font-semibold text-slate-700">Forma de Pagto:</span>
+                            <span className="font-black uppercase text-slate-900">{paymentMethodLabel}</span>
+                          </div>
+                          <div className="flex justify-between items-center bg-slate-100 px-1.5 py-0.5 rounded">
+                            <span className="font-semibold text-slate-700">Prazo de Pagto:</span>
+                            <span className="font-black uppercase text-slate-900">{paymentTermLabel}</span>
+                          </div>
+                        </>
+                      )}
                     </div>
 
                     {/* Rodapé Comercial */}
