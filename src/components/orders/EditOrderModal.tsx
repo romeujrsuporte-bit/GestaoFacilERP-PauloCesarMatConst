@@ -52,6 +52,46 @@ interface EditOrderModalProps {
   onSaved: (updatedOrder: Order) => void;
 }
 
+const formatDecimalPtBr = (value: number): string => {
+  const safe = Number.isFinite(value) ? value : 0;
+  return safe.toLocaleString('pt-BR', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
+};
+
+const formatEditableDecimalPtBr = (value: number): string => {
+  const safe = Number.isFinite(value) ? value : 0;
+  return safe.toFixed(2).replace('.', ',');
+};
+
+const sanitizeCurrencyInput = (raw: string): string => {
+  let normalized = raw.replace(/[^0-9.,]/g, '');
+  if (normalized.includes(',')) {
+    normalized = normalized.replace(/\./g, '');
+  } else if (normalized.includes('.')) {
+    const lastDot = normalized.lastIndexOf('.');
+    normalized =
+      normalized.slice(0, lastDot).replace(/\./g, '') +
+      ',' +
+      normalized.slice(lastDot + 1);
+  }
+  const commaIdx = normalized.indexOf(',');
+  if (commaIdx !== -1) {
+    const integerPart = normalized.slice(0, commaIdx);
+    const decimalPart = normalized.slice(commaIdx + 1).replace(/,/g, '').slice(0, 2);
+    return `${integerPart},${decimalPart}`;
+  }
+  return normalized;
+};
+
+const parseDecimalPtBr = (raw: string): number => {
+  const cleaned = raw.replace(/\./g, '').replace(',', '.').trim();
+  const parsed = parseFloat(cleaned);
+  if (!Number.isFinite(parsed) || parsed < 0) return 0;
+  return Number(parsed.toFixed(2));
+};
+
 export const EditOrderModal: React.FC<EditOrderModalProps> = ({
   isOpen,
   order,
@@ -84,7 +124,8 @@ export const EditOrderModal: React.FC<EditOrderModalProps> = ({
   const [addSearch, setAddSearch] = useState('');
   const [selectedProductId, setSelectedProductId] = useState('');
   const [addQuantity, setAddQuantity] = useState<string>('1');
-  const [addUnitPrice, setAddUnitPrice] = useState<string>('0');
+  const [addUnitPrice, setAddUnitPrice] = useState<string>('0,00');
+  const [itemPriceDrafts, setItemPriceDrafts] = useState<Record<string, string>>({});
   const [saleObservationAlerts, setSaleObservationAlerts] = useState<SaleObservationAlertItem[]>([]);
   const lastAlertedProductIdRef = useRef<string>('');
   const saleSessionIdRef = useRef<string>(generateSaleSessionId('EDIT'));
@@ -109,6 +150,7 @@ export const EditOrderModal: React.FC<EditOrderModalProps> = ({
 
     if (order) {
       setItems(order.items.map((it) => ({ ...it })));
+      setItemPriceDrafts({});
       setSelectedCustomerId(order.customerId || '');
       setCustomerName(order.customerName || '');
       setCustomerPhone(order.customerPhone || '');
@@ -151,7 +193,7 @@ export const EditOrderModal: React.FC<EditOrderModalProps> = ({
     const prod = companyProducts.find((p) => p.id === productId);
     if (prod) {
       const effPrice = StockEngine.getProductPriceForCompany(prod, targetCompanyId);
-      setAddUnitPrice(effPrice.toFixed(2).replace('.', ','));
+      setAddUnitPrice(formatDecimalPtBr(effPrice));
       setAddQuantity('1');
       const prodObsAlert = getProductSaleAlert(prod);
       if (prodObsAlert) {
@@ -176,10 +218,10 @@ export const EditOrderModal: React.FC<EditOrderModalProps> = ({
 
     const effPrice = StockEngine.getProductPriceForCompany(prod, targetCompanyId);
     const qty = Math.max(0.001, parseFloat(addQuantity.replace(',', '.')) || 1);
-    const parsedPrice = parseFloat(addUnitPrice.replace(',', '.'));
+    const parsedPrice = parseDecimalPtBr(addUnitPrice);
     const requestedPrice =
       canAlterUnitPrice && Number.isFinite(parsedPrice) && parsedPrice > 0
-        ? Math.round(parsedPrice * 100) / 100
+        ? parsedPrice
         : effPrice;
     const isDirectPriceOverride =
       canAlterUnitPrice && Math.abs(requestedPrice - effPrice) > 0.004;
@@ -251,7 +293,7 @@ export const EditOrderModal: React.FC<EditOrderModalProps> = ({
       // Reset campos de inclusão
       setSelectedProductId('');
       setAddQuantity('1');
-      setAddUnitPrice('0');
+      setAddUnitPrice('0,00');
       setAddSearch('');
     };
 
@@ -340,7 +382,8 @@ export const EditOrderModal: React.FC<EditOrderModalProps> = ({
 
   const handleUpdateItemPrice = (index: number, newPriceStr: string) => {
     if (!canAlterUnitPrice) return;
-    const rawVal = parseFloat(newPriceStr.replace(',', '.'));
+    const cleaned = newPriceStr.replace(/\./g, '').replace(',', '.').trim();
+    const rawVal = parseFloat(cleaned);
     if (!Number.isFinite(rawVal) || rawVal < 0) return;
     const val = Math.round(rawVal * 100) / 100;
     setItems((prev) =>
@@ -913,8 +956,19 @@ export const EditOrderModal: React.FC<EditOrderModalProps> = ({
                   <input
                     type="text"
                     inputMode="decimal"
+                    placeholder="0,00"
                     value={addUnitPrice}
-                    onChange={(e) => setAddUnitPrice(e.target.value.replace(/[^0-9.,]/g, ''))}
+                    onFocus={(e) => {
+                      const currentVal = parseDecimalPtBr(addUnitPrice);
+                      setAddUnitPrice(formatEditableDecimalPtBr(currentVal));
+                      const input = e.currentTarget;
+                      requestAnimationFrame(() => input.select());
+                    }}
+                    onChange={(e) => setAddUnitPrice(sanitizeCurrencyInput(e.target.value))}
+                    onBlur={() => {
+                      const numeric = parseDecimalPtBr(addUnitPrice);
+                      setAddUnitPrice(formatDecimalPtBr(numeric));
+                    }}
                     className="w-full bg-white border border-indigo-200 focus:border-indigo-500 rounded-lg p-2 text-xs font-bold text-right text-slate-900 font-mono focus:outline-hidden"
                     title="Alterar preço unitário antes de inserir (Administrador Geral / Gerente Geral)"
                   />
@@ -1004,7 +1058,15 @@ export const EditOrderModal: React.FC<EditOrderModalProps> = ({
                               {item.priceOverridden && item.originalUnitPrice !== undefined && (
                                 <button
                                   type="button"
-                                  onClick={() => handleUpdateItemPrice(idx, item.originalUnitPrice!.toFixed(2))}
+                                  onClick={() => {
+                                    const draftKey = item.id || `${item.productId}-${idx}`;
+                                    setItemPriceDrafts((prev) => {
+                                      const next = { ...prev };
+                                      delete next[draftKey];
+                                      return next;
+                                    });
+                                    handleUpdateItemPrice(idx, formatEditableDecimalPtBr(item.originalUnitPrice!));
+                                  }}
                                   className="p-1 text-slate-400 hover:text-indigo-600 rounded cursor-pointer"
                                   title={`Restaurar preço original (${formatCurrency(item.originalUnitPrice)})`}
                                 >
@@ -1012,11 +1074,46 @@ export const EditOrderModal: React.FC<EditOrderModalProps> = ({
                                 </button>
                               )}
                               <input
-                                type="number"
-                                min="0.01"
-                                step="0.01"
-                                value={item.unitPrice}
-                                onChange={(e) => handleUpdateItemPrice(idx, e.target.value)}
+                                type="text"
+                                inputMode="decimal"
+                                placeholder="0,00"
+                                value={
+                                  itemPriceDrafts[item.id || `${item.productId}-${idx}`] !== undefined
+                                    ? itemPriceDrafts[item.id || `${item.productId}-${idx}`]
+                                    : formatDecimalPtBr(item.unitPrice)
+                                }
+                                onFocus={(e) => {
+                                  const draftKey = item.id || `${item.productId}-${idx}`;
+                                  setItemPriceDrafts((prev) => ({
+                                    ...prev,
+                                    [draftKey]: formatEditableDecimalPtBr(item.unitPrice),
+                                  }));
+                                  const input = e.currentTarget;
+                                  requestAnimationFrame(() => input.select());
+                                }}
+                                onChange={(e) => {
+                                  const draftKey = item.id || `${item.productId}-${idx}`;
+                                  const sanitized = sanitizeCurrencyInput(e.target.value);
+                                  setItemPriceDrafts((prev) => ({ ...prev, [draftKey]: sanitized }));
+                                  if (sanitized.trim() !== '') {
+                                    handleUpdateItemPrice(idx, sanitized);
+                                  }
+                                }}
+                                onBlur={() => {
+                                  const draftKey = item.id || `${item.productId}-${idx}`;
+                                  const raw = itemPriceDrafts[draftKey];
+                                  if (raw !== undefined && raw.trim() !== '') {
+                                    const parsed = parseDecimalPtBr(raw);
+                                    if (parsed >= 0) {
+                                      handleUpdateItemPrice(idx, formatEditableDecimalPtBr(parsed));
+                                    }
+                                  }
+                                  setItemPriceDrafts((prev) => {
+                                    const next = { ...prev };
+                                    delete next[draftKey];
+                                    return next;
+                                  });
+                                }}
                                 className={`w-22 text-right font-bold border rounded p-1 font-mono ${
                                   item.priceOverridden
                                     ? 'bg-indigo-50 border-indigo-300 text-indigo-900'
