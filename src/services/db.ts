@@ -6146,6 +6146,49 @@ export class Database {
     return `VALE-${year}-${nextNum}`;
   }
 
+  /**
+   * Gera o próximo código sequencial de produto baseado no maior número já cadastrado
+   * para o prefixo informado (ex.: PROD-539 -> PROD-540, CX-005 -> CX-006).
+   */
+  public static generateNextProductCode(
+    prefix: string = 'PROD',
+    productsList?: Product[]
+  ): string {
+    const cleanPrefix = prefix.trim().toUpperCase();
+    const products = productsList ?? this.getState().products ?? [];
+    const existingCodes = new Set(
+      products.map((p) => String(p.code ?? '').trim().toUpperCase())
+    );
+
+    const escapedPrefix = cleanPrefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const pattern = new RegExp(`^${escapedPrefix}-(\\d+)$`, 'i');
+
+    let maxSeq = 0;
+    let padWidth = 3;
+
+    products.forEach((p) => {
+      const code = String(p.code ?? '').trim();
+      const match = code.match(pattern);
+      if (match) {
+        const digits = match[1];
+        const parsed = parseInt(digits, 10);
+        if (!Number.isNaN(parsed) && parsed > maxSeq) {
+          maxSeq = parsed;
+          padWidth = Math.max(3, digits.length);
+        }
+      }
+    });
+
+    let nextSeq = maxSeq + 1;
+    let candidate = `${cleanPrefix}-${String(nextSeq).padStart(padWidth, '0')}`;
+    while (existingCodes.has(candidate.toUpperCase())) {
+      nextSeq++;
+      candidate = `${cleanPrefix}-${String(nextSeq).padStart(padWidth, '0')}`;
+    }
+
+    return candidate;
+  }
+
   public static saveCustomerVoucher(
     data: Partial<CustomerVoucher> & {
       customerId: string;

@@ -183,6 +183,7 @@ export const ProductsView: React.FC = () => {
   const [costPriceInput, setCostPriceInput] = useState('0,00');
   const [salePriceInput, setSalePriceInput] = useState('0,00');
   const [maxDiscountInput, setMaxDiscountInput] = useState('0,00');
+  const [companyPriceInputs, setCompanyPriceInputs] = useState<Record<string, string>>({});
 
   const locations = dbState.stockLocations.filter((l) => l.companyId === currentCompany.id);
 
@@ -304,7 +305,7 @@ export const ProductsView: React.FC = () => {
   }, [filteredProducts, sortConfig, canViewCosts, currentCompany.id, dbState.stockBalances, dbState.stockLocations]);
 
   const handleOpenNew = () => {
-    const newCode = 'PROD-' + String(dbState.products.length + 101);
+    const newCode = Database.generateNextProductCode('PROD', dbState.products);
     setEditingProduct(null);
     setFormData({
       code: newCode,
@@ -336,11 +337,12 @@ export const ProductsView: React.FC = () => {
     setCostPriceInput(formatDecimalPtBr(0));
     setSalePriceInput(formatDecimalPtBr(0));
     setMaxDiscountInput(formatDecimalPtBr(0));
+    setCompanyPriceInputs({});
     setIsModalOpen(true);
   };
 
   const handleOpenNewMasterPack = () => {
-    const newCode = 'CX-' + String(dbState.products.length + 101);
+    const newCode = Database.generateNextProductCode('CX', dbState.products);
     const defaultAssoc = availableUnitProducts[0];
     const initialCost = defaultAssoc ? Number((defaultAssoc.costPrice * 10).toFixed(2)) : 0;
     const initialSale = defaultAssoc ? Number((defaultAssoc.salePrice * 10).toFixed(2)) : 0;
@@ -377,6 +379,7 @@ export const ProductsView: React.FC = () => {
     setCostPriceInput(formatDecimalPtBr(initialCost));
     setSalePriceInput(formatDecimalPtBr(initialSale));
     setMaxDiscountInput(formatDecimalPtBr(0));
+    setCompanyPriceInputs({});
     setIsModalOpen(true);
   };
 
@@ -416,6 +419,7 @@ export const ProductsView: React.FC = () => {
     setCostPriceInput(formatDecimalPtBr(initialCost));
     setSalePriceInput(formatDecimalPtBr(initialSale));
     setMaxDiscountInput(formatDecimalPtBr(0));
+    setCompanyPriceInputs({});
     setIsModalOpen(true);
   };
 
@@ -440,6 +444,15 @@ export const ProductsView: React.FC = () => {
     setCostPriceInput(formatDecimalPtBr(Number(product.costPrice || 0)));
     setSalePriceInput(formatDecimalPtBr(Number(product.salePrice || 0)));
     setMaxDiscountInput(formatDecimalPtBr(Number.isFinite(savedMaxDiscVal) && savedMaxDiscVal >= 0 ? savedMaxDiscVal : 0));
+    const initialBranchInputs: Record<string, string> = {};
+    if (product.companyPrices) {
+      Object.entries(product.companyPrices).forEach(([compId, entry]) => {
+        if (entry && typeof entry.salePrice === 'number' && entry.salePrice > 0) {
+          initialBranchInputs[compId] = formatDecimalPtBr(entry.salePrice);
+        }
+      });
+    }
+    setCompanyPriceInputs(initialBranchInputs);
     setIsModalOpen(true);
   };
 
@@ -1576,22 +1589,63 @@ export const ProductsView: React.FC = () => {
                                 <div className="inline-flex items-center gap-1 justify-end">
                                   <span className="text-slate-400 font-mono text-xs">R$</span>
                                   <input
-                                    type="number"
-                                    step="0.01"
-                                    min="0"
-                                    placeholder={formatCurrency(formData.salePrice || 0).replace('R$', '').trim()}
-                                    value={customPrice !== undefined ? customPrice : ''}
+                                    type="text"
+                                    inputMode="decimal"
+                                    placeholder={formatDecimalPtBr(Number(formData.salePrice || 0))}
+                                    value={
+                                      companyPriceInputs[comp.id] !== undefined
+                                        ? companyPriceInputs[comp.id]
+                                        : hasCustom
+                                        ? formatDecimalPtBr(customPrice!)
+                                        : ''
+                                    }
+                                    onFocus={(e) => {
+                                      if (hasCustom) {
+                                        setCompanyPriceInputs((prev) => ({
+                                          ...prev,
+                                          [comp.id]: formatEditableDecimalPtBr(customPrice!),
+                                        }));
+                                      }
+                                      const input = e.currentTarget;
+                                      requestAnimationFrame(() => input.select());
+                                    }}
                                     onChange={(e) => {
-                                      const val = e.target.value === '' ? undefined : parseFloat(e.target.value);
+                                      const sanitized = sanitizeCurrencyInput(e.target.value);
+                                      setCompanyPriceInputs((prev) => ({ ...prev, [comp.id]: sanitized }));
+                                      const numeric = sanitized.trim() === '' ? 0 : parseDecimalPtBr(sanitized);
                                       const nextCompanyPrices = { ...(formData.companyPrices || {}) };
-                                      if (val === undefined || isNaN(val) || val <= 0) {
+                                      if (sanitized.trim() === '' || numeric <= 0) {
                                         delete nextCompanyPrices[comp.id];
                                       } else {
                                         nextCompanyPrices[comp.id] = {
-                                          salePrice: val,
+                                          salePrice: numeric,
                                           updatedAt: new Date().toISOString(),
                                           updatedBy: currentUser.name,
                                         };
+                                      }
+                                      setFormData({ ...formData, companyPrices: nextCompanyPrices });
+                                    }}
+                                    onBlur={() => {
+                                      const raw = companyPriceInputs[comp.id] ?? '';
+                                      const numeric = raw.trim() === '' ? 0 : parseDecimalPtBr(raw);
+                                      const nextCompanyPrices = { ...(formData.companyPrices || {}) };
+                                      if (raw.trim() === '' || numeric <= 0) {
+                                        delete nextCompanyPrices[comp.id];
+                                        setCompanyPriceInputs((prev) => {
+                                          const next = { ...prev };
+                                          delete next[comp.id];
+                                          return next;
+                                        });
+                                      } else {
+                                        nextCompanyPrices[comp.id] = {
+                                          salePrice: numeric,
+                                          updatedAt: new Date().toISOString(),
+                                          updatedBy: currentUser.name,
+                                        };
+                                        setCompanyPriceInputs((prev) => ({
+                                          ...prev,
+                                          [comp.id]: formatDecimalPtBr(numeric),
+                                        }));
                                       }
                                       setFormData({ ...formData, companyPrices: nextCompanyPrices });
                                     }}
@@ -1630,6 +1684,11 @@ export const ProductsView: React.FC = () => {
                                     const nextCompanyPrices = { ...(formData.companyPrices || {}) };
                                     delete nextCompanyPrices[comp.id];
                                     setFormData({ ...formData, companyPrices: nextCompanyPrices });
+                                    setCompanyPriceInputs((prev) => {
+                                      const next = { ...prev };
+                                      delete next[comp.id];
+                                      return next;
+                                    });
                                   }}
                                   className="text-[10px] text-rose-600 hover:text-rose-800 font-bold hover:underline cursor-pointer"
                                   title="Remover preço próprio e voltar a herdar o preço da Matriz"

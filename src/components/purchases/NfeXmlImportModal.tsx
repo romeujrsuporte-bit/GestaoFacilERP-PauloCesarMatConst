@@ -700,12 +700,7 @@ export const NfeXmlImportModal: React.FC<NfeXmlImportModalProps> = ({
           let candidateCode = xmlItem.code ? xmlItem.code.trim() : '';
           const codeExists = candidateCode && state.products.some((p) => p.code.toLowerCase().trim() === candidateCode.toLowerCase());
           if (!candidateCode || codeExists) {
-            let seq = state.products.length + 1;
-            candidateCode = 'PROD-' + String(seq).padStart(4, '0');
-            while (state.products.some((p) => p.code.toLowerCase().trim() === candidateCode.toLowerCase())) {
-              seq++;
-              candidateCode = 'PROD-' + String(seq).padStart(4, '0');
-            }
+            candidateCode = Database.generateNextProductCode('PROD', state.products);
           }
 
           const isRawMaterial = classInfo.launchCode === '202' || classInfo.launchCode === '203';
