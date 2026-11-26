@@ -24,6 +24,7 @@ import {
   X,
   ShieldAlert,
   List,
+  Copy,
 } from 'lucide-react';
 import { Database } from '../../services/db';
 import { Product, ProductType, UnitOfMeasure, StockLocation, Company, CompanyPriceOverride, ProductMaxDiscountType } from '../../types';
@@ -135,6 +136,9 @@ export const ProductsView: React.FC = () => {
   // Modal de Cadastro / Edição
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingProduct, setEditingProduct] = useState<Product | null>(null);
+  const [duplicatedFromCode, setDuplicatedFromCode] = useState<string | null>(null);
+  const modalFormRef = useRef<HTMLFormElement | null>(null);
+  const descriptionInputRef = useRef<HTMLInputElement | null>(null);
 
   // Modal de Detalhes de Estoque por Local
   const [viewStockProduct, setViewStockProduct] = useState<Product | null>(null);
@@ -307,6 +311,7 @@ export const ProductsView: React.FC = () => {
   const handleOpenNew = () => {
     const newCode = Database.generateNextProductCode('PROD', dbState.products);
     setEditingProduct(null);
+    setDuplicatedFromCode(null);
     setFormData({
       code: newCode,
       referenceCode: '',
@@ -347,6 +352,7 @@ export const ProductsView: React.FC = () => {
     const initialCost = defaultAssoc ? Number((defaultAssoc.costPrice * 10).toFixed(2)) : 0;
     const initialSale = defaultAssoc ? Number((defaultAssoc.salePrice * 10).toFixed(2)) : 0;
     setEditingProduct(null);
+    setDuplicatedFromCode(null);
     setFormData({
       code: newCode,
       referenceCode: '',
@@ -389,6 +395,7 @@ export const ProductsView: React.FC = () => {
     const initialCost = Number((product.costPrice * units).toFixed(2));
     const initialSale = Number((product.salePrice * units).toFixed(2));
     setEditingProduct(null);
+    setDuplicatedFromCode(null);
     setFormData({
       code: newCode,
       referenceCode: '',
@@ -425,6 +432,7 @@ export const ProductsView: React.FC = () => {
 
   const handleOpenEdit = (product: Product) => {
     setEditingProduct(product);
+    setDuplicatedFromCode(null);
     const savedMaxDiscVal = Number(product.maxDiscountValue ?? 0);
     setFormData({
       ...product,
@@ -454,6 +462,55 @@ export const ProductsView: React.FC = () => {
     }
     setCompanyPriceInputs(initialBranchInputs);
     setIsModalOpen(true);
+  };
+
+  const handleDuplicateEditingProduct = () => {
+    if (!editingProduct) return;
+
+    const sourceCode = editingProduct.code;
+    const prefix = formData.isMasterPack ? 'CX' : 'PROD';
+    const nextCode = Database.generateNextProductCode(prefix, dbState.products);
+
+    const baseDescription = (formData.description || editingProduct.description || '').trim();
+    const duplicatedDescription = /\(duplicado\)$/i.test(baseDescription)
+      ? baseDescription
+      : `${baseDescription} (Duplicado)`;
+
+    const clonedCompanyPrices: Record<string, CompanyPriceOverride> = {};
+    if (formData.companyPrices) {
+      Object.entries(formData.companyPrices).forEach(([compId, override]) => {
+        if (override && typeof override.salePrice === 'number' && override.salePrice > 0) {
+          clonedCompanyPrices[compId] = {
+            ...override,
+            updatedAt: new Date().toISOString(),
+            updatedBy: currentUser.name,
+          };
+        }
+      });
+    }
+
+    const { id: _ignoredId, ...restFormData } = formData as Partial<Product> & { id?: string };
+
+    setEditingProduct(null);
+    setDuplicatedFromCode(sourceCode);
+    setFormData({
+      ...restFormData,
+      code: nextCode,
+      description: duplicatedDescription,
+      barcode: '',
+      companyPrices: clonedCompanyPrices,
+    });
+
+    toast.info(
+      `Novo cadastro preenchido a partir de ${sourceCode} com o código ${nextCode}. Ajuste a descrição e clique em Salvar Produto.`,
+      'Produto Duplicado'
+    );
+
+    requestAnimationFrame(() => {
+      modalFormRef.current?.scrollTo({ top: 0, behavior: 'smooth' });
+      descriptionInputRef.current?.focus();
+      descriptionInputRef.current?.select();
+    });
   };
 
   const handleSaveProduct = (e: React.FormEvent) => {
@@ -570,6 +627,12 @@ export const ProductsView: React.FC = () => {
         notes: (formData.notes || '').trim(),
         showSaleAlert: !!formData.showSaleAlert,
         companyPrices: formData.companyPrices || {},
+        supplierId: formData.supplierId,
+        taxPercent: formData.taxPercent,
+        operatingExpensesPercent: formData.operatingExpensesPercent,
+        salesCommissionPercent: formData.salesCommissionPercent,
+        otherCostsPercent: formData.otherCostsPercent,
+        profitMarginPercent: formData.profitMarginPercent,
         ...masterPackData,
         ...maxDiscountData,
       };
@@ -596,6 +659,7 @@ export const ProductsView: React.FC = () => {
     }
 
     Database.persist();
+    setDuplicatedFromCode(null);
     setIsModalOpen(false);
   };
 
@@ -1300,21 +1364,56 @@ export const ProductsView: React.FC = () => {
       {isModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-xs p-4 overflow-y-auto">
           <form
+            ref={modalFormRef}
             onSubmit={handleSaveProduct}
             className="bg-white rounded-2xl max-w-2xl w-full border border-slate-200 shadow-2xl p-6 space-y-4 max-h-[90vh] overflow-y-auto"
           >
-            <div className="flex justify-between items-center pb-3 border-b border-slate-100">
-              <h3 className="font-bold text-base text-slate-800">
-                {editingProduct ? 'Editar Produto' : 'Novo Produto'}
-              </h3>
-              <button
-                type="button"
-                onClick={() => setIsModalOpen(false)}
-                className="text-slate-400 hover:text-slate-600 p-1"
-              >
-                ✕
-              </button>
+            <div className="flex flex-wrap justify-between items-center gap-2 pb-3 border-b border-slate-100">
+              <div className="flex items-center gap-2 flex-wrap">
+                <h3 className="font-bold text-base text-slate-800">
+                  {editingProduct ? 'Editar Produto' : 'Novo Produto'}
+                </h3>
+                {!editingProduct && duplicatedFromCode && (
+                  <span className="inline-flex items-center gap-1 text-[11px] font-bold px-2 py-0.5 rounded-full bg-indigo-50 text-indigo-700 border border-indigo-200">
+                    <Copy size={11} />
+                    <span>Duplicado de {duplicatedFromCode}</span>
+                  </span>
+                )}
+              </div>
+              <div className="flex items-center gap-2">
+                {editingProduct && (
+                  <button
+                    type="button"
+                    onClick={handleDuplicateEditingProduct}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold text-indigo-700 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 rounded-lg transition-colors cursor-pointer"
+                    title="Criar um novo produto copiando os dados deste cadastro com próximo código sequencial"
+                  >
+                    <Copy size={13} />
+                    <span>Duplicar Produto</span>
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => {
+                    setDuplicatedFromCode(null);
+                    setIsModalOpen(false);
+                  }}
+                  className="text-slate-400 hover:text-slate-600 p-1 cursor-pointer"
+                >
+                  ✕
+                </button>
+              </div>
             </div>
+
+            {!editingProduct && duplicatedFromCode && (
+              <div className="flex items-center gap-2 px-3 py-2 rounded-xl bg-indigo-50/70 border border-indigo-200 text-xs text-indigo-900">
+                <Copy size={14} className="text-indigo-600 shrink-0" />
+                <span>
+                  Cadastrando novo produto duplicado de <strong>{duplicatedFromCode}</strong> com o código{' '}
+                  <strong className="font-mono">{formData.code}</strong>. O produto original não será alterado.
+                </span>
+              </div>
+            )}
 
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
               <div>
@@ -1356,6 +1455,7 @@ export const ProductsView: React.FC = () => {
               <div className="sm:col-span-2">
                 <label className="block font-bold text-slate-700 mb-1">Descrição do Produto *</label>
                 <input
+                  ref={descriptionInputRef}
                   type="text"
                   required
                   value={formData.description}
@@ -2153,7 +2253,10 @@ export const ProductsView: React.FC = () => {
             <div className="flex justify-end gap-2 pt-3 border-t border-slate-100">
               <button
                 type="button"
-                onClick={() => setIsModalOpen(false)}
+                onClick={() => {
+                  setDuplicatedFromCode(null);
+                  setIsModalOpen(false);
+                }}
                 className="px-4 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-100 rounded-lg"
               >
                 Cancelar
