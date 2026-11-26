@@ -28,6 +28,7 @@ import {
   RotateCcw,
 } from 'lucide-react';
 import { Database } from '../../services/db';
+import { FirebaseSyncService } from '../../services/firebaseSync';
 import { Product, Customer, Order, OrderCommercialKind, OrderItem } from '../../types';
 import { StockEngine } from '../../services/stockEngine';
 import { formatCurrency, formatQuantity } from '../../services/pricingEngine';
@@ -88,6 +89,9 @@ export const QuickOrderDesk: React.FC<QuickOrderDeskProps> = ({
   const [paymentMethod, setPaymentMethod] = useState<Order['paymentMethod'] | ''>('');
   const [paymentTerm, setPaymentTerm] = useState<string>('');
   const [showSaleConfirmationModal, setShowSaleConfirmationModal] = useState<boolean>(false);
+  const [isFinalizingOrder, setIsFinalizingOrder] = useState<boolean>(false);
+  const isFinalizingOrderRef = useRef<boolean>(false);
+  const submissionIdRef = useRef<string>(`QOD-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`);
   const [selectedBoletoAccountId, setSelectedBoletoAccountId] = useState<string>(() => {
     const boletoMethod = Database.getPaymentMethods().find((m) => m.type === 'boleto');
     if (boletoMethod?.defaultAccountId) return boletoMethod.defaultAccountId;
@@ -495,49 +499,101 @@ export const QuickOrderDesk: React.FC<QuickOrderDeskProps> = ({
   // ==========================================
   // FINALIZAR PEDIDO DE VENDA, BONIFICAÇÃO OU ORÇAMENTO (após confirmação na tela)
   // ==========================================
-  const handleFinalizeOrder = () => {
-    setShowSaleConfirmationModal(false);
+  const handleFinalizeOrder = async () => {
+    if (isFinalizingOrderRef.current) {
+      return;
+    }
 
     if (cart.length === 0) {
+      setShowSaleConfirmationModal(false);
       toast.warning('Adicione pelo menos 1 produto ao pedido.', 'Carrinho Vazio');
       return;
     }
     if (!selectedCustomerId || selectedCustomerId.trim() === '') {
+      setShowSaleConfirmationModal(false);
       toast.warning('A seleção do cliente é obrigatória para emitir o pedido.', 'Cliente Obrigatório');
       return;
     }
     if (!isBonusMode) {
       if (!paymentMethod) {
+        setShowSaleConfirmationModal(false);
         toast.warning('A Forma de Pagamento é obrigatória em todas as modalidades de venda.', 'Forma de Pagamento Obrigatória');
         return;
       }
       if (!paymentTerm || paymentTerm.trim() === '') {
+        setShowSaleConfirmationModal(false);
         toast.warning('O Prazo de Pagamento é obrigatório em todas as modalidades de venda.', 'Prazo Obrigatório');
         return;
       }
     }
 
+    const validatedCompany = Database.ensureValidCurrentCompanyForUser(currentUser, { skipPersist: true });
+    if (validatedCompany.status === 'inativo') {
+      setShowSaleConfirmationModal(false);
+      toast.error(
+        `A empresa "${validatedCompany.tradeName || validatedCompany.name}" está inativa e não pode registrar novos pedidos.`,
+        'Empresa Inativa'
+      );
+      return;
+    }
+
+    const submissionId = submissionIdRef.current;
+    const existingDuplicate = Database.findOrderBySubmissionId(submissionId);
+    if (existingDuplicate) {
+      isFinalizingOrderRef.current = true;
+      setIsFinalizingOrder(true);
+      try {
+        const retryResult = await FirebaseSyncService.commitCriticalOperation({
+          operationKey: `order:${existingDuplicate.id}`,
+          entityType: 'order',
+          entityId: existingDuplicate.id,
+          label: `Pedido ${existingDuplicate.number}`,
+        });
+        setShowSaleConfirmationModal(false);
+        if (retryResult.syncState === 'confirmed') {
+          toast.success(`Pedido ${existingDuplicate.number} confirmado no Firebase.`, 'Confirmado na Nuvem');
+        } else if (retryResult.syncState === 'pending_offline') {
+          toast.warning(retryResult.message, 'Aguardando Sincronização');
+        } else {
+          toast.error(retryResult.message, 'Falha na Sincronização');
+        }
+        submissionIdRef.current = `QOD-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+        setCompletedOrder(existingDuplicate);
+        setShowReceiptModal(true);
+        setCart([]);
+      } finally {
+        isFinalizingOrderRef.current = false;
+        setIsFinalizingOrder(false);
+      }
+      return;
+    }
+
+    isFinalizingOrderRef.current = true;
+    setIsFinalizingOrder(true);
+
     const prefix = isBonusMode ? 'BON' : docType === 'orcamento' ? 'ORC' : 'PED';
     const now = new Date();
-    const orderNumber = `${prefix}-${now.getFullYear()}-${String(dbState.orders.length + 1).padStart(5, '0')}`;
+    const orderNumber = Database.generateUniqueOrderNumber(prefix, 5);
     const nowIso = now.toISOString();
+    const uniqueOrderId = `ORD-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
 
     try {
-      let currentBalances = [...dbState.stockBalances];
+      const latestState = Database.getState();
+      let currentBalances = [...latestState.stockBalances];
       const createdMovements = [];
 
       // Se for VENDA ou BONIFICAÇÃO, realiza a baixa física de estoque
       if (isBonusMode || docType === 'venda') {
         for (const item of cart) {
           const loc =
-            dbState.stockLocations.find((l) => l.id === item.locationId) ||
-            dbState.stockLocations.find((l) => l.id === selectedLocationId) ||
-            dbState.stockLocations[0];
+            latestState.stockLocations.find((l) => l.id === item.locationId) ||
+            latestState.stockLocations.find((l) => l.id === selectedLocationId) ||
+            latestState.stockLocations[0];
 
           const { updatedBalances, createdMovement } = StockEngine.applyMovement(
             currentBalances,
             {
-              companyId: currentCompany.id,
+              companyId: validatedCompany.id,
               productId: item.productId,
               productCode: item.productCode,
               productDescription: item.description,
@@ -553,7 +609,7 @@ export const QuickOrderDesk: React.FC<QuickOrderDeskProps> = ({
               userId: currentUser.id,
               userName: currentUser.name,
               notes: isBonusMode
-                ? formatBonusStockExitNote(orderNumber, currentCompany.tradeName || currentCompany.name)
+                ? formatBonusStockExitNote(orderNumber, validatedCompany.tradeName || validatedCompany.name)
                 : `Pedido de Venda Retaguarda/Início emitido por ${currentUser.name}`,
             },
             { allowNegativeStock: Database.canSellNegativeStock() }
@@ -565,7 +621,7 @@ export const QuickOrderDesk: React.FC<QuickOrderDeskProps> = ({
       }
 
       const targetBoletoAccount = !isBonusMode && paymentMethod === 'boleto'
-        ? Database.getBoletoAccounts(currentCompany.id).find((a) => a.id === selectedBoletoAccountId) || Database.getBoletoAccounts(currentCompany.id)[0]
+        ? Database.getBoletoAccounts(validatedCompany.id).find((a) => a.id === selectedBoletoAccountId) || Database.getBoletoAccounts(validatedCompany.id)[0]
         : undefined;
 
       const termInfo = isBonusMode
@@ -577,12 +633,12 @@ export const QuickOrderDesk: React.FC<QuickOrderDeskProps> = ({
         : (paymentMethod as Order['paymentMethod']);
 
       const newOrder: Order = {
-        id: 'ORD-' + Date.now(),
+        id: uniqueOrderId,
         number: orderNumber,
         type: isBonusMode ? 'venda' : docType,
         orderKind: isBonusMode ? 'bonificacao' : 'venda_normal',
         origin: 'retaguarda_pedido',
-        companyId: currentCompany.id,
+        companyId: validatedCompany.id,
         customerId: selectedCustomerId || 'CLI-CONSUMIDOR',
         customerName: selectedCustomer ? selectedCustomer.name : 'Consumidor Final (Não Identificado)',
         customerPhone: selectedCustomer?.whatsapp || selectedCustomer?.phone,
@@ -611,12 +667,13 @@ export const QuickOrderDesk: React.FC<QuickOrderDeskProps> = ({
           : (notes ? `${notes} | ` : '') + `Prazo: ${termInfo.label}${installments > 1 && !/\d+\s*x/i.test(termInfo.label) ? ` (${installments}x)` : ''} • Pedido gerado via painel Início por ${currentUser.name}`,
         stockDeducted: isBonusMode || docType === 'venda',
         financialGenerated: !isBonusMode && docType === 'venda',
+        clientSubmissionId: submissionId,
         createdAt: nowIso,
         updatedAt: nowIso,
       };
 
       // Se venda normal a prazo, gerar Contas a Receber (NUNCA para Bonificação)
-      let updatedReceivables = [...dbState.accountsReceivable];
+      let updatedReceivables = [...latestState.accountsReceivable];
       if (!isBonusMode && docType === 'venda' && (paymentMethod === 'boleto' || installments > 1)) {
         const valParcela = Number((orderFinalTotal / installments).toFixed(2));
         for (let i = 1; i <= installments; i++) {
@@ -624,8 +681,8 @@ export const QuickOrderDesk: React.FC<QuickOrderDeskProps> = ({
           const due = new Date();
           due.setDate(due.getDate() + daysOffset);
           updatedReceivables.push({
-            id: 'REC-' + Date.now() + '-' + i,
-            companyId: currentCompany.id,
+            id: `REC-${Date.now()}-${i}-${Math.random().toString(36).slice(2, 5)}`,
+            companyId: validatedCompany.id,
             orderId: newOrder.id,
             orderNumber: newOrder.number,
             customerId: newOrder.customerId,
@@ -650,7 +707,7 @@ export const QuickOrderDesk: React.FC<QuickOrderDeskProps> = ({
         }
       }
 
-      // Salva no banco de dados
+      // Salva no banco de dados local e aguarda confirmação efetiva no Firebase Firestore
       const state = Database.getState();
       state.stockBalances = currentBalances;
       state.stockMovements = [...createdMovements, ...state.stockMovements];
@@ -667,10 +724,33 @@ export const QuickOrderDesk: React.FC<QuickOrderDeskProps> = ({
           : `${docType === 'orcamento' ? 'Orçamento' : 'Pedido de Venda'} ${orderNumber} criado por ${currentUser.name} para ${newOrder.customerName}. Total: ${formatCurrency(orderFinalTotal)}`
       );
 
-      toast.success(
-        `${isBonusMode ? 'Pedido de Bonificação' : docType === 'orcamento' ? 'Orçamento' : 'Pedido de Venda'} ${orderNumber} gravado com sucesso!`,
-        isBonusMode ? 'Bonificação Registrada' : 'Documento Emitido'
-      );
+      const docLabel = isBonusMode ? 'Pedido de Bonificação' : docType === 'orcamento' ? 'Orçamento' : 'Pedido de Venda';
+      const syncResult = await FirebaseSyncService.commitCriticalOperation({
+        operationKey: `order:${newOrder.id}`,
+        entityType: 'order',
+        entityId: newOrder.id,
+        label: `${docLabel} ${orderNumber}`,
+      });
+
+      submissionIdRef.current = `QOD-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+      setShowSaleConfirmationModal(false);
+
+      if (syncResult.syncState === 'confirmed') {
+        toast.success(
+          `${docLabel} ${orderNumber} salvo e confirmado no Firebase!`,
+          isBonusMode ? 'Bonificação Confirmada na Nuvem' : 'Confirmado no Firebase'
+        );
+      } else if (syncResult.syncState === 'pending_offline') {
+        toast.warning(
+          `${docLabel} ${orderNumber} salvo localmente (sem conexão). Será sincronizado automaticamente com o Firebase.`,
+          'Pendente de Sincronização'
+        );
+      } else {
+        toast.error(
+          `${docLabel} ${orderNumber} salvo localmente, mas falhou ao gravar no Firebase: ${syncResult.message}`,
+          'Falha na Sincronização'
+        );
+      }
 
       setCompletedOrder(newOrder);
       setShowReceiptModal(true);
@@ -688,7 +768,11 @@ export const QuickOrderDesk: React.FC<QuickOrderDeskProps> = ({
         onOrderFinished(newOrder);
       }
     } catch (err: any) {
-      alert('Erro ao gravar pedido: ' + err.message);
+      setShowSaleConfirmationModal(false);
+      toast.error('Erro ao gravar pedido: ' + err.message, 'Erro');
+    } finally {
+      isFinalizingOrderRef.current = false;
+      setIsFinalizingOrder(false);
     }
   };
 
@@ -1676,7 +1760,9 @@ export const QuickOrderDesk: React.FC<QuickOrderDeskProps> = ({
       {/* MODAL: TELA DE CONFIRMAÇÃO DA VENDA (NOME DO CLIENTE, TOTAL, FORMA E PRAZO DE PAGTO) */}
       <SaleConfirmationModal
         isOpen={showSaleConfirmationModal}
-        onClose={() => setShowSaleConfirmationModal(false)}
+        onClose={() => {
+          if (!isFinalizingOrder) setShowSaleConfirmationModal(false);
+        }}
         onConfirm={handleFinalizeOrder}
         modality="Pedido de Venda"
         customerName={selectedCustomer ? selectedCustomer.name : 'Consumidor Final (Não Identificado)'}
@@ -1687,6 +1773,9 @@ export const QuickOrderDesk: React.FC<QuickOrderDeskProps> = ({
         paymentTerm={isBonusMode ? 'Sem Cobrança (Bonificação)' : paymentTerm || 'a_vista'}
         installments={isBonusMode ? 0 : installments}
         itemsCount={cart.reduce((s, i) => s + i.quantity, 0)}
+        companyName={currentCompany.tradeName || currentCompany.name}
+        companyType={currentCompany.type}
+        isSubmitting={isFinalizingOrder}
         isBonus={isBonusMode}
         referenceAmount={isBonusMode ? orderFinalTotal : undefined}
       />

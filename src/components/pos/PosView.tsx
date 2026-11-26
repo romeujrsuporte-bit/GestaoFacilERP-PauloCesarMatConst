@@ -40,8 +40,10 @@ import {
   Clock,
   Ticket,
   Pencil,
+  Loader2,
 } from 'lucide-react';
 import { Database } from '../../services/db';
+import { FirebaseSyncService } from '../../services/firebaseSync';
 import { Product, Customer, Order, OrderItem, CashRegister, DiscountAuthorizationRecord } from '../../types';
 import { StockEngine } from '../../services/stockEngine';
 import { formatCurrency, formatQuantity } from '../../services/pricingEngine';
@@ -132,6 +134,8 @@ export const PosView: React.FC<PosViewProps> = ({
   const [paymentMethod, setPaymentMethod] = useState<'dinheiro' | 'pix' | 'cartao_debito' | 'cartao_credito' | 'boleto' | 'crediario' | ''>('');
   const [paymentTerm, setPaymentTerm] = useState<string>('');
   const [showSaleConfirmationModal, setShowSaleConfirmationModal] = useState<boolean>(false);
+  const [isFinalizingSale, setIsFinalizingSale] = useState<boolean>(false);
+  const isFinalizingSaleRef = useRef<boolean>(false);
   const [selectedBoletoAccountId, setSelectedBoletoAccountId] = useState<string>(() => {
     const boletoMethod = Database.getPaymentMethods().find((m) => m.type === 'boleto');
     if (boletoMethod?.defaultAccountId) return boletoMethod.defaultAccountId;
@@ -1603,47 +1607,99 @@ export const PosView: React.FC<PosViewProps> = ({
     });
   };
 
-  // Finalizar Venda Efetivamente (gravação no banco após confirmação do usuário)
-  const handleFinalizeSale = () => {
-    setShowSaleConfirmationModal(false);
+  // Finalizar Venda Efetivamente (gravação local + confirmação real no Firebase Firestore)
+  const handleFinalizeSale = async () => {
+    if (isFinalizingSaleRef.current) {
+      return;
+    }
 
     if (!activeCashRegister) {
-      alert('É necessário ter um caixa aberto para registrar vendas.');
+      setShowSaleConfirmationModal(false);
+      toast.warning('É necessário ter um caixa aberto para registrar vendas.', 'Caixa Fechado');
       setShowOpenRegisterModal(true);
       return;
     }
 
     if (cart.length === 0) {
+      setShowSaleConfirmationModal(false);
       toast.warning('Adicione pelo menos um produto antes de finalizar a venda.', 'Carrinho Vazio');
       return;
     }
 
     if (!paymentMethod) {
+      setShowSaleConfirmationModal(false);
       toast.warning('A Forma de Pagamento é obrigatória em todas as modalidades de venda.', 'Forma de Pagamento Obrigatória');
       return;
     }
 
     if (!paymentTerm || paymentTerm.trim() === '') {
+      setShowSaleConfirmationModal(false);
       toast.warning('O Prazo de Pagamento é obrigatório em todas as modalidades de venda.', 'Prazo Obrigatório');
       return;
     }
 
-    const orderNumber = `VD-${new Date().getFullYear()}-${String(dbState.orders.length + 1).padStart(5, '0')}`;
+    const validatedCompany = Database.ensureValidCurrentCompanyForUser(currentUser, { skipPersist: true });
+    if (validatedCompany.status === 'inativo') {
+      setShowSaleConfirmationModal(false);
+      toast.error(
+        `A empresa "${validatedCompany.tradeName || validatedCompany.name}" está inativa e não pode registrar vendas.`,
+        'Empresa Inativa'
+      );
+      return;
+    }
+
+    const submissionId = saleSessionIdRef.current;
+    const existingDuplicate = Database.findOrderBySubmissionId(submissionId);
+    if (existingDuplicate) {
+      isFinalizingSaleRef.current = true;
+      setIsFinalizingSale(true);
+      try {
+        const retryResult = await FirebaseSyncService.commitCriticalOperation({
+          operationKey: `order:${existingDuplicate.id}`,
+          entityType: 'order',
+          entityId: existingDuplicate.id,
+          label: `Venda PDV ${existingDuplicate.number}`,
+        });
+        setShowSaleConfirmationModal(false);
+        if (retryResult.syncState === 'confirmed') {
+          toast.success(`Venda ${existingDuplicate.number} confirmada no Firebase.`, 'Confirmado na Nuvem');
+        } else if (retryResult.syncState === 'pending_offline') {
+          toast.warning(retryResult.message, 'Aguardando Sincronização');
+        } else {
+          toast.error(retryResult.message, 'Falha na Sincronização');
+        }
+        saleSessionIdRef.current = generateSaleSessionId('PDV');
+        setLastFinishedOrder(existingDuplicate);
+        setShowReceiptModal(true);
+        setCart([]);
+      } finally {
+        isFinalizingSaleRef.current = false;
+        setIsFinalizingSale(false);
+      }
+      return;
+    }
+
+    isFinalizingSaleRef.current = true;
+    setIsFinalizingSale(true);
+
+    const orderNumber = Database.generateUniqueOrderNumber('VD', 5);
     const nowIso = new Date().toISOString();
+    const uniqueOrderId = `ORD-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
 
     try {
-      const boletoAccounts = Database.getBoletoAccounts(currentCompany.id);
+      const latestState = Database.getState();
+      const boletoAccounts = Database.getBoletoAccounts(validatedCompany.id);
       const targetBoletoAccount = paymentMethod === 'boleto'
         ? boletoAccounts.find((a) => a.id === selectedBoletoAccountId) || boletoAccounts[0] || Database.getBoletoAccounts()[0]
         : undefined;
 
       const termInfo = Database.resolvePaymentTermInfo(paymentTerm, installments);
       const newOrder: Order = {
-        id: 'ORD-' + Date.now(),
+        id: uniqueOrderId,
         number: orderNumber,
         type: 'venda',
         origin: 'pdv',
-        companyId: currentCompany.id,
+        companyId: validatedCompany.id,
         customerId: selectedCustomerId || undefined,
         customerName: selectedCustomer ? selectedCustomer.name : 'Consumidor Final (Não Identificado)',
         customerPhone: selectedCustomer?.phone || selectedCustomer?.whatsapp,
@@ -1664,17 +1720,18 @@ export const PosView: React.FC<PosViewProps> = ({
         stockDeducted: true,
         financialGenerated: true,
         notes: `Prazo de Pagamento: ${termInfo.label}${installments > 1 && !/\d+\s*x/i.test(termInfo.label) ? ` (${installments}x)` : ''}`,
+        clientSubmissionId: submissionId,
         createdAt: nowIso,
         updatedAt: nowIso,
       };
 
       // Bloqueio obrigatório na camada de persistência contra burla de desconto máximo por produto
       const validatedDiscountAuths = Database.validateOrderDiscountsForPersistence(newOrder, {
-        saleSessionId: saleSessionIdRef.current,
+        saleSessionId: submissionId,
         globalOrderDiscountValue: discountVal,
       });
 
-      let currentBalances = [...dbState.stockBalances];
+      let currentBalances = [...latestState.stockBalances];
       const movements = [];
 
       for (const item of cart) {
@@ -1686,7 +1743,7 @@ export const PosView: React.FC<PosViewProps> = ({
         const { updatedBalances, createdMovement } = StockEngine.applyMovement(
           currentBalances,
           {
-            companyId: currentCompany.id,
+            companyId: validatedCompany.id,
             productId: item.productId,
             productCode: item.productCode,
             productDescription: item.description,
@@ -1701,7 +1758,7 @@ export const PosView: React.FC<PosViewProps> = ({
             date: nowIso,
             userId: currentUser.id,
             userName: currentUser.name,
-            notes: `Venda no PDV Balcão ${orderNumber} (${currentCompany.tradeName || currentCompany.name})`,
+            notes: `Venda no PDV Balcão ${orderNumber} (${validatedCompany.tradeName || validatedCompany.name})`,
           },
           { allowNegativeStock: Database.canSellNegativeStock() }
         );
@@ -1711,7 +1768,7 @@ export const PosView: React.FC<PosViewProps> = ({
       }
 
       const finalizedOrder = Database.finalizeOrderDiscountAuthorizations(newOrder, validatedDiscountAuths, {
-        saleSessionId: saleSessionIdRef.current,
+        saleSessionId: submissionId,
         skipPersist: true,
       });
 
@@ -1724,14 +1781,14 @@ export const PosView: React.FC<PosViewProps> = ({
           ? 'venda_outros'
           : 'venda_cartao';
 
-      const updatedCashRegisters = dbState.cashRegisters.map((reg) => {
+      const updatedCashRegisters = latestState.cashRegisters.map((reg) => {
         if (reg.id === activeCashRegister.id) {
           return {
             ...reg,
             movements: [
               ...reg.movements,
               {
-                id: 'MOV-' + Date.now(),
+                id: `MOV-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
                 type: cashMovementType as any,
                 amount: total,
                 description: `Venda ${orderNumber} - ${finalizedOrder.customerName}`,
@@ -1745,7 +1802,7 @@ export const PosView: React.FC<PosViewProps> = ({
         return reg;
       });
 
-      let updatedReceivables = [...dbState.accountsReceivable];
+      let updatedReceivables = [...latestState.accountsReceivable];
       if (paymentMethod === 'crediario' || paymentMethod === 'boleto') {
         const installmentValue = Number((total / installments).toFixed(2));
         for (let i = 1; i <= installments; i++) {
@@ -1754,8 +1811,8 @@ export const PosView: React.FC<PosViewProps> = ({
           dueDate.setDate(dueDate.getDate() + daysOffset);
 
           updatedReceivables.push({
-            id: 'REC-' + Date.now() + '-' + i,
-            companyId: currentCompany.id,
+            id: `REC-${Date.now()}-${i}-${Math.random().toString(36).slice(2, 5)}`,
+            companyId: validatedCompany.id,
             orderId: finalizedOrder.id,
             orderNumber: finalizedOrder.number,
             customerId: selectedCustomerId,
@@ -1795,8 +1852,30 @@ export const PosView: React.FC<PosViewProps> = ({
         `Venda PDV ${orderNumber} finalizada com sucesso. Total: ${formatCurrency(total)} via ${paymentMethod}`
       );
 
+      const syncResult = await FirebaseSyncService.commitCriticalOperation({
+        operationKey: `order:${finalizedOrder.id}`,
+        entityType: 'order',
+        entityId: finalizedOrder.id,
+        label: `Venda PDV ${orderNumber}`,
+      });
+
       // Inicia nova sessão limpa para próxima venda (nenhuma autorização anterior permanece ativa)
       saleSessionIdRef.current = generateSaleSessionId('PDV');
+      setShowSaleConfirmationModal(false);
+
+      if (syncResult.syncState === 'confirmed') {
+        toast.success(`Venda PDV ${orderNumber} salva e confirmada no Firebase!`, 'Confirmado no Firebase');
+      } else if (syncResult.syncState === 'pending_offline') {
+        toast.warning(
+          `Venda PDV ${orderNumber} salva localmente (sem conexão). Será sincronizada automaticamente com o Firebase.`,
+          'Pendente de Sincronização'
+        );
+      } else {
+        toast.error(
+          `Venda PDV ${orderNumber} salva localmente, mas falhou ao gravar no Firebase: ${syncResult.message}`,
+          'Falha na Sincronização'
+        );
+      }
 
       setLastFinishedOrder(finalizedOrder);
       setShowReceiptModal(true);
@@ -1813,7 +1892,11 @@ export const PosView: React.FC<PosViewProps> = ({
       setSaleObservationAlerts([]);
       lastObservationCustomerSigRef.current = '';
     } catch (error) {
-      alert('Erro ao finalizar venda: ' + (error as Error).message);
+      setShowSaleConfirmationModal(false);
+      toast.error('Erro ao finalizar venda: ' + (error as Error).message, 'Erro');
+    } finally {
+      isFinalizingSaleRef.current = false;
+      setIsFinalizingSale(false);
     }
   };
 
@@ -4584,23 +4667,26 @@ export const PosView: React.FC<PosViewProps> = ({
             <div className="pt-3 border-t border-slate-200 flex flex-col sm:flex-row items-center justify-end gap-2 shrink-0">
               <button
                 type="button"
+                disabled={isFinalizingSale}
                 onClick={() => {
-                  setShowSaleConfirmationModal(false);
-                  barcodeInputRef.current?.focus();
+                  if (!isFinalizingSale) {
+                    setShowSaleConfirmationModal(false);
+                    barcodeInputRef.current?.focus();
+                  }
                 }}
-                className="w-full sm:w-auto px-4 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs rounded-xl transition-colors cursor-pointer order-2 sm:order-1"
+                className="w-full sm:w-auto px-4 py-2.5 bg-slate-100 hover:bg-slate-200 disabled:opacity-50 text-slate-700 font-bold text-xs rounded-xl transition-colors cursor-pointer order-2 sm:order-1"
               >
                 Voltar ao Carrinho [ESC]
               </button>
 
               <button
                 type="button"
-                disabled={!paymentMethod || !paymentTerm || (paymentMethod === 'dinheiro' && numericReceived > 0 && numericReceived < total)}
+                disabled={isFinalizingSale || !paymentMethod || !paymentTerm || (paymentMethod === 'dinheiro' && numericReceived > 0 && numericReceived < total)}
                 onClick={handleFinalizeSale}
                 className="w-full sm:w-auto px-6 py-2.5 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-40 disabled:cursor-not-allowed text-white font-extrabold text-sm rounded-xl shadow-md hover:shadow-lg flex items-center justify-center gap-2 transition-all cursor-pointer order-1 sm:order-2 active:scale-[0.99]"
               >
-                <CheckCircle2 size={18} />
-                <span>CONFIRMAR E EMITIR VENDA (Enter)</span>
+                {isFinalizingSale ? <Loader2 size={18} className="animate-spin" /> : <CheckCircle2 size={18} />}
+                <span>{isFinalizingSale ? 'SALVANDO NO FIREBASE...' : 'CONFIRMAR E EMITIR VENDA (Enter)'}</span>
               </button>
             </div>
           </div>

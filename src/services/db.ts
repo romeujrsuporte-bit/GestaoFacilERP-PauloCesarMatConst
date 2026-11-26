@@ -4390,11 +4390,16 @@ export class Database {
   /**
    * Reconcilia com segurança os dados locais com os dados do Firebase Firestore.
    * Preserva quaisquer registros criados localmente enquanto offline e
-   * atualiza os registros existentes com as alterações da nuvem.
+   * atualiza os registros existentes com as alterações da nuvem sem sobrescrever
+   * operações simultâneas nem perder cadastros existentes.
    */
   public static reconcileWithRemote(
     remoteState: DatabaseState,
-    remoteSyncTime?: string
+    remoteSyncTime?: string,
+    options?: {
+      baseRemoteState?: Record<string, any> | null;
+      hasPendingLocalChanges?: boolean;
+    }
   ): { merged: boolean; localUnsyncedChanges: boolean; bahiaMigrated?: boolean } {
     try {
       if (!remoteState || !Array.isArray(remoteState.companies)) {
@@ -4403,6 +4408,7 @@ export class Database {
 
       const local = this.getState();
       let hasLocalUnsynced = false;
+      const baseRemote = options?.baseRemoteState || null;
 
       // Somente durante um reset de fábrica pendente de envio à nuvem evita-se restaurar registros remotos antes da substituição
       const isPendingReset = this.hasPendingFactoryReset();
@@ -4413,15 +4419,15 @@ export class Database {
       const isClean = typeof window !== 'undefined' && localStorage.getItem(DB_KEY_PREFIX + 'clean_start') === 'true';
       const hasPriorRemoteSync = this.hasRemoteSyncCache();
 
-      // Se o navegador ainda não sincronizou anteriormente (estado local é apenas semente de fábrica / sessão anterior),
-      // adota diretamente o estado oficial da nuvem para evitar mesclar registros padrão que disparam escritas proibidas.
-      if (!hasPriorRemoteSync) {
+      // Se o navegador ainda não sincronizou anteriormente (estado local é apenas semente de fábrica / sessão anterior)
+      // e não possui operações pendentes na fila local, adota diretamente o estado oficial da nuvem.
+      if (!hasPriorRemoteSync && !options?.hasPendingLocalChanges) {
         const cleanRemoteUsers = this.stripPasswordsFromUsers(remoteState.users);
         const adoptedState: DatabaseState = {
           ...remoteState,
           users: cleanRemoteUsers,
           currentCompanyId:
-            remoteState.currentCompanyId || local.currentCompanyId || remoteState.companies[0]?.id || 'comp-matriz',
+            local.currentCompanyId || remoteState.currentCompanyId || remoteState.companies[0]?.id || 'comp-matriz',
           currentUserId: local.currentUserId || remoteState.currentUserId,
         };
         const remoteMatriz =
@@ -4434,6 +4440,7 @@ export class Database {
           } catch {}
         }
         this.state = adoptedState;
+        this.ensureValidCurrentCompanyForUser(undefined, { skipPersist: true });
         this.writeStateToLocalStorage();
         if (typeof window !== 'undefined' && typeof localStorage !== 'undefined' && remoteSyncTime) {
           try {
@@ -4446,20 +4453,37 @@ export class Database {
         return { merged: true, localUnsyncedChanges: false, bahiaMigrated: false };
       }
 
-      // Mescla coleções preservando itens locais não sincronizados por ID e alterações mais recentes
+      // Mescla coleções preservando itens locais não sincronizados por ID e alterações mais recentes.
+      // Quando temos baseRemote (snapshot anterior conhecido do servidor), distingue exclusões remotas
+      // intencionais de novos registros criados localmente neste dispositivo.
       const mergeArrays = <T extends { id: string }>(
         localArr: T[] | undefined,
-        remoteArr: T[] | undefined
+        remoteArr: T[] | undefined,
+        collectionKey?: keyof DatabaseState
       ): T[] => {
         const localList = localArr || [];
         const remoteList = remoteArr || [];
+        const baseList =
+          collectionKey && baseRemote && Array.isArray(baseRemote[collectionKey])
+            ? (baseRemote[collectionKey] as T[])
+            : null;
+        const baseMap = new Map<string, T>();
+        if (baseList) {
+          baseList.forEach((bItem) => {
+            if (bItem && bItem.id) baseMap.set(bItem.id, bItem);
+          });
+        }
+
         const localMap = new Map<string, T>();
-        localList.forEach((item) => localMap.set(item.id, item));
+        localList.forEach((item) => {
+          if (item && item.id) localMap.set(item.id, item);
+        });
 
         const merged: T[] = [];
         const seenIds = new Set<string>();
 
         remoteList.forEach((rItem) => {
+          if (!rItem || !rItem.id) return;
           seenIds.add(rItem.id);
           const lItem = localMap.get(rItem.id);
           if (!lItem) {
@@ -4477,9 +4501,23 @@ export class Database {
         });
 
         localList.forEach((lItem) => {
+          if (!lItem || !lItem.id) return;
           if (!seenIds.has(lItem.id)) {
-            merged.push(lItem);
-            hasLocalUnsynced = true;
+            const baseItem = baseMap.get(lItem.id);
+            if (baseItem) {
+              // O item já existia no último snapshot remoto conhecido e foi removido remotamente por outro dispositivo.
+              // Só preserva se houve alteração local mais recente após o baseItem.
+              const bUpdated = (baseItem as any).updatedAt || (baseItem as any).createdAt || '';
+              const lUpdated = (lItem as any).updatedAt || (lItem as any).createdAt || '';
+              if (lUpdated && bUpdated && lUpdated > bUpdated) {
+                merged.push(lItem);
+                hasLocalUnsynced = true;
+              }
+            } else {
+              // Item criado localmente neste dispositivo ainda não presente no servidor -> preserva integralmente!
+              merged.push(lItem);
+              hasLocalUnsynced = true;
+            }
           }
         });
 
@@ -4491,7 +4529,7 @@ export class Database {
       );
 
       const mergedUsersRaw = this.stripPasswordsFromUsers(
-        mergeArrays(local.users, remoteState.users).filter((u) => !mergedDeletedUserIds.includes(u.id))
+        mergeArrays(local.users, remoteState.users, 'users').filter((u) => !mergedDeletedUserIds.includes(u.id))
       );
       const normalizedUsers = this.normalizeUsersList(mergedUsersRaw);
 
@@ -4560,39 +4598,39 @@ export class Database {
         ...(remoteState.deletedUserIds !== undefined || mergedDeletedUserIds.length > 0
           ? { deletedUserIds: mergedDeletedUserIds }
           : {}),
-        companies: mergeArrays(local.companies, remoteState.companies),
+        companies: mergeArrays(local.companies, remoteState.companies, 'companies'),
         users: normalizedUsers.users,
-        customers: mergeArrays(local.customers, remoteState.customers),
-        suppliers: mergeArrays(local.suppliers, remoteState.suppliers),
-        products: mergeArrays(local.products, remoteState.products),
-        components: mergeArrays(local.components, remoteState.components),
-        orders: mergeArrays(local.orders, remoteState.orders),
-        deliveryRoutes: mergeArrays(local.deliveryRoutes, remoteState.deliveryRoutes),
-        deliveryDrivers: mergeArrays(local.deliveryDrivers, remoteState.deliveryDrivers),
-        deliveryVehicles: mergeArrays(local.deliveryVehicles, remoteState.deliveryVehicles),
+        customers: mergeArrays(local.customers, remoteState.customers, 'customers'),
+        suppliers: mergeArrays(local.suppliers, remoteState.suppliers, 'suppliers'),
+        products: mergeArrays(local.products, remoteState.products, 'products'),
+        components: mergeArrays(local.components, remoteState.components, 'components'),
+        orders: mergeArrays(local.orders, remoteState.orders, 'orders'),
+        deliveryRoutes: mergeArrays(local.deliveryRoutes, remoteState.deliveryRoutes, 'deliveryRoutes'),
+        deliveryDrivers: mergeArrays(local.deliveryDrivers, remoteState.deliveryDrivers, 'deliveryDrivers'),
+        deliveryVehicles: mergeArrays(local.deliveryVehicles, remoteState.deliveryVehicles, 'deliveryVehicles'),
         ...(remoteState.deliveryManifests !== undefined || (local.deliveryManifests?.length ?? 0) > 0
-          ? { deliveryManifests: mergeArrays(local.deliveryManifests, remoteState.deliveryManifests) }
+          ? { deliveryManifests: mergeArrays(local.deliveryManifests, remoteState.deliveryManifests, 'deliveryManifests') }
           : {}),
-        stockLocations: mergeArrays(local.stockLocations, remoteState.stockLocations),
-        productionOrders: mergeArrays(local.productionOrders, remoteState.productionOrders),
-        purchaseOrders: mergeArrays(local.purchaseOrders, remoteState.purchaseOrders),
-        purchaseReceipts: mergeArrays(local.purchaseReceipts, remoteState.purchaseReceipts),
-        transferOrders: mergeArrays(local.transferOrders, remoteState.transferOrders),
-        inventoryCounts: mergeArrays(local.inventoryCounts, remoteState.inventoryCounts),
-        accountsReceivable: mergeArrays(local.accountsReceivable, remoteState.accountsReceivable),
-        accountsPayable: mergeArrays(local.accountsPayable, remoteState.accountsPayable),
-        cashRegisters: mergeArrays(local.cashRegisters, remoteState.cashRegisters),
-        auditLogs: mergeArrays(filterClearedLogs(local.auditLogs), filterClearedLogs(remoteState.auditLogs)),
+        stockLocations: mergeArrays(local.stockLocations, remoteState.stockLocations, 'stockLocations'),
+        productionOrders: mergeArrays(local.productionOrders, remoteState.productionOrders, 'productionOrders'),
+        purchaseOrders: mergeArrays(local.purchaseOrders, remoteState.purchaseOrders, 'purchaseOrders'),
+        purchaseReceipts: mergeArrays(local.purchaseReceipts, remoteState.purchaseReceipts, 'purchaseReceipts'),
+        transferOrders: mergeArrays(local.transferOrders, remoteState.transferOrders, 'transferOrders'),
+        inventoryCounts: mergeArrays(local.inventoryCounts, remoteState.inventoryCounts, 'inventoryCounts'),
+        accountsReceivable: mergeArrays(local.accountsReceivable, remoteState.accountsReceivable, 'accountsReceivable'),
+        accountsPayable: mergeArrays(local.accountsPayable, remoteState.accountsPayable, 'accountsPayable'),
+        cashRegisters: mergeArrays(local.cashRegisters, remoteState.cashRegisters, 'cashRegisters'),
+        auditLogs: mergeArrays(filterClearedLogs(local.auditLogs), filterClearedLogs(remoteState.auditLogs), 'auditLogs'),
         ...(effectiveAuditClearedAt ? { auditLogsClearedAt: effectiveAuditClearedAt } : {}),
         stockBalances: mergedStockBalances,
-        stockMovements: mergeArrays(local.stockMovements, remoteState.stockMovements),
+        stockMovements: mergeArrays(local.stockMovements, remoteState.stockMovements, 'stockMovements'),
         paymentMethods: remoteState.paymentMethods || local.paymentMethods,
-        financialAccounts: mergeArrays(local.financialAccounts, remoteState.financialAccounts),
-        paymentTermsList: mergeArrays(local.paymentTermsList, remoteState.paymentTermsList),
-        marketAreas: mergeArrays(local.marketAreas, remoteState.marketAreas),
-        states: mergeArrays(local.states, remoteState.states),
-        cities: mergeArrays(local.cities, remoteState.cities),
-        neighborhoods: mergeArrays(local.neighborhoods, remoteState.neighborhoods),
+        financialAccounts: mergeArrays(local.financialAccounts, remoteState.financialAccounts, 'financialAccounts'),
+        paymentTermsList: mergeArrays(local.paymentTermsList, remoteState.paymentTermsList, 'paymentTermsList'),
+        marketAreas: mergeArrays(local.marketAreas, remoteState.marketAreas, 'marketAreas'),
+        states: mergeArrays(local.states, remoteState.states, 'states'),
+        cities: mergeArrays(local.cities, remoteState.cities, 'cities'),
+        neighborhoods: mergeArrays(local.neighborhoods, remoteState.neighborhoods, 'neighborhoods'),
         ...(remoteState.printerConfig || local.printerConfig
           ? { printerConfig: remoteState.printerConfig || local.printerConfig }
           : {}),
@@ -4600,12 +4638,12 @@ export class Database {
           ? { sidebarMenuConfig: remoteState.sidebarMenuConfig || local.sidebarMenuConfig }
           : {}),
         ...(remoteState.companyStockTransfers !== undefined || (local.companyStockTransfers?.length ?? 0) > 0
-          ? { companyStockTransfers: mergeArrays(local.companyStockTransfers, remoteState.companyStockTransfers) }
+          ? { companyStockTransfers: mergeArrays(local.companyStockTransfers, remoteState.companyStockTransfers, 'companyStockTransfers') }
           : {}),
-        chartOfAccounts: mergeArrays(local.chartOfAccounts, remoteState.chartOfAccounts),
-        salesReturns: mergeArrays(local.salesReturns, remoteState.salesReturns),
+        chartOfAccounts: mergeArrays(local.chartOfAccounts, remoteState.chartOfAccounts, 'chartOfAccounts'),
+        salesReturns: mergeArrays(local.salesReturns, remoteState.salesReturns, 'salesReturns'),
         ...(remoteState.customerVouchers !== undefined || (local.customerVouchers?.length ?? 0) > 0
-          ? { customerVouchers: mergeArrays(local.customerVouchers, remoteState.customerVouchers) }
+          ? { customerVouchers: mergeArrays(local.customerVouchers, remoteState.customerVouchers, 'customerVouchers') }
           : {}),
       };
 
@@ -4626,6 +4664,7 @@ export class Database {
       }
 
       this.state = mergedState;
+      this.ensureValidCurrentCompanyForUser(undefined, { skipPersist: true });
       this.writeStateToLocalStorage();
       if (typeof window !== 'undefined' && typeof localStorage !== 'undefined' && remoteSyncTime) {
         try {
@@ -4642,22 +4681,164 @@ export class Database {
     }
   }
 
-  public static setCurrentCompany(companyId: string) {
-    if (this.state) {
-      this.state.currentCompanyId = companyId;
-      this.persist();
+  /**
+   * Resolve a empresa autorizada mais adequada para o usuário atual,
+   * respeitando o vínculo cadastrado e as empresas permitidas.
+   */
+  public static resolveAuthorizedCompanyForUser(
+    user?: User | null,
+    preferredCompanyId?: string,
+    options?: { preferUserLinkedCompany?: boolean }
+  ): Company {
+    const s = this.getState();
+    const u = user || this.getCurrentUser();
+    const available = this.getAvailableCompaniesForUser(u);
+    const pool = available.length > 0 ? available : (s.companies || []);
+
+    const fallbackCompany: Company = pool[0] || {
+      id: 'comp-matriz',
+      name: 'Química & Limpeza Imperial Ltda',
+      tradeName: 'Imperial Limpeza - Matriz Feira de Santana',
+      cnpjCpf: '12.345.678/0001-90',
+      type: 'matriz',
+      phone: '(75) 3600-7890',
+      email: 'contato@imperiallimpeza.com.br',
+      address: {
+        street: 'Av. Eduardo Fróes da Mota',
+        number: '1500',
+        neighborhood: 'CIS - Distrito Industrial do Subaé',
+        city: 'Feira de Santana',
+        state: 'BA',
+        zipCode: '44000-000',
+      },
+      status: 'ativo',
+    };
+
+    if (options?.preferUserLinkedCompany && u?.companyId) {
+      const linked = pool.find((c) => c.id === u.companyId && c.status !== 'inativo') ||
+        pool.find((c) => c.id === u.companyId);
+      if (linked) return linked;
     }
+
+    const candidateId = preferredCompanyId || s.currentCompanyId;
+    if (candidateId) {
+      const matched = pool.find((c) => c.id === candidateId);
+      if (matched) return matched;
+    }
+
+    if (u?.companyId) {
+      const linked = pool.find((c) => c.id === u.companyId && c.status !== 'inativo') ||
+        pool.find((c) => c.id === u.companyId);
+      if (linked) return linked;
+    }
+
+    return pool.find((c) => c.status !== 'inativo') || fallbackCompany;
+  }
+
+  /**
+   * Garante que state.currentCompanyId sempre corresponda a uma empresa autorizada para o usuário ativo.
+   * Evita divergência entre o seletor visual e o companyId efetivamente gravado nos pedidos.
+   */
+  public static ensureValidCurrentCompanyForUser(
+    user?: User | null,
+    options?: { preferUserLinkedCompany?: boolean; skipPersist?: boolean }
+  ): Company {
+    const s = this.getState();
+    const u = user || this.getCurrentUser();
+    const resolved = this.resolveAuthorizedCompanyForUser(u, s.currentCompanyId, {
+      preferUserLinkedCompany: options?.preferUserLinkedCompany,
+    });
+
+    if (s.currentCompanyId !== resolved.id) {
+      s.currentCompanyId = resolved.id;
+      if (!options?.skipPersist) {
+        this.writeStateToLocalStorage();
+        this.notify();
+      }
+    }
+
+    return resolved;
+  }
+
+  /**
+   * Gera número sequencial único de pedido verificando os registros já existentes
+   * para evitar colisões entre múltiplos dispositivos.
+   */
+  public static generateUniqueOrderNumber(prefix: string, padLength: number = 4): string {
+    const s = this.getState();
+    const year = new Date().getFullYear();
+    const fullPrefix = `${prefix}-${year}-`;
+    let maxSeq = 0;
+
+    for (const ord of s.orders || []) {
+      if (ord?.number && ord.number.startsWith(fullPrefix)) {
+        const suffix = ord.number.slice(fullPrefix.length).replace(/\D/g, '');
+        const parsed = parseInt(suffix, 10);
+        if (!isNaN(parsed) && parsed > maxSeq) {
+          maxSeq = parsed;
+        }
+      }
+    }
+
+    let nextSeq = Math.max(maxSeq + 1, (s.orders?.length || 0) + 1);
+    const existingNumbers = new Set((s.orders || []).map((o) => o.number));
+    let candidate = `${fullPrefix}${String(nextSeq).padStart(padLength, '0')}`;
+    while (existingNumbers.has(candidate)) {
+      nextSeq += 1;
+      candidate = `${fullPrefix}${String(nextSeq).padStart(padLength, '0')}`;
+    }
+    return candidate;
+  }
+
+  /**
+   * Verifica se já existe um pedido gravado com a mesma chave de submissão (proteção anti-duplicidade).
+   */
+  public static findOrderBySubmissionId(submissionId: string): Order | undefined {
+    if (!submissionId) return undefined;
+    const s = this.getState();
+    return (s.orders || []).find((o) => o.clientSubmissionId === submissionId);
+  }
+
+  public static setCurrentCompany(companyId: string): boolean {
+    if (!this.state) return false;
+    const available = this.getAvailableCompaniesForUser();
+    const isAuthorized = available.some((c) => c.id === companyId);
+    if (!isAuthorized) {
+      const resolved = this.ensureValidCurrentCompanyForUser(undefined, { skipPersist: false });
+      return resolved.id === companyId;
+    }
+    if (this.state.currentCompanyId !== companyId) {
+      this.state.currentCompanyId = companyId;
+      // Atualiza localmente o contexto de visualização sem disparar escrita remota desnecessária
+      // que interferiria na empresa selecionada em outros dispositivos.
+      this.writeStateToLocalStorage();
+      this.notify();
+    }
+    return true;
   }
 
   public static setCurrentUser(userId: string) {
     if (this.state) {
       this.state.currentUserId = userId;
-      this.persist();
+      const targetUser = this.state.users.find((u) => u.id === userId) || null;
+      this.ensureValidCurrentCompanyForUser(targetUser, {
+        preferUserLinkedCompany: true,
+        skipPersist: true,
+      });
+      this.writeStateToLocalStorage();
+      this.notify();
     }
   }
 
   public static getCurrentCompany(): Company {
     const s = this.getState();
+    if (this.isSessionAuthenticated()) {
+      const resolved = this.resolveAuthorizedCompanyForUser(this.getCurrentUser(), s.currentCompanyId);
+      if (s.currentCompanyId !== resolved.id) {
+        s.currentCompanyId = resolved.id;
+      }
+      return resolved;
+    }
     return (
       s.companies.find((c) => c.id === s.currentCompanyId) ||
       s.companies[0] || {

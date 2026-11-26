@@ -32,8 +32,14 @@ import {
   Tag,
   Gift,
   Pencil,
+  Building2,
+  Cloud,
+  CloudOff,
+  RefreshCw,
+  Loader2,
 } from 'lucide-react';
 import { Database } from '../../services/db';
+import { FirebaseSyncService, FirebaseSyncStatus } from '../../services/firebaseSync';
 import { Product, Customer, Order, OrderCommercialKind, OrderItem, DiscountAuthorizationRecord } from '../../types';
 import { StockEngine } from '../../services/stockEngine';
 import { formatCurrency, formatQuantity } from '../../services/pricingEngine';
@@ -81,14 +87,33 @@ export const ExternalSalesView: React.FC<ExternalSalesViewProps> = ({
   setCart: propSetCart,
 }) => {
   const [dbState, setDbState] = useState(Database.getState());
-  const currentCompany = Database.getCurrentCompany();
   const currentUser = Database.getCurrentUser();
+  const currentCompany = Database.resolveAuthorizedCompanyForUser(currentUser, dbState.currentCompanyId);
   const canAlterUnitPrice = Database.canCurrentUserAlterUnitPrice(currentUser);
   const unitPriceOverrideRole: 'admin' | 'gerente' = Database.isAdmin(currentUser) ? 'admin' : 'gerente';
 
   useEffect(() => {
     return Database.subscribe(() => {
       setDbState({ ...Database.getState() });
+    });
+  }, []);
+
+  // Garante sincronia entre empresa exibida na tela e empresa interna autorizada do vendedor
+  useEffect(() => {
+    if (Database.isSessionAuthenticated() && dbState.currentCompanyId !== currentCompany.id) {
+      Database.ensureValidCurrentCompanyForUser(currentUser);
+    }
+  }, [dbState.currentCompanyId, currentCompany.id, currentUser?.id]);
+
+  // Estado de sincronização em tempo real com o Firebase Firestore
+  const [syncStatus, setSyncStatus] = useState<FirebaseSyncStatus>(() => FirebaseSyncService.getStatus());
+  const [isFinalizingOrder, setIsFinalizingOrder] = useState<boolean>(false);
+  const [isRetryingOrderSync, setIsRetryingOrderSync] = useState<boolean>(false);
+  const isFinalizingRef = useRef<boolean>(false);
+
+  useEffect(() => {
+    return FirebaseSyncService.subscribe((next) => {
+      setSyncStatus(next);
     });
   }, []);
 
@@ -1001,22 +1026,90 @@ export const ExternalSalesView: React.FC<ExternalSalesViewProps> = ({
     });
   };
 
-  const handleFinalizeOrder = () => {
-    setShowSaleConfirmationModal(false);
+  const handleFinalizeOrder = async () => {
+    // Bloqueio contra múltiplos cliques ou reenvios simultâneos do mesmo pedido
+    if (isFinalizingRef.current) {
+      return;
+    }
 
     if (cart.length === 0 || !selectedCustomerId) {
+      setShowSaleConfirmationModal(false);
       return;
     }
     if (!isBonusMode && (!paymentMethod || !paymentTerm)) {
+      setShowSaleConfirmationModal(false);
       return;
     }
 
+    // Revalida rigorosamente o vínculo de empresa/filial autorizada no momento exato da gravação
+    const validatedCompany = Database.ensureValidCurrentCompanyForUser(currentUser, { skipPersist: true });
+    const authorizedCompanies = Database.getAvailableCompaniesForUser(currentUser);
+    const isCompanyAuthorized =
+      authorizedCompanies.length === 0 || authorizedCompanies.some((c) => c.id === validatedCompany.id);
+    if (!validatedCompany || !isCompanyAuthorized) {
+      toast.error(
+        'Não foi possível validar a empresa/filial autorizada para este usuário. Verifique seu cadastro antes de finalizar.',
+        'Empresa Não Autorizada'
+      );
+      setShowSaleConfirmationModal(false);
+      return;
+    }
+    if (validatedCompany.status === 'inativo') {
+      toast.error(
+        `A empresa "${validatedCompany.tradeName || validatedCompany.name}" está inativa e não pode registrar novos pedidos.`,
+        'Empresa Inativa'
+      );
+      setShowSaleConfirmationModal(false);
+      return;
+    }
+
+    const submissionId = saleSessionIdRef.current;
+    // Proteção anti-duplicidade: se esta sessão de venda já foi gravada anteriormente, apenas reenvia ao Firebase
+    const existingDuplicateOrder = Database.findOrderBySubmissionId(submissionId);
+    if (existingDuplicateOrder) {
+      isFinalizingRef.current = true;
+      setIsFinalizingOrder(true);
+      try {
+        const retryResult = await FirebaseSyncService.commitCriticalOperation({
+          operationKey: `order:${existingDuplicateOrder.id}`,
+          entityType: 'order',
+          entityId: existingDuplicateOrder.id,
+          label: `Pedido ${existingDuplicateOrder.number}`,
+        });
+        setShowSaleConfirmationModal(false);
+        if (retryResult.syncState === 'confirmed') {
+          toast.success(
+            `Pedido ${existingDuplicateOrder.number} confirmado no Firebase (duplicidade evitada).`,
+            'Confirmado na Nuvem'
+          );
+        } else if (retryResult.syncState === 'pending_offline') {
+          toast.warning(retryResult.message, 'Aguardando Sincronização');
+        } else {
+          toast.error(retryResult.message, 'Falha na Sincronização');
+        }
+        saleSessionIdRef.current = generateSaleSessionId('MOB');
+        setFinishedOrder(existingDuplicateOrder);
+        setShowReceiptModal(true);
+        setCart([]);
+        setActiveTab('historico');
+      } finally {
+        isFinalizingRef.current = false;
+        setIsFinalizingOrder(false);
+      }
+      return;
+    }
+
+    isFinalizingRef.current = true;
+    setIsFinalizingOrder(true);
+
     const prefix = isBonusMode ? 'BON' : docType === 'orcamento' ? 'ORC' : 'PED';
-    const orderNumber = `${prefix}-EXT-${new Date().getFullYear()}-${String(dbState.orders.length + 1).padStart(4, '0')}`;
+    const orderNumber = Database.generateUniqueOrderNumber(`${prefix}-EXT`, 4);
     const nowIso = new Date().toISOString();
+    const uniqueOrderId = `ORD-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
 
     try {
-      const boletoAccounts = Database.getBoletoAccounts(currentCompany.id);
+      const latestState = Database.getState();
+      const boletoAccounts = Database.getBoletoAccounts(validatedCompany.id);
       const targetBoletoAccount = !isBonusMode && paymentMethod === 'boleto'
         ? boletoAccounts.find((a) => a.id === selectedBoletoAccountId) || boletoAccounts[0] || Database.getBoletoAccounts()[0]
         : undefined;
@@ -1038,12 +1131,12 @@ export const ExternalSalesView: React.FC<ExternalSalesViewProps> = ({
         : (paymentMethod as Order['paymentMethod']);
 
       const newOrder: Order = {
-        id: 'ORD-' + Date.now(),
+        id: uniqueOrderId,
         number: orderNumber,
         type: isBonusMode ? 'venda' : docType,
         orderKind: isBonusMode ? 'bonificacao' : 'venda_normal',
         origin: 'externa_celular',
-        companyId: currentCompany.id,
+        companyId: validatedCompany.id,
         customerId: selectedCustomerId,
         customerName: selectedCustomer ? selectedCustomer.name : 'Cliente Externo',
         customerPhone: selectedCustomer ? selectedCustomer.phone : '',
@@ -1070,6 +1163,7 @@ export const ExternalSalesView: React.FC<ExternalSalesViewProps> = ({
           : (notes ? `${notes} | ` : '') + `Prazo: ${termInfo.label}${installments > 1 && !/\d+\s*x/i.test(termInfo.label) ? ` (${installments}x)` : ''}`,
         stockDeducted: isBonusMode || docType === 'venda',
         financialGenerated: !isBonusMode && docType === 'venda',
+        clientSubmissionId: submissionId,
         createdAt: nowIso,
         updatedAt: nowIso,
       };
@@ -1078,11 +1172,11 @@ export const ExternalSalesView: React.FC<ExternalSalesViewProps> = ({
       const validatedDiscountAuths = isBonusMode
         ? []
         : Database.validateOrderDiscountsForPersistence(newOrder, {
-            saleSessionId: saleSessionIdRef.current,
+            saleSessionId: submissionId,
             globalOrderDiscountValue: globalDiscountVal,
           });
 
-      let currentBalances = [...dbState.stockBalances];
+      let currentBalances = [...latestState.stockBalances];
       const movements = [];
 
       if (isBonusMode || docType === 'venda') {
@@ -1090,7 +1184,7 @@ export const ExternalSalesView: React.FC<ExternalSalesViewProps> = ({
           const { updatedBalances, createdMovement } = StockEngine.applyMovement(
             currentBalances,
             {
-              companyId: currentCompany.id,
+              companyId: validatedCompany.id,
               productId: item.productId,
               productCode: item.productCode,
               productDescription: item.description,
@@ -1107,7 +1201,7 @@ export const ExternalSalesView: React.FC<ExternalSalesViewProps> = ({
               userName: currentUser.name,
               notes: isBonusMode
                 ? formatBonusStockExitNote(orderNumber, `Venda Mobile - ${commercialLocationName}`)
-                : `Venda Mobile ${orderNumber} - Saída Estoque Comercial`,
+                : `Venda Mobile ${orderNumber} - Saída Estoque Comercial (${validatedCompany.tradeName || validatedCompany.name})`,
             },
             { allowNegativeStock: Database.canSellNegativeStock() }
           );
@@ -1119,11 +1213,11 @@ export const ExternalSalesView: React.FC<ExternalSalesViewProps> = ({
       const finalizedOrder = isBonusMode
         ? newOrder
         : Database.finalizeOrderDiscountAuthorizations(newOrder, validatedDiscountAuths, {
-            saleSessionId: saleSessionIdRef.current,
+            saleSessionId: submissionId,
             skipPersist: true,
           });
 
-      let updatedReceivables = [...dbState.accountsReceivable];
+      let updatedReceivables = [...latestState.accountsReceivable];
       if (!isBonusMode && docType === 'venda' && (paymentMethod === 'boleto' || installments > 1)) {
         const valParcela = Number((cartTotal / installments).toFixed(2));
         for (let i = 1; i <= installments; i++) {
@@ -1131,8 +1225,8 @@ export const ExternalSalesView: React.FC<ExternalSalesViewProps> = ({
           const due = new Date();
           due.setDate(due.getDate() + daysOffset);
           updatedReceivables.push({
-            id: 'REC-' + Date.now() + '-' + i,
-            companyId: currentCompany.id,
+            id: `REC-${Date.now()}-${i}-${Math.random().toString(36).slice(2, 5)}`,
+            companyId: validatedCompany.id,
             orderId: finalizedOrder.id,
             orderNumber: finalizedOrder.number,
             customerId: finalizedOrder.customerId,
@@ -1169,17 +1263,40 @@ export const ExternalSalesView: React.FC<ExternalSalesViewProps> = ({
         'VENDAS_EXTERNAS',
         finalizedOrder.id,
         isBonusMode
-          ? `Pedido de Bonificação Mobile ${orderNumber} criado por ${currentUser.name} para ${finalizedOrder.customerName}. Valor Financeiro: R$ 0,00 (Ref.: ${formatCurrency(cartTotal)})`
-          : `${docType === 'orcamento' ? 'Orçamento' : 'Venda'} ${orderNumber} criada por ${currentUser.name} para ${finalizedOrder.customerName}. Total: ${formatCurrency(cartTotal)}`
+          ? `Pedido de Bonificação Mobile ${orderNumber} criado por ${currentUser.name} (${validatedCompany.tradeName || validatedCompany.name}) para ${finalizedOrder.customerName}. Valor Financeiro: R$ 0,00 (Ref.: ${formatCurrency(cartTotal)})`
+          : `${docType === 'orcamento' ? 'Orçamento' : 'Venda'} ${orderNumber} criada por ${currentUser.name} (${validatedCompany.tradeName || validatedCompany.name}) para ${finalizedOrder.customerName}. Total: ${formatCurrency(cartTotal)}`
       );
 
-      // Renova a sessão para impedir reutilização de autorizações em vendas futuras
+      const docLabel = isBonusMode ? 'Pedido de Bonificação' : docType === 'orcamento' ? 'Orçamento' : 'Venda';
+
+      // Aguarda confirmação efetiva no Firebase Cloud Firestore antes de confirmar ao usuário
+      const syncResult = await FirebaseSyncService.commitCriticalOperation({
+        operationKey: `order:${finalizedOrder.id}`,
+        entityType: 'order',
+        entityId: finalizedOrder.id,
+        label: `${docLabel} ${orderNumber}`,
+      });
+
+      // Renova a sessão para impedir reutilização de autorizações e evitar duplicidade em vendas futuras
       saleSessionIdRef.current = generateSaleSessionId('MOB');
+      setShowSaleConfirmationModal(false);
 
-      toast.success(
-        `${isBonusMode ? 'Pedido de Bonificação' : docType === 'orcamento' ? 'Orçamento' : 'Venda'} ${orderNumber} emitido com sucesso!`,
-        isBonusMode ? 'Bonificação Registrada' : 'Documento Emitido'
-      );
+      if (syncResult.syncState === 'confirmed') {
+        toast.success(
+          `${docLabel} ${orderNumber} salvo e confirmado no Firebase (${validatedCompany.tradeName || validatedCompany.name})!`,
+          isBonusMode ? 'Bonificação Confirmada na Nuvem' : 'Confirmado no Firebase'
+        );
+      } else if (syncResult.syncState === 'pending_offline') {
+        toast.warning(
+          `${docLabel} ${orderNumber} salvo apenas neste dispositivo (sem conexão). Será sincronizado automaticamente com o Firebase quando a internet voltar.`,
+          'Pendente de Sincronização'
+        );
+      } else {
+        toast.error(
+          `${docLabel} ${orderNumber} salvo localmente, mas NÃO foi confirmado no Firebase: ${syncResult.message}`,
+          'Falha ao Gravar no Firebase'
+        );
+      }
 
       setFinishedOrder(finalizedOrder);
       setShowReceiptModal(true);
@@ -1195,7 +1312,27 @@ export const ExternalSalesView: React.FC<ExternalSalesViewProps> = ({
       lastObservationCustomerSigRef.current = '';
       setActiveTab('historico');
     } catch (e) {
+      setShowSaleConfirmationModal(false);
       toast.error('Erro ao finalizar pedido: ' + (e as Error).message, 'Erro');
+    } finally {
+      isFinalizingRef.current = false;
+      setIsFinalizingOrder(false);
+    }
+  };
+
+  const handleManualSyncRetry = async () => {
+    if (isRetryingOrderSync) return;
+    setIsRetryingOrderSync(true);
+    try {
+      const ok = await FirebaseSyncService.retryPendingSync();
+      if (ok) {
+        toast.success('Todos os pedidos pendentes foram sincronizados com o Firebase!', 'Sincronizado');
+      } else {
+        const st = FirebaseSyncService.getStatus();
+        toast.error(st.lastError || 'Não foi possível sincronizar agora. Verifique a conexão e tente novamente.', 'Falha na Sincronização');
+      }
+    } finally {
+      setIsRetryingOrderSync(false);
     }
   };
 
@@ -1268,17 +1405,42 @@ export const ExternalSalesView: React.FC<ExternalSalesViewProps> = ({
       {/* 1. TOP BAR EXCLUSIVO MOBILE: LIMPO, MODERNO E DIRETO     */}
       {/* ======================================================== */}
       <header className="sticky top-0 z-20 bg-white/95 backdrop-blur-md border-b border-slate-200 px-4 py-3 flex items-center justify-between gap-3 shadow-2xs">
-        <div>
+        <div className="min-w-0">
           <div className="flex items-center gap-2">
             <h1 className="text-lg font-extrabold text-slate-900 tracking-tight">Vendas Mobile</h1>
             <span
-              className={`w-2 h-2 rounded-full ${isOnline ? 'bg-emerald-500' : 'bg-rose-500'}`}
-              title={isOnline ? 'Conectado' : 'Offline'}
+              className={`w-2 h-2 rounded-full shrink-0 ${
+                !isOnline
+                  ? 'bg-amber-500'
+                  : syncStatus.status === 'error' || syncStatus.failedCount > 0
+                  ? 'bg-rose-500'
+                  : syncStatus.status === 'syncing' || syncStatus.pendingCount > 0
+                  ? 'bg-blue-500 animate-pulse'
+                  : 'bg-emerald-500'
+              }`}
+              title={
+                !isOnline
+                  ? 'Offline — salvando localmente'
+                  : syncStatus.status === 'error'
+                  ? `Erro na sincronização: ${syncStatus.lastError || ''}`
+                  : syncStatus.pendingCount > 0
+                  ? `${syncStatus.pendingCount} pendência(s) aguardando nuvem`
+                  : 'Conectado ao Firebase'
+              }
             />
           </div>
-          <p className="text-xs text-slate-500 font-medium">
+          <p className="text-xs text-slate-500 font-medium truncate">
             {currentUser.name.split(' ')[0]} · Revenda Comercial ({commercialLocationName})
           </p>
+          <div className="flex items-center gap-1.5 mt-0.5 text-[11px] font-bold text-blue-700 truncate">
+            <Building2 size={12} className="shrink-0 text-blue-600" />
+            <span className="truncate">
+              {currentCompany.tradeName || currentCompany.name}
+            </span>
+            <span className="shrink-0 text-[9px] font-black uppercase px-1.5 py-0.2 rounded bg-blue-50 border border-blue-200 text-blue-700">
+              {currentCompany.type === 'matriz' ? 'Matriz' : 'Filial'}
+            </span>
+          </div>
         </div>
 
         {/* Alternador Venda Normal vs Bonificação vs Orçamento */}
@@ -2583,6 +2745,68 @@ export const ExternalSalesView: React.FC<ExternalSalesViewProps> = ({
                       </div>
                     </div>
 
+                    {/* Status explícito de confirmação no Firebase */}
+                    {(() => {
+                      const orderSyncState = FirebaseSyncService.getEntitySyncState('order', ord.id);
+                      const orderSyncErr = FirebaseSyncService.getEntitySyncError('order', ord.id);
+                      if (orderSyncState === 'failed') {
+                        return (
+                          <div className="flex items-center justify-between gap-2 bg-rose-50 border border-rose-200 rounded-xl px-2.5 py-1.5 text-[11px] text-rose-800">
+                            <span className="flex items-center gap-1.5 font-bold min-w-0">
+                              <CloudOff size={13} className="text-rose-600 shrink-0" />
+                              <span className="truncate" title={orderSyncErr || undefined}>
+                                Falha ao salvar na nuvem
+                              </span>
+                            </span>
+                            <button
+                              type="button"
+                              onClick={handleManualSyncRetry}
+                              disabled={isRetryingOrderSync}
+                              className="shrink-0 inline-flex items-center gap-1 px-2 py-0.5 rounded-lg bg-rose-600 hover:bg-rose-700 text-white text-[10px] font-extrabold cursor-pointer disabled:opacity-50"
+                            >
+                              {isRetryingOrderSync ? <Loader2 size={10} className="animate-spin" /> : <RefreshCw size={10} />}
+                              <span>Reenviar</span>
+                            </button>
+                          </div>
+                        );
+                      }
+                      if (orderSyncState === 'pending' || orderSyncState === 'syncing') {
+                        return (
+                          <div className="flex items-center justify-between gap-2 bg-amber-50 border border-amber-200 rounded-xl px-2.5 py-1.5 text-[11px] text-amber-900">
+                            <span className="flex items-center gap-1.5 font-bold">
+                              {orderSyncState === 'syncing' ? (
+                                <Loader2 size={13} className="text-amber-600 animate-spin shrink-0" />
+                              ) : (
+                                <Clock size={13} className="text-amber-600 shrink-0" />
+                              )}
+                              <span>
+                                {orderSyncState === 'syncing'
+                                  ? 'Enviando para o Firebase...'
+                                  : 'Salvo localmente • Aguardando sincronização'}
+                              </span>
+                            </span>
+                            {isOnline && orderSyncState === 'pending' && (
+                              <button
+                                type="button"
+                                onClick={handleManualSyncRetry}
+                                disabled={isRetryingOrderSync}
+                                className="shrink-0 inline-flex items-center gap-1 px-2 py-0.5 rounded-lg bg-amber-600 hover:bg-amber-700 text-white text-[10px] font-extrabold cursor-pointer disabled:opacity-50"
+                              >
+                                <RefreshCw size={10} />
+                                <span>Enviar</span>
+                              </button>
+                            )}
+                          </div>
+                        );
+                      }
+                      return (
+                        <div className="flex items-center gap-1.5 text-[11px] font-semibold text-emerald-700">
+                          <Cloud size={12} className="text-emerald-600 shrink-0" />
+                          <span>Confirmado no Firebase</span>
+                        </div>
+                      );
+                    })()}
+
                     {/* Ações: WhatsApp, Ver Comprovante e Devolução */}
                     <div className="flex items-center gap-2 pt-2 border-t border-slate-100">
                       <button
@@ -2899,7 +3123,9 @@ export const ExternalSalesView: React.FC<ExternalSalesViewProps> = ({
       {/* Modal de Confirmação da Venda */}
       <SaleConfirmationModal
         isOpen={showSaleConfirmationModal}
-        onClose={() => setShowSaleConfirmationModal(false)}
+        onClose={() => {
+          if (!isFinalizingOrder) setShowSaleConfirmationModal(false);
+        }}
         onConfirm={handleFinalizeOrder}
         modality="Venda Mobile"
         customerName={selectedCustomer ? selectedCustomer.name : 'Cliente Externo'}
@@ -2911,6 +3137,9 @@ export const ExternalSalesView: React.FC<ExternalSalesViewProps> = ({
         installments={isBonusMode ? 0 : installments}
         itemsCount={totalCartUnits}
         locationName={commercialLocationName}
+        companyName={currentCompany.tradeName || currentCompany.name}
+        companyType={currentCompany.type}
+        isSubmitting={isFinalizingOrder}
         isBonus={isBonusMode}
         referenceAmount={isBonusMode ? cartTotal : undefined}
       />

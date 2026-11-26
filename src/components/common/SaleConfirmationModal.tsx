@@ -15,7 +15,9 @@ import {
   Coins,
   Barcode,
   FileText,
-  Gift
+  Gift,
+  Building2,
+  Loader2,
 } from 'lucide-react';
 import { formatCurrency } from '../../services/pricingEngine';
 import { Database } from '../../services/db';
@@ -36,6 +38,8 @@ export interface SaleConfirmationModalProps {
   receivedAmount?: number;
   changeAmount?: number;
   locationName?: string;
+  companyName?: string;
+  companyType?: 'matriz' | 'filial';
   isSubmitting?: boolean;
   isBonus?: boolean;
   referenceAmount?: number;
@@ -90,6 +94,8 @@ export const SaleConfirmationModal: React.FC<SaleConfirmationModalProps> = ({
   receivedAmount,
   changeAmount,
   locationName,
+  companyName,
+  companyType,
   isSubmitting = false,
   isBonus = false,
   referenceAmount,
@@ -353,6 +359,30 @@ export const SaleConfirmationModal: React.FC<SaleConfirmationModalProps> = ({
             </div>
           )}
 
+          {/* Empresa / Filial onde o pedido será gravado */}
+          {companyName && (
+            <div className="bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-[11px] text-slate-600 flex items-center justify-between gap-2">
+              <span className="flex items-center gap-1.5 font-semibold text-slate-500">
+                <Building2 size={14} className="text-blue-600 shrink-0" />
+                Empresa / Filial:
+              </span>
+              <span className="flex items-center gap-1.5 min-w-0">
+                <strong className="text-slate-900 font-extrabold truncate">{companyName}</strong>
+                {companyType && (
+                  <span
+                    className={`shrink-0 text-[9px] font-black uppercase px-1.5 py-0.5 rounded-full border ${
+                      companyType === 'matriz'
+                        ? 'bg-blue-50 text-blue-700 border-blue-200'
+                        : 'bg-indigo-50 text-indigo-700 border-indigo-200'
+                    }`}
+                  >
+                    {companyType === 'matriz' ? 'Matriz' : 'Filial'}
+                  </span>
+                )}
+              </span>
+            </div>
+          )}
+
           {/* Local de Estoque (se informado) */}
           {locationName && (
             <div className="text-[11px] text-slate-500 flex items-center justify-between px-1">
@@ -381,14 +411,20 @@ export const SaleConfirmationModal: React.FC<SaleConfirmationModalProps> = ({
             type="button"
             onClick={onConfirm}
             disabled={isSubmitting}
-            className={`w-full sm:w-1/2 py-3 px-4 rounded-xl text-white font-black text-xs sm:text-sm flex items-center justify-center gap-2 transition-all cursor-pointer shadow-md hover:shadow-lg disabled:opacity-50 ${
+            className={`w-full sm:w-1/2 py-3 px-4 rounded-xl text-white font-black text-xs sm:text-sm flex items-center justify-center gap-2 transition-all cursor-pointer shadow-md hover:shadow-lg disabled:opacity-60 disabled:cursor-not-allowed ${
               isBonus ? 'bg-sky-600 hover:bg-sky-700' : 'bg-emerald-600 hover:bg-emerald-700'
             }`}
           >
-            {isBonus ? <Gift size={18} /> : <CheckCircle2 size={18} />}
+            {isSubmitting ? (
+              <Loader2 size={18} className="animate-spin" />
+            ) : isBonus ? (
+              <Gift size={18} />
+            ) : (
+              <CheckCircle2 size={18} />
+            )}
             <span>
               {isSubmitting
-                ? 'Finalizando...'
+                ? 'Salvando no Firebase...'
                 : isBonus
                 ? 'Confirmar Bonificação'
                 : 'Confirmar e Finalizar'}

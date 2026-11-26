@@ -278,6 +278,8 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
   const [selectedOrder, setSelectedOrder] = useState<Order | null>(null);
   const [showReceiptModal, setShowReceiptModal] = useState(false);
   const [showSaleConfirmationModal, setShowSaleConfirmationModal] = useState(false);
+  const [isFinalizingOrder, setIsFinalizingOrder] = useState(false);
+  const isFinalizingOrderRef = useRef(false);
   const [viewDetailsOrder, setViewDetailsOrder] = useState<Order | null>(null);
   const [editingOrder, setEditingOrder] = useState<Order | null>(null);
 
@@ -1455,39 +1457,92 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
   };
 
   // FINALIZAR PEDIDO DE VENDA, BONIFICAÇÃO OU ORÇAMENTO COMERCIAL (após confirmação na tela)
-  const handleFinalizeOrder = () => {
-    setShowSaleConfirmationModal(false);
+  const handleFinalizeOrder = async () => {
+    if (isFinalizingOrderRef.current) {
+      return;
+    }
 
     if (cart.length === 0) {
+      setShowSaleConfirmationModal(false);
       toast.warning('Adicione pelo menos um produto ao pedido antes de finalizar.', 'Carrinho Vazio');
       return;
     }
 
     if (!selectedCustomerId || selectedCustomerId.trim() === '') {
+      setShowSaleConfirmationModal(false);
       toast.warning('A seleção do cliente é obrigatória para emitir o pedido.', 'Cliente Obrigatório');
       return;
     }
 
     if (!isBonusMode) {
       if (!paymentMethod) {
+        setShowSaleConfirmationModal(false);
         toast.warning('A Forma de Pagamento é obrigatória em todas as modalidades de venda.', 'Forma de Pagamento Obrigatória');
         return;
       }
 
       if (!paymentTerms || paymentTerms.trim() === '') {
+        setShowSaleConfirmationModal(false);
         toast.warning('O Prazo de Pagamento é obrigatório em todas as modalidades de venda.', 'Prazo Obrigatório');
         return;
       }
     }
 
+    // Revalida empresa autorizada no momento da gravação
+    const validatedCompany = Database.ensureValidCurrentCompanyForUser(currentUser, { skipPersist: true });
+    if (validatedCompany.status === 'inativo') {
+      setShowSaleConfirmationModal(false);
+      toast.error(
+        `A empresa "${validatedCompany.tradeName || validatedCompany.name}" está inativa e não pode registrar novos pedidos.`,
+        'Empresa Inativa'
+      );
+      return;
+    }
+
+    const submissionId = saleSessionIdRef.current;
+    const existingDuplicate = Database.findOrderBySubmissionId(submissionId);
+    if (existingDuplicate) {
+      isFinalizingOrderRef.current = true;
+      setIsFinalizingOrder(true);
+      try {
+        const retryResult = await FirebaseSyncService.commitCriticalOperation({
+          operationKey: `order:${existingDuplicate.id}`,
+          entityType: 'order',
+          entityId: existingDuplicate.id,
+          label: `Pedido ${existingDuplicate.number}`,
+        });
+        setShowSaleConfirmationModal(false);
+        if (retryResult.syncState === 'confirmed') {
+          toast.success(`Pedido ${existingDuplicate.number} confirmado no Firebase.`, 'Confirmado na Nuvem');
+        } else if (retryResult.syncState === 'pending_offline') {
+          toast.warning(retryResult.message, 'Aguardando Sincronização');
+        } else {
+          toast.error(retryResult.message, 'Falha na Sincronização');
+        }
+        saleSessionIdRef.current = generateSaleSessionId('PED');
+        setSelectedOrder(existingDuplicate);
+        setShowReceiptModal(true);
+        setCart([]);
+      } finally {
+        isFinalizingOrderRef.current = false;
+        setIsFinalizingOrder(false);
+      }
+      return;
+    }
+
+    isFinalizingOrderRef.current = true;
+    setIsFinalizingOrder(true);
+
     const now = new Date();
     const nowIso = now.toISOString();
     const prefix = isBonusMode ? 'BON' : docType === 'venda' ? 'VD' : 'ORC';
-    const orderNumber = `${prefix}-${now.getFullYear()}-${String(dbState.orders.length + 1).padStart(5, '0')}`;
+    const orderNumber = Database.generateUniqueOrderNumber(prefix, 5);
+    const uniqueOrderId = `ORD-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
 
     try {
+      const latestState = Database.getState();
       // 1. Criar objeto do pedido e validar limites de desconto na camada de persistência
-      const boletoAccounts = Database.getBoletoAccounts(currentCompany.id);
+      const boletoAccounts = Database.getBoletoAccounts(validatedCompany.id);
       const targetBoletoAccount = !isBonusMode && paymentMethod === 'boleto'
         ? boletoAccounts.find((a) => a.id === selectedBoletoAccountId) || boletoAccounts[0] || Database.getBoletoAccounts()[0]
         : undefined;
@@ -1508,12 +1563,12 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
         : (paymentMethod as Order['paymentMethod']);
 
       const newOrder: Order = {
-        id: 'ORD-' + Date.now(),
+        id: uniqueOrderId,
         number: orderNumber,
         type: isBonusMode ? 'venda' : docType,
         orderKind: isBonusMode ? 'bonificacao' : 'venda_normal',
         origin: 'pedidos_venda' as any,
-        companyId: currentCompany.id,
+        companyId: validatedCompany.id,
         customerId: selectedCustomerId || undefined,
         customerName: selectedCustomer ? selectedCustomer.name : 'Consumidor Final (Não Identificado)',
         customerPhone: selectedCustomer?.phone || selectedCustomer?.whatsapp,
@@ -1550,6 +1605,7 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
         })(),
         stockDeducted: isBonusMode || docType === 'venda',
         financialGenerated: !isBonusMode && docType === 'venda',
+        clientSubmissionId: submissionId,
         createdAt: nowIso,
         updatedAt: nowIso,
       };
@@ -1557,11 +1613,11 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
       const validatedDiscountAuths = isBonusMode
         ? []
         : Database.validateOrderDiscountsForPersistence(newOrder, {
-            saleSessionId: saleSessionIdRef.current,
+            saleSessionId: submissionId,
             globalOrderDiscountValue: orderDiscountVal,
           });
 
-      let currentBalances = [...dbState.stockBalances];
+      let currentBalances = [...latestState.stockBalances];
       const movements = [];
 
       // 2. Se for VENDA ou BONIFICAÇÃO, baixar estoque unificado compartilhado
@@ -1578,7 +1634,7 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
           const { updatedBalances, createdMovement } = StockEngine.applyMovement(
             currentBalances,
             {
-              companyId: currentCompany.id,
+              companyId: validatedCompany.id,
               productId: item.productId,
               productCode: item.productCode,
               productDescription: item.description,
@@ -1594,8 +1650,8 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
               userId: currentUser.id,
               userName: currentUser.name,
               notes: isBonusMode
-                ? formatBonusStockExitNote(orderNumber, currentCompany.tradeName || currentCompany.name)
-                : `Venda ${orderNumber} por ${currentUser.name} (${currentCompany.tradeName || currentCompany.name})`,
+                ? formatBonusStockExitNote(orderNumber, validatedCompany.tradeName || validatedCompany.name)
+                : `Venda ${orderNumber} por ${currentUser.name} (${validatedCompany.tradeName || validatedCompany.name})`,
             },
             { allowNegativeStock: Database.canSellNegativeStock() }
           );
@@ -1607,12 +1663,12 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
       const finalizedOrder = isBonusMode
         ? newOrder
         : Database.finalizeOrderDiscountAuthorizations(newOrder, validatedDiscountAuths, {
-            saleSessionId: saleSessionIdRef.current,
+            saleSessionId: submissionId,
             skipPersist: true,
           });
 
       // 3. Se for venda normal a prazo / cartão / boleto, gerar Contas a Receber (NUNCA para Bonificação)
-      let updatedReceivables = [...dbState.accountsReceivable];
+      let updatedReceivables = [...latestState.accountsReceivable];
       if (!isBonusMode && docType === 'venda' && (paymentMethod === 'boleto' || paymentMethod === 'crediario' || installments > 1)) {
         const valParcela = Number((orderTotal / installments).toFixed(2));
         for (let i = 1; i <= installments; i++) {
@@ -1620,8 +1676,8 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
           const due = new Date();
           due.setDate(due.getDate() + daysOffset);
           updatedReceivables.push({
-            id: 'REC-' + Date.now() + '-' + i,
-            companyId: currentCompany.id,
+            id: `REC-${Date.now()}-${i}-${Math.random().toString(36).slice(2, 5)}`,
+            companyId: validatedCompany.id,
             orderId: finalizedOrder.id,
             orderNumber: finalizedOrder.number,
             customerId: selectedCustomerId,
@@ -1646,7 +1702,7 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
         }
       }
 
-      // 4. Salvar estado no banco
+      // 4. Salvar estado no banco local e confirmar efetivamente no Firebase Firestore
       const state = Database.getState();
       state.stockBalances = currentBalances;
       state.stockMovements = [...movements, ...state.stockMovements];
@@ -1663,13 +1719,34 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
           : `${docType === 'orcamento' ? 'Orçamento' : 'Pedido de Venda'} ${orderNumber} emitido por ${currentUser.name} para ${finalizedOrder.customerName}. Total: ${formatCurrency(orderTotal)}`
       );
 
+      const docLabel = isBonusMode ? 'Pedido de Bonificação' : docType === 'orcamento' ? 'Orçamento' : 'Pedido de Venda';
+      const syncResult = await FirebaseSyncService.commitCriticalOperation({
+        operationKey: `order:${finalizedOrder.id}`,
+        entityType: 'order',
+        entityId: finalizedOrder.id,
+        label: `${docLabel} ${orderNumber}`,
+      });
+
       // Renova a sessão para impedir reutilização de autorizações em pedidos futuros
       saleSessionIdRef.current = generateSaleSessionId('PED');
+      setShowSaleConfirmationModal(false);
 
-      toast.success(
-        `${isBonusMode ? 'Pedido de Bonificação' : docType === 'orcamento' ? 'Orçamento' : 'Pedido de Venda'} ${orderNumber} emitido com sucesso!`,
-        isBonusMode ? 'Bonificação Registrada' : 'Documento Emitido'
-      );
+      if (syncResult.syncState === 'confirmed') {
+        toast.success(
+          `${docLabel} ${orderNumber} salvo e confirmado no Firebase!`,
+          isBonusMode ? 'Bonificação Confirmada na Nuvem' : 'Confirmado no Firebase'
+        );
+      } else if (syncResult.syncState === 'pending_offline') {
+        toast.warning(
+          `${docLabel} ${orderNumber} salvo localmente (sem conexão). Aguardando sincronização automática com o Firebase.`,
+          'Pendente de Sincronização'
+        );
+      } else {
+        toast.error(
+          `${docLabel} ${orderNumber} salvo localmente, mas falhou ao gravar no Firebase: ${syncResult.message}`,
+          'Falha na Sincronização'
+        );
+      }
 
       // Reset cart and fields (retornando ao padrão Venda Normal)
       setCart([]);
@@ -1691,7 +1768,11 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
       setSelectedOrder(finalizedOrder);
       setShowReceiptModal(true);
     } catch (e) {
-      alert('Erro ao finalizar pedido: ' + (e as Error).message);
+      setShowSaleConfirmationModal(false);
+      toast.error('Erro ao finalizar pedido: ' + (e as Error).message, 'Erro');
+    } finally {
+      isFinalizingOrderRef.current = false;
+      setIsFinalizingOrder(false);
     }
   };
 
@@ -5081,7 +5162,9 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
       {/* MODAL: TELA DE CONFIRMAÇÃO DA VENDA (NOME DO CLIENTE, TOTAL, FORMA E PRAZO DE PAGTO) */}
       <SaleConfirmationModal
         isOpen={showSaleConfirmationModal}
-        onClose={() => setShowSaleConfirmationModal(false)}
+        onClose={() => {
+          if (!isFinalizingOrder) setShowSaleConfirmationModal(false);
+        }}
         onConfirm={handleFinalizeOrder}
         modality="Pedido de Venda"
         customerName={selectedCustomer ? selectedCustomer.name : 'Consumidor Final (Não Identificado)'}
@@ -5093,6 +5176,9 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
         installments={isBonusMode ? 0 : installments}
         itemsCount={cart.reduce((s, i) => s + i.quantity, 0)}
         locationName={selectedLocationName}
+        companyName={currentCompany.tradeName || currentCompany.name}
+        companyType={currentCompany.type}
+        isSubmitting={isFinalizingOrder}
         isBonus={isBonusMode}
         referenceAmount={isBonusMode ? orderTotal : undefined}
       />

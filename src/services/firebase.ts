@@ -756,8 +756,12 @@ export async function loginWithSystemCredentials(
     targetUser.updatedAt = new Date().toISOString();
   }
 
-  // Define a sessão ativa no Database
+  // Define a sessão ativa no Database e garante que a empresa selecionada corresponda às empresas autorizadas do usuário
   Database.setCurrentUser(targetUser.id);
+  Database.ensureValidCurrentCompanyForUser(targetUser, {
+    preferUserLinkedCompany: true,
+    skipPersist: true,
+  });
   Database.setSessionAuthenticated(true, rememberMe);
   Database.persist();
 
@@ -1007,6 +1011,7 @@ export function onFirebaseAuthStateChanged(callback: (user: User | null, loading
         if (state.currentUserId !== matchedUser.id) {
           Database.setCurrentUser(matchedUser.id);
         }
+        Database.ensureValidCurrentCompanyForUser(matchedUser, { skipPersist: true });
         Database.setSessionAuthenticated(true);
         callback(matchedUser, false);
       } else {

@@ -445,6 +445,7 @@ export interface Order {
   preManifestStatus?: OrderStatus;
   preManifestDeliveryStatus?: 'pendente' | 'em_romaneio' | 'em_transito' | 'entregue' | 'nao_entregue';
   discountAuthorizations?: DiscountAuthorizationRecord[]; // Registro auditável de autorizações de desconto excedente
+  clientSubmissionId?: string; // Chave de idempotência para evitar duplicidade em reenvios/retentativas
   createdAt: string;
   updatedAt: string;
 }

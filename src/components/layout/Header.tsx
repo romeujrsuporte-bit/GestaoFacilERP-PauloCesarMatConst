@@ -37,12 +37,20 @@ export const Header: React.FC<HeaderProps> = ({
   onRequestLogout,
 }) => {
   const dbState = Database.getState();
-  const currentCompany = Database.getCurrentCompany();
   const currentUser = Database.getCurrentUser();
+  const availableCompanies = Database.getAvailableCompaniesForUser(currentUser);
+  const currentCompany = Database.resolveAuthorizedCompanyForUser(currentUser, dbState.currentCompanyId);
   const isAdmin = Database.isAdmin(currentUser);
   const isGerente = Database.isGerente(currentUser);
   const isMasterAdmin = Database.isMasterAdmin(currentUser);
-  const availableCompanies = Database.getAvailableCompaniesForUser(currentUser);
+  const canSwitchCompany = availableCompanies.length > 1;
+
+  // Garante que o companyId interno permaneça sempre sincronizado com uma empresa autorizada
+  useEffect(() => {
+    if (Database.isSessionAuthenticated() && dbState.currentCompanyId !== currentCompany.id) {
+      Database.ensureValidCurrentCompanyForUser(currentUser);
+    }
+  }, [dbState.currentCompanyId, currentCompany.id, currentUser?.id]);
 
   const [isProfileMenuOpen, setIsProfileMenuOpen] = useState(false);
   const [isChangePassOpen, setIsChangePassOpen] = useState(false);
@@ -61,8 +69,12 @@ export const Header: React.FC<HeaderProps> = ({
 
   const handleCompanyChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
     const newCompanyId = e.target.value;
-    Database.setCurrentCompany(newCompanyId);
-    const targetComp = dbState.companies.find((c) => c.id === newCompanyId);
+    const changed = Database.setCurrentCompany(newCompanyId);
+    if (!changed) {
+      toast.error('Você não possui permissão para operar nesta empresa.', 'Empresa Não Autorizada');
+      return;
+    }
+    const targetComp = availableCompanies.find((c) => c.id === newCompanyId);
     const compLabel = targetComp ? (targetComp.tradeName || targetComp.name) : newCompanyId;
     Database.addAuditLog(
       'TROCA_EMPRESA',
@@ -153,18 +165,27 @@ export const Header: React.FC<HeaderProps> = ({
           ) : (
             <Building2 size={16} className="text-slate-400 shrink-0" />
           )}
-          <select
-            value={currentCompany.id}
-            onChange={handleCompanyChange}
-            className="bg-transparent text-xs font-semibold text-slate-700 focus:outline-hidden cursor-pointer truncate w-full"
-            title="Alternar entre Matriz e Filiais"
-          >
-            {availableCompanies.map((comp) => (
-              <option key={comp.id} value={comp.id}>
-                {comp.tradeName || comp.name} ({comp.type === 'matriz' ? 'Matriz' : 'Filial'})
-              </option>
-            ))}
-          </select>
+          {canSwitchCompany ? (
+            <select
+              value={currentCompany.id}
+              onChange={handleCompanyChange}
+              className="bg-transparent text-xs font-semibold text-slate-700 focus:outline-hidden cursor-pointer truncate w-full"
+              title="Alternar entre Matriz e Filiais"
+            >
+              {availableCompanies.map((comp) => (
+                <option key={comp.id} value={comp.id}>
+                  {comp.tradeName || comp.name} ({comp.type === 'matriz' ? 'Matriz' : 'Filial'})
+                </option>
+              ))}
+            </select>
+          ) : (
+            <span
+              className="text-xs font-semibold text-slate-700 truncate"
+              title={`Empresa vinculada: ${currentCompany.tradeName || currentCompany.name}`}
+            >
+              {currentCompany.tradeName || currentCompany.name} ({currentCompany.type === 'matriz' ? 'Matriz' : 'Filial'})
+            </span>
+          )}
         </div>
       </div>
 
@@ -323,19 +344,27 @@ export const Header: React.FC<HeaderProps> = ({
         </div>
 
         <div className="flex-1 min-w-0 relative">
-          <select
-            value={currentCompany.id}
-            onChange={handleCompanyChange}
-            aria-label="Selecionar empresa para visualizar os dados"
-            className="w-full bg-slate-800/95 hover:bg-slate-750 text-white text-xs font-bold py-1.5 pl-2.5 pr-7 rounded-lg border border-slate-700 focus:outline-hidden focus:ring-2 focus:ring-emerald-500 appearance-none cursor-pointer truncate shadow-inner"
-          >
-            {availableCompanies.map((comp) => (
-              <option key={comp.id} value={comp.id} className="bg-slate-900 text-white py-1">
-                {comp.tradeName || comp.name} ({comp.type === 'matriz' ? 'Matriz' : 'Filial'})
-              </option>
-            ))}
-          </select>
-          <ChevronDown size={14} className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 text-slate-400" />
+          {canSwitchCompany ? (
+            <>
+              <select
+                value={currentCompany.id}
+                onChange={handleCompanyChange}
+                aria-label="Selecionar empresa para visualizar os dados"
+                className="w-full bg-slate-800/95 hover:bg-slate-750 text-white text-xs font-bold py-1.5 pl-2.5 pr-7 rounded-lg border border-slate-700 focus:outline-hidden focus:ring-2 focus:ring-emerald-500 appearance-none cursor-pointer truncate shadow-inner"
+              >
+                {availableCompanies.map((comp) => (
+                  <option key={comp.id} value={comp.id} className="bg-slate-900 text-white py-1">
+                    {comp.tradeName || comp.name} ({comp.type === 'matriz' ? 'Matriz' : 'Filial'})
+                  </option>
+                ))}
+              </select>
+              <ChevronDown size={14} className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 text-slate-400" />
+            </>
+          ) : (
+            <div className="w-full bg-slate-800/95 text-white text-xs font-bold py-1.5 px-2.5 rounded-lg border border-slate-700 truncate shadow-inner">
+              {currentCompany.tradeName || currentCompany.name} ({currentCompany.type === 'matriz' ? 'Matriz' : 'Filial'})
+            </div>
+          )}
         </div>
 
         <span
