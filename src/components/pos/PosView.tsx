@@ -53,6 +53,7 @@ import { PriceLookupModal } from '../common/PriceLookupModal';
 import { CashRegisterIcon } from '../common/icons/CashRegisterIcon';
 import { toast } from '../../services/toast';
 import { CustomerSearchCombobox } from '../orders/CustomerSearchCombobox';
+import { PosQuickCustomerModal } from './PosQuickCustomerModal';
 import { isBillableSaleOrder } from '../../utils/orderUtils';
 import {
   SaleObservationAlerts,
@@ -221,14 +222,6 @@ export const PosView: React.FC<PosViewProps> = ({
 
   // Modal de Cadastro Rápido de Cliente [F3]
   const [showQuickCustomerModal, setShowQuickCustomerModal] = useState(false);
-  const [quickCustName, setQuickCustName] = useState('');
-  const [quickCustCpfCnpj, setQuickCustCpfCnpj] = useState('');
-  const [quickCustPhone, setQuickCustPhone] = useState('');
-  const [quickCustEmail, setQuickCustEmail] = useState('');
-  const [quickCustCity, setQuickCustCity] = useState('');
-  const [quickCustState, setQuickCustState] = useState('');
-  const [quickCustType, setQuickCustType] = useState<'PF' | 'PJ'>('PF');
-  const [quickCustCreditLimit, setQuickCustCreditLimit] = useState('');
 
   // Cancelamento de venda recente
   const [cancellingOrderId, setCancellingOrderId] = useState<string | null>(null);
@@ -1412,59 +1405,6 @@ export const PosView: React.FC<PosViewProps> = ({
     window.addEventListener('keydown', handleModalKeyDown);
     return () => window.removeEventListener('keydown', handleModalKeyDown);
   }, [showSaleConfirmationModal, paymentMethod, paymentTerm, numericReceived, total]);
-
-  // Cadastrar Cliente Rapidamente no Balcão
-  const handleQuickRegisterCustomer = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!quickCustName.trim()) {
-      alert('Informe obrigatoriamente o Nome do Cliente.');
-      return;
-    }
-
-    const state = Database.getState();
-    const nextNum = state.customers.length + 1;
-    const autoCode = `CLI-${String(nextNum).padStart(4, '0')}`;
-
-    const newCust: Customer = {
-      id: 'CLI-' + Date.now(),
-      code: autoCode,
-      name: quickCustName.trim(),
-      type: quickCustType,
-      cpfCnpj: quickCustCpfCnpj.trim(),
-      phone: quickCustPhone.trim(),
-      email: quickCustEmail.trim() || undefined,
-      city: quickCustCity.trim() || '',
-      state: quickCustState.trim() || '',
-      creditLimit: parseFloat(quickCustCreditLimit) || 0,
-      status: 'ativo',
-      notes: 'Cadastrado no balcão do PDV',
-    };
-
-    state.customers.unshift(newCust);
-    Database.persist();
-
-    Database.addAuditLog(
-      'CRIAR_CLIENTE_PDV',
-      'PDV',
-      newCust.id,
-      `Cliente ${newCust.name} (${newCust.code}) cadastrado no PDV Balcão por ${currentUser.name}`
-    );
-
-    // Seleciona imediatamente o cliente recém-cadastrado no PDV
-    setSelectedCustomerId(newCust.id);
-
-    toast.success(`Cliente "${newCust.name}" cadastrado e selecionado com sucesso no PDV!`, 'Cliente Cadastrado');
-
-    // Limpa formulário e fecha modal
-    setQuickCustName('');
-    setQuickCustCpfCnpj('');
-    setQuickCustPhone('');
-    setQuickCustEmail('');
-    setQuickCustCity('');
-    setQuickCustState('');
-    setQuickCustCreditLimit('');
-    setShowQuickCustomerModal(false);
-  };
 
   // Seleção da Forma de Pagamento com automação de Prazo de Pagamento conforme regras do PDV
   const handleSelectPaymentMethod = (method: 'dinheiro' | 'pix' | 'cartao_debito' | 'cartao_credito' | 'boleto' | 'crediario') => {
@@ -4134,175 +4074,12 @@ export const PosView: React.FC<PosViewProps> = ({
       )}
 
       {/* MODAL: CADASTRO RÁPIDO DE CLIENTE NO BALCÃO [F3] */}
-      {showQuickCustomerModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-xs p-4 overflow-y-auto">
-          <div className="bg-white rounded-2xl max-w-lg w-full border border-slate-200 shadow-2xl p-5 space-y-4 max-h-[90vh] flex flex-col">
-            <div className="flex justify-between items-center pb-2.5 border-b border-slate-100">
-              <div className="flex items-center gap-2">
-                <div className="w-8 h-8 rounded-lg bg-emerald-100 text-emerald-700 flex items-center justify-center">
-                  <UserPlus size={18} />
-                </div>
-                <div>
-                  <h3 className="font-extrabold text-sm sm:text-base text-slate-900">Novo Cliente no Balcão</h3>
-                  <p className="text-[11px] text-slate-500">Cadastre e vincule imediatamente à venda em andamento</p>
-                </div>
-              </div>
-              <button
-                type="button"
-                onClick={() => setShowQuickCustomerModal(false)}
-                className="text-slate-400 hover:text-slate-600 p-1.5 rounded-lg hover:bg-slate-100"
-              >
-                <X size={18} />
-              </button>
-            </div>
-
-            <form onSubmit={handleQuickRegisterCustomer} className="space-y-3 flex-1 overflow-y-auto pr-1">
-              {/* Tipo de Pessoa */}
-              <div>
-                <label className="block text-[11px] font-bold text-slate-600 mb-1">Tipo de Cliente</label>
-                <div className="grid grid-cols-2 gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setQuickCustType('PF')}
-                    className={`py-1.5 px-3 rounded-lg text-xs font-bold border transition-all cursor-pointer ${
-                      quickCustType === 'PF'
-                        ? 'bg-emerald-50 text-emerald-800 border-emerald-300 shadow-2xs'
-                        : 'bg-slate-50 text-slate-600 border-slate-200 hover:bg-slate-100'
-                    }`}
-                  >
-                    Pessoa Física (CPF)
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setQuickCustType('PJ')}
-                    className={`py-1.5 px-3 rounded-lg text-xs font-bold border transition-all cursor-pointer ${
-                      quickCustType === 'PJ'
-                        ? 'bg-emerald-50 text-emerald-800 border-emerald-300 shadow-2xs'
-                        : 'bg-slate-50 text-slate-600 border-slate-200 hover:bg-slate-100'
-                    }`}
-                  >
-                    Pessoa Jurídica (CNPJ)
-                  </button>
-                </div>
-              </div>
-
-              {/* Nome / Razão Social */}
-              <div>
-                <label className="block text-xs font-bold text-slate-800 mb-1">
-                  Nome Completo / Razão Social <span className="text-rose-500">*</span>
-                </label>
-                <input
-                  type="text"
-                  required
-                  placeholder={quickCustType === 'PF' ? "Ex: João da Silva Sauro" : "Ex: GestãoFácil Comércio e Serviços Ltda"}
-                  value={quickCustName}
-                  onChange={(e) => setQuickCustName(e.target.value)}
-                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-semibold text-slate-900 focus:outline-hidden focus:bg-white focus:ring-2 focus:ring-emerald-500"
-                  autoFocus
-                />
-              </div>
-
-              {/* CPF/CNPJ e Telefone */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-                <div>
-                  <label className="block text-xs font-bold text-slate-700 mb-1">
-                    {quickCustType === 'PF' ? 'CPF' : 'CNPJ'}
-                  </label>
-                  <input
-                    type="text"
-                    placeholder={quickCustType === 'PF' ? "Ex: 000.000.000-00" : "Ex: 00.000.000/0001-00"}
-                    value={quickCustCpfCnpj}
-                    onChange={(e) => setQuickCustCpfCnpj(e.target.value)}
-                    className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-semibold text-slate-900 focus:outline-hidden focus:bg-white focus:ring-2 focus:ring-emerald-500"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-xs font-bold text-slate-700 mb-1">
-                    Telefone / WhatsApp
-                  </label>
-                  <input
-                    type="text"
-                    placeholder="Ex: (00) 00000-0000"
-                    value={quickCustPhone}
-                    onChange={(e) => setQuickCustPhone(e.target.value)}
-                    className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-semibold text-slate-900 focus:outline-hidden focus:bg-white focus:ring-2 focus:ring-emerald-500"
-                  />
-                </div>
-              </div>
-
-              {/* E-mail */}
-              <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">
-                  E-mail para Envio de Recibo (Opcional)
-                </label>
-                <input
-                  type="email"
-                  placeholder="Ex: cliente@exemplo.com"
-                  value={quickCustEmail}
-                  onChange={(e) => setQuickCustEmail(e.target.value)}
-                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-semibold text-slate-900 focus:outline-hidden focus:bg-white focus:ring-2 focus:ring-emerald-500"
-                />
-              </div>
-
-              {/* Cidade / UF e Limite de Crédito */}
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
-                <div className="sm:col-span-2">
-                  <label className="block text-xs font-bold text-slate-700 mb-1">Cidade / UF</label>
-                  <div className="grid grid-cols-3 gap-1.5">
-                    <input
-                      type="text"
-                      placeholder="Ex: Feira de Santana"
-                      value={quickCustCity}
-                      onChange={(e) => setQuickCustCity(e.target.value)}
-                      className="col-span-2 px-2.5 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-semibold text-slate-900 focus:outline-hidden focus:bg-white"
-                    />
-                    <input
-                      type="text"
-                      placeholder="Ex: BA"
-                      maxLength={2}
-                      value={quickCustState}
-                      onChange={(e) => setQuickCustState(e.target.value.toUpperCase())}
-                      className="px-2 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-semibold text-slate-900 text-center uppercase focus:outline-hidden focus:bg-white"
-                    />
-                  </div>
-                </div>
-
-                <div>
-                  <label className="block text-xs font-bold text-slate-700 mb-1">Limite Crédito (R$)</label>
-                  <input
-                    type="number"
-                    step="50"
-                    min="0"
-                    placeholder="Ex: 1.000,00"
-                    value={quickCustCreditLimit}
-                    onChange={(e) => setQuickCustCreditLimit(e.target.value)}
-                    className="w-full px-2.5 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-slate-900 text-right focus:outline-hidden focus:bg-white"
-                  />
-                </div>
-              </div>
-
-              {/* Botões de Ação */}
-              <div className="flex items-center justify-end gap-2 pt-3 border-t border-slate-100">
-                <button
-                  type="button"
-                  onClick={() => setShowQuickCustomerModal(false)}
-                  className="px-4 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-100 rounded-xl transition-colors cursor-pointer"
-                >
-                  Cancelar
-                </button>
-                <button
-                  type="submit"
-                  className="px-4 py-2 text-xs font-bold bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl shadow-xs transition-colors flex items-center gap-1.5 cursor-pointer"
-                >
-                  <CheckCircle2 size={15} />
-                  <span>Cadastrar e Selecionar</span>
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
+      <PosQuickCustomerModal
+        isOpen={showQuickCustomerModal}
+        onClose={() => setShowQuickCustomerModal(false)}
+        onCustomerSelected={(cust) => setSelectedCustomerId(cust.id)}
+        currentUserName={currentUser.name}
+      />
 
       {/* MODAL: FINALIZAR PEDIDO NO PDV BALCÃO (FORMA DE PAGAMENTO, PRAZO DE PAGAMENTO E CONFIRMAÇÃO) */}
       {showSaleConfirmationModal && (

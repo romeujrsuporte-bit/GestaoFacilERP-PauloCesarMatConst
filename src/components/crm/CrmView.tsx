@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import {
   Users,
   Truck,
@@ -15,6 +15,8 @@ import {
   Power,
   CheckCircle2,
   AlertTriangle,
+  Loader2,
+  Building2,
 } from 'lucide-react';
 import { Database } from '../../services/db';
 import { Customer, Supplier } from '../../types';
@@ -22,6 +24,16 @@ import { formatCurrency } from '../../services/pricingEngine';
 import { ExcelService } from '../../services/excelService';
 import { toast } from '../../services/toast';
 import { FirebaseSyncService } from '../../services/firebaseSync';
+import {
+  buildCnpjFormMerge,
+  CnpjFieldConflict,
+  findExistingCustomerByCnpj,
+  isCompleteCnpjCandidate,
+  isValidCnpj,
+  lookupCnpj,
+  normalizeDocument,
+} from '../../services/cnpjLookupService';
+import { CnpjFeedbackState, CnpjLookupBanner } from '../common/CnpjLookupBanner';
 import { SortableTh, SortConfig, toggleSortConfig, compareSortValues } from '../common/SortableHeader';
 
 type CustomerSortKey =
@@ -110,6 +122,7 @@ export const CrmView: React.FC<{ initialSubTab?: 'clientes' | 'fornecedores' }> 
     zipCode: '',
     street: '',
     number: '',
+    complement: '',
     neighborhood: '',
     city: '',
     state: 'BA',
@@ -120,9 +133,264 @@ export const CrmView: React.FC<{ initialSubTab?: 'clientes' | 'fornecedores' }> 
     creditLimit: undefined,
     preferredPaymentMethod: '',
     status: 'ativo',
+    cadastralStatus: '',
+    mainCnae: '',
     notes: '',
     showSaleAlert: false,
   });
+
+  // Estado da consulta automática de CNPJ (Cadastro de Clientes)
+  const [cnpjFeedback, setCnpjFeedback] = useState<CnpjFeedbackState>({ status: 'idle' });
+  const [cnpjConflicts, setCnpjConflicts] = useState<CnpjFieldConflict[]>([]);
+  const [pendingOverwriteUpdates, setPendingOverwriteUpdates] = useState<Partial<Customer>>({});
+  const [pendingOverwriteManualFlags, setPendingOverwriteManualFlags] = useState<
+    Partial<{ state: boolean; city: boolean; neighborhood: boolean }>
+  >({});
+  const userEditedFieldsRef = useRef<Set<string>>(new Set());
+  const lastAutoConsultedCnpjRef = useRef<string>('');
+  const cnpjAbortRef = useRef<AbortController | null>(null);
+  const autoLookupTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const custFormRef = useRef(custForm);
+  custFormRef.current = custForm;
+
+  const markFieldAsUserEdited = useCallback((field: string, value: unknown) => {
+    const text = String(value ?? '').trim();
+    if (text.length > 0) {
+      userEditedFieldsRef.current.add(field);
+    } else {
+      userEditedFieldsRef.current.delete(field);
+    }
+  }, []);
+
+  const updateCustField = useCallback(
+    <K extends keyof Customer>(key: K, value: Customer[K]) => {
+      markFieldAsUserEdited(String(key), value);
+      setCustForm((prev) => ({ ...prev, [key]: value }));
+    },
+    [markFieldAsUserEdited]
+  );
+
+  const resetCnpjLookupState = useCallback((existingCustomer?: Customer | null) => {
+    if (autoLookupTimerRef.current) {
+      clearTimeout(autoLookupTimerRef.current);
+      autoLookupTimerRef.current = null;
+    }
+    if (cnpjAbortRef.current) {
+      cnpjAbortRef.current.abort();
+      cnpjAbortRef.current = null;
+    }
+    setCnpjFeedback({ status: 'idle' });
+    setCnpjConflicts([]);
+    setPendingOverwriteUpdates({});
+    setPendingOverwriteManualFlags({});
+
+    const nextEdited = new Set<string>();
+    if (existingCustomer) {
+      const trackedKeys: Array<keyof Customer> = [
+        'name',
+        'tradeName',
+        'zipCode',
+        'street',
+        'number',
+        'complement',
+        'neighborhood',
+        'city',
+        'state',
+        'phone',
+        'email',
+        'cadastralStatus',
+        'mainCnae',
+      ];
+      for (const k of trackedKeys) {
+        const val = existingCustomer[k];
+        if (typeof val === 'string' && val.trim().length > 0) {
+          nextEdited.add(String(k));
+        }
+      }
+      lastAutoConsultedCnpjRef.current = normalizeDocument(existingCustomer.cpfCnpj);
+    } else {
+      lastAutoConsultedCnpjRef.current = '';
+    }
+    userEditedFieldsRef.current = nextEdited;
+  }, []);
+
+  const duplicateCnpjCustomer = useMemo(
+    () => findExistingCustomerByCnpj(dbState.customers, custForm.cpfCnpj, editingCustomer?.id),
+    [dbState.customers, custForm.cpfCnpj, editingCustomer?.id]
+  );
+
+  const handleConsultCnpj = useCallback(
+    async (rawOverride?: string, options?: { isAuto?: boolean; forceRefresh?: boolean }) => {
+      const rawValue = rawOverride ?? custFormRef.current.cpfCnpj ?? '';
+      const clean = normalizeDocument(rawValue);
+
+      if (!isCompleteCnpjCandidate(clean)) {
+        if (!options?.isAuto) {
+          setCnpjFeedback({
+            status: 'error',
+            message: 'Informe os 14 caracteres do CNPJ antes de realizar a consulta.',
+          });
+        }
+        return;
+      }
+
+      if (!isValidCnpj(clean)) {
+        if (!options?.isAuto) {
+          setCnpjFeedback({
+            status: 'error',
+            message: 'CNPJ inválido. Verifique os dígitos informados (suporta formato numérico e alfanumérico).',
+          });
+        }
+        return;
+      }
+
+      if (cnpjAbortRef.current) {
+        cnpjAbortRef.current.abort();
+      }
+      const controller = new AbortController();
+      cnpjAbortRef.current = controller;
+      lastAutoConsultedCnpjRef.current = clean;
+
+      setCnpjFeedback({ status: 'loading' });
+      setCnpjConflicts([]);
+      setPendingOverwriteUpdates({});
+      setPendingOverwriteManualFlags({});
+
+      const result = await lookupCnpj(clean, {
+        signal: controller.signal,
+        forceRefresh: options?.forceRefresh,
+      });
+
+      if (controller.signal.aborted) return;
+
+      if (!result.ok) {
+        if (result.code === 'ABORTED') return;
+        setCnpjFeedback({
+          status: 'error',
+          message: result.message,
+        });
+        if (!options?.isAuto) {
+          toast.warning(result.message, 'Consulta de CNPJ');
+        }
+        return;
+      }
+
+      const latestState = Database.getState();
+      const merge = buildCnpjFormMerge(
+        custFormRef.current,
+        result.data,
+        userEditedFieldsRef.current,
+        {
+          states: latestState.states,
+          cities: latestState.cities,
+          neighborhoods: latestState.neighborhoods,
+        }
+      );
+
+      setCustForm((prev) => ({
+        ...prev,
+        ...merge.safeUpdates,
+      }));
+
+      // Ativa modo manual apenas nos campos de endereço que receberam valor ausente nas listas do ERP
+      setManualAddressInput((prev) => ({
+        ...prev,
+        state: merge.safeUpdates.state && merge.manualAddressFlags.state ? true : prev.state,
+        city: merge.safeUpdates.city && merge.manualAddressFlags.city ? true : prev.city,
+        neighborhood:
+          merge.safeUpdates.neighborhood && merge.manualAddressFlags.neighborhood
+            ? true
+            : prev.neighborhood,
+      }));
+
+      if (merge.conflicts.length > 0) {
+        setCnpjConflicts(merge.conflicts);
+        setPendingOverwriteUpdates(merge.overwriteUpdates);
+        setPendingOverwriteManualFlags(merge.manualAddressFlags);
+      }
+
+      const msg =
+        merge.filledLabels.length > 0
+          ? `Dados do CNPJ encontrados e ${merge.filledLabels.length} campo(s) preenchido(s) automaticamente.`
+          : merge.conflicts.length > 0
+          ? 'Dados do CNPJ encontrados. Os campos já preenchidos manualmente foram preservados.'
+          : 'Dados do CNPJ conferidos com sucesso.';
+
+      setCnpjFeedback({
+        status: 'success',
+        message: msg,
+        data: result.data,
+        filledCount: merge.filledLabels.length,
+        filledAddressCount: merge.filledAddressCount,
+      });
+
+      toast.success(msg, 'CNPJ Consultado');
+    },
+    []
+  );
+
+  const handleApplyCnpjOverwrite = useCallback(() => {
+    if (Object.keys(pendingOverwriteUpdates).length === 0) return;
+    setCustForm((prev) => ({
+      ...prev,
+      ...pendingOverwriteUpdates,
+    }));
+    setManualAddressInput((prev) => ({
+      ...prev,
+      state:
+        pendingOverwriteUpdates.state && pendingOverwriteManualFlags.state ? true : prev.state,
+      city: pendingOverwriteUpdates.city && pendingOverwriteManualFlags.city ? true : prev.city,
+      neighborhood:
+        pendingOverwriteUpdates.neighborhood && pendingOverwriteManualFlags.neighborhood
+          ? true
+          : prev.neighborhood,
+    }));
+    setCnpjConflicts([]);
+    setPendingOverwriteUpdates({});
+    setPendingOverwriteManualFlags({});
+    toast.success('Campos atualizados com os dados da Receita Federal.', 'Dados Aplicados');
+  }, [pendingOverwriteUpdates, pendingOverwriteManualFlags]);
+
+  const handleKeepManualCnpjFields = useCallback(() => {
+    setCnpjConflicts([]);
+    setPendingOverwriteUpdates({});
+    setPendingOverwriteManualFlags({});
+  }, []);
+
+  // Dispara consulta automática (com debounce e sem repetição) ao completar CNPJ válido de 14 caracteres
+  useEffect(() => {
+    if (!isCustomerModalOpen) return;
+
+    if (autoLookupTimerRef.current) {
+      clearTimeout(autoLookupTimerRef.current);
+      autoLookupTimerRef.current = null;
+    }
+
+    const clean = normalizeDocument(custForm.cpfCnpj);
+    if (!isCompleteCnpjCandidate(clean)) return;
+    if (!isValidCnpj(clean)) return;
+    if (clean === lastAutoConsultedCnpjRef.current) return;
+    if (duplicateCnpjCustomer) return;
+
+    autoLookupTimerRef.current = setTimeout(() => {
+      handleConsultCnpj(clean, { isAuto: true });
+    }, 450);
+
+    return () => {
+      if (autoLookupTimerRef.current) {
+        clearTimeout(autoLookupTimerRef.current);
+        autoLookupTimerRef.current = null;
+      }
+    };
+  }, [custForm.cpfCnpj, isCustomerModalOpen, duplicateCnpjCustomer, handleConsultCnpj]);
+
+  // Cancela consulta em andamento ao fechar o modal
+  useEffect(() => {
+    if (!isCustomerModalOpen && cnpjAbortRef.current) {
+      cnpjAbortRef.current.abort();
+      cnpjAbortRef.current = null;
+    }
+  }, [isCustomerModalOpen]);
 
   // Form Fornecedores
   const [suppForm, setSuppForm] = useState<Partial<Supplier>>({
@@ -150,11 +418,26 @@ export const CrmView: React.FC<{ initialSubTab?: 'clientes' | 'fornecedores' }> 
   const handleSaveCustomer = (e: React.FormEvent) => {
     e.preventDefault();
     if (!custForm.name?.trim() || !custForm.code?.trim()) {
-      alert('Código e Nome do cliente são obrigatórios.');
+      toast.warning('Código e Nome/Razão Social do cliente são obrigatórios.', 'Campos Obrigatórios');
       return;
     }
 
     const state = Database.getState();
+
+    // Evita cadastro duplicado com o mesmo CNPJ
+    const existingByCnpj = findExistingCustomerByCnpj(
+      state.customers,
+      custForm.cpfCnpj,
+      editingCustomer?.id
+    );
+    if (existingByCnpj) {
+      toast.error(
+        `Já existe um cliente cadastrado com este CNPJ: ${existingByCnpj.name} (${existingByCnpj.code}).`,
+        'CNPJ Duplicado'
+      );
+      return;
+    }
+
     const routeObj = state.deliveryRoutes?.find((r) => r.id === custForm.deliveryRouteId);
     const deliveryRouteName = routeObj ? routeObj.name : custForm.deliveryRouteName;
 
@@ -164,8 +447,13 @@ export const CrmView: React.FC<{ initialSubTab?: 'clientes' | 'fornecedores' }> 
           ? ({
               ...c,
               ...custForm,
+              tradeName: custForm.tradeName?.trim() || '',
+              zipCode: custForm.zipCode?.trim() || '',
+              complement: custForm.complement?.trim() || '',
               city: custForm.city?.trim() || '',
               state: custForm.state?.trim() || '',
+              cadastralStatus: custForm.cadastralStatus?.trim() || '',
+              mainCnae: custForm.mainCnae?.trim() || '',
               creditLimit: custForm.creditLimit !== undefined && custForm.creditLimit !== null && !isNaN(Number(custForm.creditLimit)) ? Number(custForm.creditLimit) : 0,
               deliveryRouteName,
               notes: custForm.notes?.trim() || '',
@@ -175,6 +463,7 @@ export const CrmView: React.FC<{ initialSubTab?: 'clientes' | 'fornecedores' }> 
           : c
       );
       Database.addAuditLog('ATUALIZAR_CLIENTE', 'CRM', editingCustomer.id, `Cliente ${custForm.name} atualizado`);
+      toast.success(`Cliente "${custForm.name.trim()}" atualizado com sucesso.`, 'Cliente Atualizado');
     } else {
       const newCust: Customer = {
         id: 'CLI-' + Date.now(),
@@ -189,6 +478,7 @@ export const CrmView: React.FC<{ initialSubTab?: 'clientes' | 'fornecedores' }> 
         zipCode: custForm.zipCode?.trim() || '',
         street: custForm.street?.trim() || '',
         number: custForm.number?.trim() || '',
+        complement: custForm.complement?.trim() || '',
         neighborhood: custForm.neighborhood?.trim() || '',
         city: custForm.city?.trim() || '',
         state: custForm.state?.trim() || '',
@@ -199,6 +489,8 @@ export const CrmView: React.FC<{ initialSubTab?: 'clientes' | 'fornecedores' }> 
         creditLimit: custForm.creditLimit !== undefined && custForm.creditLimit !== null && !isNaN(Number(custForm.creditLimit)) ? Number(custForm.creditLimit) : 0,
         preferredPaymentMethod: custForm.preferredPaymentMethod?.trim() || 'À Vista',
         status: custForm.status || 'ativo',
+        cadastralStatus: custForm.cadastralStatus?.trim() || '',
+        mainCnae: custForm.mainCnae?.trim() || '',
         notes: custForm.notes?.trim() || '',
         showSaleAlert: !!custForm.showSaleAlert,
         createdAt: new Date().toISOString(),
@@ -206,6 +498,7 @@ export const CrmView: React.FC<{ initialSubTab?: 'clientes' | 'fornecedores' }> 
       };
       state.customers.unshift(newCust);
       Database.addAuditLog('CRIAR_CLIENTE', 'CRM', newCust.id, `Cliente ${newCust.name} cadastrado`);
+      toast.success(`Cliente "${newCust.name}" cadastrado com sucesso.`, 'Cliente Cadastrado');
     }
 
     Database.persist();
@@ -430,6 +723,13 @@ export const CrmView: React.FC<{ initialSubTab?: 'clientes' | 'fornecedores' }> 
             onClick={() => {
               if (activeTab === 'clientes') {
                 setEditingCustomer(null);
+                setManualAddressInput({
+                  state: false,
+                  city: false,
+                  neighborhood: false,
+                  marketArea: false,
+                });
+                resetCnpjLookupState(null);
                 setCustForm({
                   code: 'CLI-' + String(dbState.customers.length + 1).padStart(3, '0'),
                   name: '',
@@ -439,8 +739,10 @@ export const CrmView: React.FC<{ initialSubTab?: 'clientes' | 'fornecedores' }> 
                   phone: '',
                   whatsapp: '',
                   email: '',
+                  zipCode: '',
                   street: '',
                   number: '',
+                  complement: '',
                   neighborhood: '',
                   city: '',
                   state: 'BA',
@@ -451,6 +753,8 @@ export const CrmView: React.FC<{ initialSubTab?: 'clientes' | 'fornecedores' }> 
                   creditLimit: undefined,
                   preferredPaymentMethod: '',
                   status: 'ativo',
+                  cadastralStatus: '',
+                  mainCnae: '',
                   notes: '',
                   showSaleAlert: false,
                 });
@@ -633,7 +937,26 @@ export const CrmView: React.FC<{ initialSubTab?: 'clientes' | 'fornecedores' }> 
                             type="button"
                             onClick={() => {
                               setEditingCustomer(c);
-                              setCustForm({ ...c, notes: c.notes || '', showSaleAlert: !!c.showSaleAlert });
+                              const stateListed = !c.state || (dbState.states || []).some((s) => s.uf.toUpperCase() === c.state?.toUpperCase());
+                              const cityListed = !c.city || (dbState.cities || []).some((ct) => ct.name.toLowerCase() === c.city?.toLowerCase());
+                              const neighListed = !c.neighborhood || (dbState.neighborhoods || []).some((nb) => nb.name.toLowerCase() === c.neighborhood?.toLowerCase());
+                              setManualAddressInput({
+                                state: !stateListed,
+                                city: !cityListed,
+                                neighborhood: !neighListed,
+                                marketArea: false,
+                              });
+                              resetCnpjLookupState(c);
+                              setCustForm({
+                                ...c,
+                                tradeName: c.tradeName || '',
+                                zipCode: c.zipCode || '',
+                                complement: c.complement || '',
+                                cadastralStatus: c.cadastralStatus || '',
+                                mainCnae: c.mainCnae || '',
+                                notes: c.notes || '',
+                                showSaleAlert: !!c.showSaleAlert,
+                              });
                               setIsCustomerModalOpen(true);
                             }}
                             className="p-1.5 hover:bg-blue-50 text-slate-600 hover:text-blue-700 rounded-lg border border-slate-200 hover:border-blue-200 cursor-pointer"
@@ -774,16 +1097,55 @@ export const CrmView: React.FC<{ initialSubTab?: 'clientes' | 'fornecedores' }> 
               </div>
 
               <div className="sm:col-span-2">
-                <label className="block font-bold text-slate-700 mb-1">Nome ou Razão Social *</label>
-                <input
-                  type="text"
-                  required
-                  value={custForm.name || ''}
-                  onChange={(e) => setCustForm({ ...custForm, name: e.target.value })}
-                  placeholder="Ex: Mercado Central Ltda ou João da Silva"
-                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg font-semibold"
-                />
+                <label className="block font-bold text-slate-700 mb-1">CPF ou CNPJ</label>
+                <div className="flex gap-1.5">
+                  <input
+                    type="text"
+                    value={custForm.cpfCnpj || ''}
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      const clean = normalizeDocument(val);
+                      setCustForm((prev) => ({
+                        ...prev,
+                        cpfCnpj: val,
+                        type: clean.length === 14 ? 'PJ' : prev.type,
+                      }));
+                      if (cnpjFeedback.status !== 'idle') {
+                        setCnpjFeedback({ status: 'idle' });
+                      }
+                    }}
+                    placeholder="Ex: 000.000.000-00 ou 00.000.000/0001-00"
+                    className="flex-1 min-w-0 px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg font-mono"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => handleConsultCnpj(custForm.cpfCnpj, { forceRefresh: false })}
+                    disabled={cnpjFeedback.status === 'loading' || !isCompleteCnpjCandidate(custForm.cpfCnpj)}
+                    title="Consultar dados cadastrais pelo CNPJ"
+                    className="shrink-0 inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 disabled:bg-slate-200 disabled:text-slate-400 text-white font-bold text-xs transition-colors cursor-pointer disabled:cursor-not-allowed whitespace-nowrap"
+                  >
+                    {cnpjFeedback.status === 'loading' ? (
+                      <Loader2 size={14} className="animate-spin" />
+                    ) : (
+                      <Search size={14} />
+                    )}
+                    <span>Consultar CNPJ</span>
+                  </button>
+                </div>
               </div>
+
+              {/* Banner de status da consulta de CNPJ, duplicidade e confirmação de sobrescrita */}
+              {(duplicateCnpjCustomer || cnpjFeedback.status !== 'idle' || cnpjConflicts.length > 0) && (
+                <div className="sm:col-span-3">
+                  <CnpjLookupBanner
+                    feedback={cnpjFeedback}
+                    conflicts={cnpjConflicts}
+                    duplicateCustomer={duplicateCnpjCustomer}
+                    onApplyOverwrite={handleApplyCnpjOverwrite}
+                    onKeepManual={handleKeepManualCnpjFields}
+                  />
+                </div>
+              )}
 
               <div>
                 <label className="block font-bold text-slate-700 mb-1">Tipo de Pessoa</label>
@@ -797,13 +1159,25 @@ export const CrmView: React.FC<{ initialSubTab?: 'clientes' | 'fornecedores' }> 
                 </select>
               </div>
 
-              <div>
-                <label className="block font-bold text-slate-700 mb-1">CPF ou CNPJ</label>
+              <div className="sm:col-span-2">
+                <label className="block font-bold text-slate-700 mb-1">Nome ou Razão Social *</label>
                 <input
                   type="text"
-                  value={custForm.cpfCnpj || ''}
-                  onChange={(e) => setCustForm({ ...custForm, cpfCnpj: e.target.value })}
-                  placeholder="Ex: 000.000.000-00 ou 00.000.000/0001-00"
+                  required
+                  value={custForm.name || ''}
+                  onChange={(e) => updateCustField('name', e.target.value)}
+                  placeholder="Ex: Mercado Central Ltda ou João da Silva"
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg font-semibold"
+                />
+              </div>
+
+              <div className="sm:col-span-3">
+                <label className="block font-bold text-slate-700 mb-1">Nome Fantasia</label>
+                <input
+                  type="text"
+                  value={custForm.tradeName || ''}
+                  onChange={(e) => updateCustField('tradeName', e.target.value)}
+                  placeholder="Ex: Mercado Central"
                   className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg"
                 />
               </div>
@@ -813,7 +1187,7 @@ export const CrmView: React.FC<{ initialSubTab?: 'clientes' | 'fornecedores' }> 
                 <input
                   type="text"
                   value={custForm.phone || ''}
-                  onChange={(e) => setCustForm({ ...custForm, phone: e.target.value })}
+                  onChange={(e) => updateCustField('phone', e.target.value)}
                   placeholder="Ex: (75) 3622-7890"
                   className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg"
                 />
@@ -835,8 +1209,87 @@ export const CrmView: React.FC<{ initialSubTab?: 'clientes' | 'fornecedores' }> 
                 <input
                   type="email"
                   value={custForm.email || ''}
-                  onChange={(e) => setCustForm({ ...custForm, email: e.target.value })}
+                  onChange={(e) => updateCustField('email', e.target.value)}
                   placeholder="Ex: contato@cliente.com.br"
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg"
+                />
+              </div>
+
+              {(custForm.type === 'PJ' || custForm.cadastralStatus || custForm.mainCnae) && (
+                <>
+                  <div>
+                    <label className="block font-bold text-slate-700 mb-1 flex items-center gap-1">
+                      <Building2 size={12} className="text-blue-600" />
+                      <span>Situação Cadastral (Receita)</span>
+                    </label>
+                    <input
+                      type="text"
+                      value={custForm.cadastralStatus || ''}
+                      onChange={(e) => updateCustField('cadastralStatus', e.target.value)}
+                      placeholder="Ex: ATIVA"
+                      className={`w-full px-3 py-2 border rounded-lg font-bold ${
+                        custForm.cadastralStatus?.toUpperCase() === 'ATIVA'
+                          ? 'bg-emerald-50/70 border-emerald-200 text-emerald-800'
+                          : custForm.cadastralStatus
+                          ? 'bg-amber-50/70 border-amber-200 text-amber-900'
+                          : 'bg-slate-50 border-slate-200 text-slate-700'
+                      }`}
+                    />
+                  </div>
+
+                  <div className="sm:col-span-2">
+                    <label className="block font-bold text-slate-700 mb-1">CNAE Principal</label>
+                    <input
+                      type="text"
+                      value={custForm.mainCnae || ''}
+                      onChange={(e) => updateCustField('mainCnae', e.target.value)}
+                      placeholder="Ex: 4744-0/99 - Comércio varejista de materiais de construção"
+                      className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-slate-700"
+                    />
+                  </div>
+                </>
+              )}
+
+              <div>
+                <label className="block font-bold text-slate-700 mb-1">CEP</label>
+                <input
+                  type="text"
+                  value={custForm.zipCode || ''}
+                  onChange={(e) => updateCustField('zipCode', e.target.value)}
+                  placeholder="Ex: 44000-000"
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg font-mono"
+                />
+              </div>
+
+              <div className="sm:col-span-2">
+                <label className="block font-bold text-slate-700 mb-1">Rua / Logradouro</label>
+                <input
+                  type="text"
+                  value={custForm.street || ''}
+                  onChange={(e) => updateCustField('street', e.target.value)}
+                  placeholder="Ex: Av. Getúlio Vargas"
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg"
+                />
+              </div>
+
+              <div>
+                <label className="block font-bold text-slate-700 mb-1">Número</label>
+                <input
+                  type="text"
+                  value={custForm.number || ''}
+                  onChange={(e) => updateCustField('number', e.target.value)}
+                  placeholder="Ex: 1000"
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg"
+                />
+              </div>
+
+              <div>
+                <label className="block font-bold text-slate-700 mb-1">Complemento</label>
+                <input
+                  type="text"
+                  value={custForm.complement || ''}
+                  onChange={(e) => updateCustField('complement', e.target.value)}
+                  placeholder="Ex: Sala 02, Galpão B"
                   className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg"
                 />
               </div>
@@ -851,28 +1304,6 @@ export const CrmView: React.FC<{ initialSubTab?: 'clientes' | 'fornecedores' }> 
                   onChange={(e) => setCustForm({ ...custForm, creditLimit: e.target.value === '' ? undefined : (parseFloat(e.target.value) || 0) })}
                   placeholder="Ex: 1.000,00"
                   className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg font-bold"
-                />
-              </div>
-
-              <div>
-                <label className="block font-bold text-slate-700 mb-1">Rua / Logradouro</label>
-                <input
-                  type="text"
-                  value={custForm.street || ''}
-                  onChange={(e) => setCustForm({ ...custForm, street: e.target.value })}
-                  placeholder="Ex: Av. Getúlio Vargas"
-                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg"
-                />
-              </div>
-
-              <div>
-                <label className="block font-bold text-slate-700 mb-1">Número</label>
-                <input
-                  type="text"
-                  value={custForm.number || ''}
-                  onChange={(e) => setCustForm({ ...custForm, number: e.target.value })}
-                  placeholder="Ex: 1000"
-                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg"
                 />
               </div>
 
@@ -893,7 +1324,7 @@ export const CrmView: React.FC<{ initialSubTab?: 'clientes' | 'fornecedores' }> 
                     type="text"
                     maxLength={2}
                     value={custForm.state || ''}
-                    onChange={(e) => setCustForm({ ...custForm, state: e.target.value.toUpperCase() })}
+                    onChange={(e) => updateCustField('state', e.target.value.toUpperCase())}
                     className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg font-bold"
                     placeholder="Ex: SP"
                   />
@@ -902,7 +1333,7 @@ export const CrmView: React.FC<{ initialSubTab?: 'clientes' | 'fornecedores' }> 
                     value={custForm.state || ''}
                     onChange={(e) => {
                       const newUf = e.target.value;
-                      setCustForm({ ...custForm, state: newUf });
+                      updateCustField('state', newUf);
                     }}
                     className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg font-medium text-slate-800"
                   >
@@ -932,7 +1363,7 @@ export const CrmView: React.FC<{ initialSubTab?: 'clientes' | 'fornecedores' }> 
                   <input
                     type="text"
                     value={custForm.city || ''}
-                    onChange={(e) => setCustForm({ ...custForm, city: e.target.value })}
+                    onChange={(e) => updateCustField('city', e.target.value)}
                     className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg"
                     placeholder="Ex: Feira de Santana"
                   />
@@ -941,6 +1372,7 @@ export const CrmView: React.FC<{ initialSubTab?: 'clientes' | 'fornecedores' }> 
                     value={custForm.city || ''}
                     onChange={(e) => {
                       const val = e.target.value;
+                      markFieldAsUserEdited('city', val);
                       if (!val) {
                         setCustForm({ ...custForm, city: '' });
                         return;
@@ -986,7 +1418,7 @@ export const CrmView: React.FC<{ initialSubTab?: 'clientes' | 'fornecedores' }> 
                   <input
                     type="text"
                     value={custForm.neighborhood || ''}
-                    onChange={(e) => setCustForm({ ...custForm, neighborhood: e.target.value })}
+                    onChange={(e) => updateCustField('neighborhood', e.target.value)}
                     placeholder="Ex: Kalilândia, Santa Mônica"
                     className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg"
                   />
@@ -995,6 +1427,7 @@ export const CrmView: React.FC<{ initialSubTab?: 'clientes' | 'fornecedores' }> 
                     value={custForm.neighborhood || ''}
                     onChange={(e) => {
                       const val = e.target.value;
+                      markFieldAsUserEdited('neighborhood', val);
                       if (!val) {
                         setCustForm({ ...custForm, neighborhood: '' });
                         return;

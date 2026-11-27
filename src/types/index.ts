@@ -316,6 +316,8 @@ export interface Customer {
   creditHistory?: CustomerCreditEntry[]; // Histórico detalhado de créditos e débitos
   preferredPaymentMethod?: string;
   status: 'ativo' | 'inativo';
+  cadastralStatus?: string; // Situação cadastral na Receita Federal (ex: ATIVA, BAIXADA, SUSPENSA)
+  mainCnae?: string; // CNAE principal obtido na consulta de CNPJ
   notes?: string;
   showSaleAlert?: boolean; // Exibir observação como aviso destacado durante a venda
   createdAt?: string;
