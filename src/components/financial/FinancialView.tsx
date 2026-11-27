@@ -115,6 +115,41 @@ export interface CashFlowEntry {
   amount: number;
 }
 
+const formatCashDecimalPtBr = (value: number): string => {
+  const safe = Number.isFinite(value) ? value : 0;
+  return safe.toLocaleString('pt-BR', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
+};
+
+const sanitizeCashCurrencyInput = (raw: string): string => {
+  let normalized = raw.replace(/[^0-9.,]/g, '');
+  if (normalized.includes(',')) {
+    normalized = normalized.replace(/\./g, '');
+  } else if (normalized.includes('.')) {
+    const lastDot = normalized.lastIndexOf('.');
+    normalized =
+      normalized.slice(0, lastDot).replace(/\./g, '') +
+      ',' +
+      normalized.slice(lastDot + 1);
+  }
+  const commaIdx = normalized.indexOf(',');
+  if (commaIdx !== -1) {
+    const integerPart = normalized.slice(0, commaIdx);
+    const decimalPart = normalized.slice(commaIdx + 1).replace(/,/g, '').slice(0, 2);
+    return `${integerPart},${decimalPart}`;
+  }
+  return normalized;
+};
+
+const parseCashDecimalPtBr = (raw: string): number => {
+  const cleaned = raw.replace(/\./g, '').replace(',', '.').trim();
+  const parsed = parseFloat(cleaned);
+  if (!Number.isFinite(parsed) || parsed < 0) return 0;
+  return Number(parsed.toFixed(2));
+};
+
 /**
  * Normaliza e categoriza a forma de pagamento canônica para divisão e totalização no Fluxo de Caixa.
  */
@@ -537,9 +572,9 @@ export const FinancialView: React.FC<{ initialSubTab?: FinancialSubTab }> = ({
 
   // Fechamento de Caixa PDV (Conferência Cega)
   const [isCloseRegisterModalOpen, setIsCloseRegisterModalOpen] = useState(false);
-  const [reportedCash, setReportedCash] = useState('');
-  const [reportedPix, setReportedPix] = useState('');
-  const [reportedCard, setReportedCard] = useState('');
+  const [reportedCash, setReportedCash] = useState('0,00');
+  const [reportedPix, setReportedPix] = useState('0,00');
+  const [reportedCard, setReportedCard] = useState('0,00');
   const [closingNotes, setClosingNotes] = useState('');
 
   // Modal Suprimento / Sangria
@@ -2323,9 +2358,9 @@ export const FinancialView: React.FC<{ initialSubTab?: FinancialSubTab }> = ({
 
     const expectedTotal = expectedMoney + expectedPix + expectedCard;
 
-    const repMoney = parseFloat(reportedCash) || 0;
-    const repPix = parseFloat(reportedPix) || 0;
-    const repCard = parseFloat(reportedCard) || 0;
+    const repMoney = parseCashDecimalPtBr(reportedCash);
+    const repPix = parseCashDecimalPtBr(reportedPix);
+    const repCard = parseCashDecimalPtBr(reportedCard);
     const repTotal = repMoney + repPix + repCard;
 
     const diff = repTotal - expectedTotal;
@@ -2368,9 +2403,9 @@ export const FinancialView: React.FC<{ initialSubTab?: FinancialSubTab }> = ({
     );
 
     setIsCloseRegisterModalOpen(false);
-    setReportedCash('');
-    setReportedPix('');
-    setReportedCard('');
+    setReportedCash('0,00');
+    setReportedPix('0,00');
+    setReportedCard('0,00');
     setClosingNotes('');
   };
 
@@ -4799,7 +4834,12 @@ export const FinancialView: React.FC<{ initialSubTab?: FinancialSubTab }> = ({
                   - Sangria
                 </button>
                 <button
-                  onClick={() => setIsCloseRegisterModalOpen(true)}
+                  onClick={() => {
+                    setReportedCash(formatCashDecimalPtBr(parseCashDecimalPtBr(reportedCash)));
+                    setReportedPix(formatCashDecimalPtBr(parseCashDecimalPtBr(reportedPix)));
+                    setReportedCard(formatCashDecimalPtBr(parseCashDecimalPtBr(reportedCard)));
+                    setIsCloseRegisterModalOpen(true);
+                  }}
                   className="px-4 py-2 bg-slate-900 hover:bg-black text-white font-bold text-xs rounded-lg shadow-xs transition-colors"
                 >
                   Encerrar Turno / Fechar Caixa
@@ -4920,13 +4960,14 @@ export const FinancialView: React.FC<{ initialSubTab?: FinancialSubTab }> = ({
               <div>
                 <label className="block font-bold text-slate-700 mb-1">Total em Dinheiro na Gaveta (R$)</label>
                 <input
-                  type="number"
-                  step="0.01"
-                  min="0"
+                  type="text"
+                  inputMode="decimal"
                   required
                   placeholder="0,00"
                   value={reportedCash}
-                  onChange={(e) => setReportedCash(e.target.value)}
+                  onFocus={(e) => e.target.select()}
+                  onChange={(e) => setReportedCash(sanitizeCashCurrencyInput(e.target.value))}
+                  onBlur={() => setReportedCash(formatCashDecimalPtBr(parseCashDecimalPtBr(reportedCash)))}
                   className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-lg font-bold"
                 />
               </div>
@@ -4934,12 +4975,13 @@ export const FinancialView: React.FC<{ initialSubTab?: FinancialSubTab }> = ({
               <div>
                 <label className="block font-bold text-slate-700 mb-1">Total em Pix Conferido (R$)</label>
                 <input
-                  type="number"
-                  step="0.01"
-                  min="0"
+                  type="text"
+                  inputMode="decimal"
                   placeholder="0,00"
                   value={reportedPix}
-                  onChange={(e) => setReportedPix(e.target.value)}
+                  onFocus={(e) => e.target.select()}
+                  onChange={(e) => setReportedPix(sanitizeCashCurrencyInput(e.target.value))}
+                  onBlur={() => setReportedPix(formatCashDecimalPtBr(parseCashDecimalPtBr(reportedPix)))}
                   className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-lg font-bold"
                 />
               </div>
@@ -4947,12 +4989,13 @@ export const FinancialView: React.FC<{ initialSubTab?: FinancialSubTab }> = ({
               <div>
                 <label className="block font-bold text-slate-700 mb-1">Total em Cartões (Débito/Crédito)</label>
                 <input
-                  type="number"
-                  step="0.01"
-                  min="0"
+                  type="text"
+                  inputMode="decimal"
                   placeholder="0,00"
                   value={reportedCard}
-                  onChange={(e) => setReportedCard(e.target.value)}
+                  onFocus={(e) => e.target.select()}
+                  onChange={(e) => setReportedCard(sanitizeCashCurrencyInput(e.target.value))}
+                  onBlur={() => setReportedCard(formatCashDecimalPtBr(parseCashDecimalPtBr(reportedCard)))}
                   className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-lg font-bold"
                 />
               </div>
