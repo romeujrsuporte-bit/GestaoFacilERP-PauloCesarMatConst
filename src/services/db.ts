@@ -5205,13 +5205,21 @@ export class Database {
   }
 
   /**
-   * Somente usuários ativos com perfil Administrador Geral (admin) ou Gerente Geral (gerente)
-   * têm permissão para alterar diretamente o preço unitário de produtos durante a venda.
+   * Verifica se o usuário ativo pode alterar diretamente o preço unitário de produtos durante a venda:
+   * - Administrador Geral (admin) e Gerente Geral (gerente): sempre permitido.
+   * - Balconista (balconista): permitido exclusivamente no PDV Balcão (context='pos') quando habilitado pelo Administrador via permissions.canAlterPosUnitPrice.
    */
-  public static canCurrentUserAlterUnitPrice(user?: User): boolean {
+  public static canCurrentUserAlterUnitPrice(
+    user?: User,
+    context: 'pos' | 'general' = 'general'
+  ): boolean {
     const u = user || this.getCurrentUser();
     if (!u || u.status === 'inativo') return false;
-    return this.isAdmin(u) || this.isGerente(u);
+    if (this.isAdmin(u) || this.isGerente(u)) return true;
+    if (context === 'pos' && this.isBalconista(u)) {
+      return u.permissions?.canAlterPosUnitPrice === true;
+    }
+    return false;
   }
 
   public static isBalconista(user?: User): boolean {
@@ -5398,8 +5406,10 @@ export class Database {
     }
     const s = this.getState();
 
-    // Validação de perfil para alteração direta de preço unitário (exclusivo Administrador Geral ou Gerente Geral)
-    const canAlterPrice = this.canCurrentUserAlterUnitPrice();
+    // Validação de perfil para alteração direta de preço unitário
+    // (Admin, Gerente Geral ou Balconista habilitado pelo Administrador no PDV Balcão)
+    const isPosContext = order.origin === 'pdv';
+    const canAlterPrice = this.canCurrentUserAlterUnitPrice(undefined, isPosContext ? 'pos' : 'general');
     if (!canAlterPrice) {
       for (const item of order.items || []) {
         const baselineItem = options?.existingOrder?.items?.find((bi) => bi.productId === item.productId);
@@ -5410,7 +5420,7 @@ export class Database {
 
         if (item.priceOverridden && !isExistingSameOverride) {
           throw new Error(
-            `Alteração direta de preço unitário no produto [${item.productCode}] ${item.description} permitida apenas para Administrador Geral ou Gerente Geral.`
+            `Alteração direta de preço unitário no produto [${item.productCode}] ${item.description} permitida apenas para Administrador Geral, Gerente Geral ou Balconista autorizado pelo administrador no PDV Balcão.`
           );
         }
       }

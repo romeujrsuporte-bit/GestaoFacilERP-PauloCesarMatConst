@@ -448,6 +448,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ initialTab = 'empres
   const [userCompanyId, setUserCompanyId] = useState<string>('');
   const [userStatus, setUserStatus] = useState<'ativo' | 'inativo'>('ativo');
   const [userMaxDiscount, setUserMaxDiscount] = useState('10');
+  const [userCanAlterPosUnitPrice, setUserCanAlterPosUnitPrice] = useState<boolean>(false);
   const [prefSaveMsg, setPrefSaveMsg] = useState<string | null>(null);
 
   // Diagnóstico e Reparo de Vínculos /users/{uid} no Firestore (Exclusivo Admin Master)
@@ -595,6 +596,41 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ initialTab = 'empres
   });
   const [tempAllowedSections, setTempAllowedSections] = useState<string[]>([]);
   const [tempAllowedSubItems, setTempAllowedSubItems] = useState<string[]>([]);
+  const [tempCanAlterPosUnitPrice, setTempCanAlterPosUnitPrice] = useState<boolean>(false);
+
+  const handleToggleBalconistaPosPrice = async (targetUser: User) => {
+    if (!isMasterAdmin) {
+      toast.error(`Apenas o Administrador Master (${MASTER_ADMIN_EMAIL}) pode alterar permissões de usuários.`);
+      return;
+    }
+    if (targetUser.role !== 'balconista') return;
+
+    const nextValue = !Boolean(targetUser.permissions?.canAlterPosUnitPrice);
+    const res = Database.updateUserPermissions(
+      targetUser.id,
+      { canAlterPosUnitPrice: nextValue },
+      currentUser.id
+    );
+
+    if (!res.success) {
+      toast.error(res.error || 'Não foi possível atualizar a permissão do Balconista.');
+      return;
+    }
+
+    setDbState({ ...Database.getState() });
+    try {
+      await FirebaseSyncService.syncToFirebase(Database.getState(), true);
+    } catch (syncErr) {
+      console.warn('Aviso ao sincronizar permissão de preço no PDV com Firebase:', syncErr);
+    }
+
+    toast.success(
+      nextValue
+        ? `Alteração de preço unitário no PDV Balcão LIBERADA para ${targetUser.name}.`
+        : `Alteração de preço unitário no PDV Balcão BLOQUEADA para ${targetUser.name}.`,
+      'Permissão do PDV Balcão'
+    );
+  };
 
   const handleOpenPermissionsModal = (targetUser: User) => {
     if (!isMasterAdmin) {
@@ -622,6 +658,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ initialTab = 'empres
       canViewProductCosts: perms.canViewProductCosts !== undefined ? perms.canViewProductCosts : (perms.canViewCosts ?? finDefaults.canViewProductCosts),
       canViewCashBalances: perms.canViewCashBalances !== undefined ? perms.canViewCashBalances : finDefaults.canViewCashBalances,
     });
+    setTempCanAlterPosUnitPrice(Boolean(perms.canAlterPosUnitPrice));
 
     setTempAllowedSections(
       perms.allowedMenuSections ? [...perms.allowedMenuSections] : (targetUser.login === 'admin' ? MENU_SECTIONS_CATALOG.map((s) => s.id) : [...menuDefaults])
@@ -631,11 +668,14 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ initialTab = 'empres
     );
   };
 
-  const handleSavePermissionsConfig = () => {
+  const handleSavePermissionsConfig = async () => {
     if (!isMasterAdmin || !userConfiguringPermissions) {
       toast.error('Apenas os usuários "romeujr.suporte@gmail.com" e "admin" podem salvar permissões.');
       return;
     }
+
+    const targetName = userConfiguringPermissions.name;
+    const isTargetBalconista = userConfiguringPermissions.role === 'balconista';
 
     const res = Database.updateUserPermissions(
       userConfiguringPermissions.id,
@@ -644,16 +684,23 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ initialTab = 'empres
         canViewCosts: tempFinPerms.canViewProductCosts,
         allowedMenuSections: tempAllowedSections,
         allowedSubItems: tempAllowedSubItems,
+        ...(isTargetBalconista ? { canAlterPosUnitPrice: tempCanAlterPosUnitPrice } : {}),
       },
       currentUser.id
     );
 
     if (res.success) {
+      setDbState({ ...Database.getState() });
+      setUserConfiguringPermissions(null);
+      try {
+        await FirebaseSyncService.syncToFirebase(Database.getState(), true);
+      } catch (syncErr) {
+        console.warn('Aviso ao sincronizar permissões com Firebase:', syncErr);
+      }
       toast.success(
-        `Permissões de menus e números da empresa salvas para ${userConfiguringPermissions.name}!`,
+        `Permissões de menus e números da empresa salvas para ${targetName}!`,
         'Permissões Atualizadas'
       );
-      setUserConfiguringPermissions(null);
     } else {
       toast.error(res.error || 'Erro ao salvar permissões.');
     }
@@ -698,6 +745,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ initialTab = 'empres
     const subDef = DEFAULT_ROLE_SUB_ITEMS[role] || DEFAULT_ROLE_SUB_ITEMS.balconista;
 
     setTempFinPerms({ ...finDef });
+    setTempCanAlterPosUnitPrice(false);
     setTempAllowedSections([...menuDef]);
     setTempAllowedSubItems([...subDef]);
     toast.info(`Configurações redefinidas para o padrão do perfil "${role}".`);
@@ -1063,6 +1111,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ initialTab = 'empres
           permissions: {
             ...permissions,
             maxDiscountPercent: maxDisc,
+            canAlterPosUnitPrice: effectiveRole === 'balconista' ? userCanAlterPosUnitPrice : false,
             canViewGrossProfit: isBalconista ? false : (roleChanged ? finDefaults.canViewGrossProfit : (targetExisting.permissions.canViewGrossProfit ?? finDefaults.canViewGrossProfit)),
             canViewNetProfit: isBalconista ? false : (roleChanged ? finDefaults.canViewNetProfit : (targetExisting.permissions.canViewNetProfit ?? finDefaults.canViewNetProfit)),
             canViewTotalRevenue: isBalconista ? false : (roleChanged ? finDefaults.canViewTotalRevenue : (targetExisting.permissions.canViewTotalRevenue ?? finDefaults.canViewTotalRevenue)),
@@ -1108,6 +1157,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ initialTab = 'empres
           permissions: {
             ...permissions,
             maxDiscountPercent: maxDisc,
+            canAlterPosUnitPrice: userRole === 'balconista' ? userCanAlterPosUnitPrice : false,
             canViewGrossProfit: isBalconista ? false : finDefaults.canViewGrossProfit,
             canViewNetProfit: isBalconista ? false : finDefaults.canViewNetProfit,
             canViewTotalRevenue: isBalconista ? false : finDefaults.canViewTotalRevenue,
@@ -1656,6 +1706,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ initialTab = 'empres
                   setUserCompanyId(activeCompanies.length === 1 ? activeCompanies[0].id : '');
                   setUserStatus('ativo');
                   setUserMaxDiscount('10');
+                  setUserCanAlterPosUnitPrice(false);
                   setUserModalError(null);
                   setIsUserModalOpen(true);
                 }}
@@ -1811,6 +1862,33 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ initialTab = 'empres
                             : 'Lucros & Números da Empresa: Ocultos'}
                         </span>
                       </span>
+                      {u.role === 'balconista' && (
+                        <button
+                          type="button"
+                          onClick={() => handleToggleBalconistaPosPrice(u)}
+                          className={`inline-flex items-center gap-1.5 font-bold px-2.5 py-0.5 rounded-md border transition-colors cursor-pointer ${
+                            u.permissions.canAlterPosUnitPrice
+                              ? 'bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border-emerald-300'
+                              : 'bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-300'
+                          }`}
+                          title={
+                            u.permissions.canAlterPosUnitPrice
+                              ? 'Clique para BLOQUEAR a alteração de preço unitário no PDV Balcão para este Balconista'
+                              : 'Clique para LIBERAR a alteração de preço unitário no PDV Balcão para este Balconista'
+                          }
+                        >
+                          {u.permissions.canAlterPosUnitPrice ? (
+                            <Unlock size={11} className="text-emerald-600" />
+                          ) : (
+                            <Lock size={11} className="text-slate-400" />
+                          )}
+                          <span>
+                            {u.permissions.canAlterPosUnitPrice
+                              ? 'PDV Balcão: Altera Preço Unit. (Liberado)'
+                              : 'PDV Balcão: Preço Unit. Bloqueado'}
+                          </span>
+                        </button>
+                      )}
                     </div>
                   </div>
 
@@ -1920,6 +1998,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ initialTab = 'empres
                         );
                         setUserStatus(u.status || 'ativo');
                         setUserMaxDiscount(String(u.permissions.maxDiscountPercent));
+                        setUserCanAlterPosUnitPrice(Boolean(u.permissions.canAlterPosUnitPrice));
                         setUserModalError(null);
                         setIsUserModalOpen(true);
                       }}
@@ -3250,6 +3329,35 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ initialTab = 'empres
                   </div>
                 )}
 
+                {userRole === 'balconista' && (
+                  <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl flex items-center justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="font-bold text-slate-800 flex items-center gap-1.5">
+                        <Tag size={13} className={userCanAlterPosUnitPrice ? 'text-emerald-600' : 'text-slate-400'} />
+                        <span>Alterar Preço Unitário no PDV Balcão</span>
+                      </div>
+                      <p className="text-[11px] text-slate-500 mt-0.5 leading-snug">
+                        Permite que este Balconista edite o campo <strong>Preço Unit.</strong> na hora da venda no PDV Balcão.
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      role="switch"
+                      aria-checked={userCanAlterPosUnitPrice}
+                      disabled={isSavingUser}
+                      onClick={() => setUserCanAlterPosUnitPrice((prev) => !prev)}
+                      className={`shrink-0 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-bold border transition-colors cursor-pointer disabled:opacity-50 ${
+                        userCanAlterPosUnitPrice
+                          ? 'bg-emerald-600 hover:bg-emerald-700 text-white border-emerald-700'
+                          : 'bg-white hover:bg-slate-100 text-slate-600 border-slate-300'
+                      }`}
+                    >
+                      {userCanAlterPosUnitPrice ? <Unlock size={12} /> : <Lock size={12} />}
+                      <span>{userCanAlterPosUnitPrice ? 'Liberado' : 'Bloqueado'}</span>
+                    </button>
+                  </div>
+                )}
+
                 {requiresInitialPassword && (
                   <div>
                     <label className="block font-bold text-slate-700 mb-1">
@@ -3583,6 +3691,51 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ initialTab = 'empres
               {/* ======================================================== */}
               {permModalTab === 'numeros' && (
                 <div className="space-y-4">
+                  {/* Permissão Operacional Específica do Balconista no PDV Balcão */}
+                  {userConfiguringPermissions.role === 'balconista' && (
+                    <div
+                      className={`p-3.5 rounded-xl border flex flex-col sm:flex-row sm:items-center justify-between gap-3 ${
+                        tempCanAlterPosUnitPrice
+                          ? 'bg-emerald-50/70 border-emerald-200'
+                          : 'bg-slate-50 border-slate-200'
+                      }`}
+                    >
+                      <div className="flex items-start gap-2.5">
+                        <div
+                          className={`w-9 h-9 rounded-lg flex items-center justify-center shrink-0 ${
+                            tempCanAlterPosUnitPrice
+                              ? 'bg-emerald-600 text-white'
+                              : 'bg-slate-200 text-slate-500'
+                          }`}
+                        >
+                          {tempCanAlterPosUnitPrice ? <Unlock size={17} /> : <Lock size={17} />}
+                        </div>
+                        <div>
+                          <div className="text-xs font-extrabold text-slate-900">
+                            PDV Balcão: Alteração de Preço Unitário na Venda
+                          </div>
+                          <p className="text-[11px] text-slate-600 mt-0.5 leading-snug">
+                            Define se este usuário com perfil <strong>Balconista</strong> pode editar o campo <strong>Preço Unit.</strong> durante a venda no PDV Balcão.
+                          </p>
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        role="switch"
+                        aria-checked={tempCanAlterPosUnitPrice}
+                        onClick={() => setTempCanAlterPosUnitPrice((prev) => !prev)}
+                        className={`shrink-0 inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-bold border transition-colors cursor-pointer ${
+                          tempCanAlterPosUnitPrice
+                            ? 'bg-emerald-600 hover:bg-emerald-700 text-white border-emerald-700 shadow-2xs'
+                            : 'bg-white hover:bg-slate-100 text-slate-700 border-slate-300'
+                        }`}
+                      >
+                        {tempCanAlterPosUnitPrice ? <Unlock size={14} /> : <Lock size={14} />}
+                        <span>{tempCanAlterPosUnitPrice ? 'Permitido no PDV' : 'Bloqueado no PDV'}</span>
+                      </button>
+                    </div>
+                  )}
+
                   {/* Presets Rápidos */}
                   <div className="p-3.5 bg-slate-50 rounded-xl border border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
                     <div>

@@ -94,8 +94,12 @@ export const PosView: React.FC<PosViewProps> = ({
   const [dbState, setDbState] = useState(Database.getState());
   const currentCompany = Database.getCurrentCompany();
   const currentUser = Database.getCurrentUser();
-  const canAlterUnitPrice = Database.canCurrentUserAlterUnitPrice(currentUser);
-  const unitPriceOverrideRole: 'admin' | 'gerente' = Database.isAdmin(currentUser) ? 'admin' : 'gerente';
+  const canAlterUnitPrice = Database.canCurrentUserAlterUnitPrice(currentUser, 'pos');
+  const unitPriceOverrideRole: 'admin' | 'gerente' | 'balconista' = Database.isAdmin(currentUser)
+    ? 'admin'
+    : Database.isGerente(currentUser)
+    ? 'gerente'
+    : 'balconista';
 
   const [internalHideKpis, setInternalHideKpis] = useState(true);
   const isKpisHidden = propHideDashboardKpis !== undefined ? propHideDashboardKpis : internalHideKpis;
@@ -365,7 +369,7 @@ export const PosView: React.FC<PosViewProps> = ({
   const commitItemUnitPriceOverride = (productId: string, newUnitPrice: number) => {
     if (!canAlterUnitPrice) {
       toast.error(
-        'Apenas usuários com perfil Administrador Geral ou Gerente Geral podem alterar o preço unitário.',
+        'Você não possui permissão para alterar o preço unitário no PDV Balcão. Solicite liberação ao Administrador.',
         'Acesso Negado'
       );
       return;
@@ -442,11 +446,11 @@ export const PosView: React.FC<PosViewProps> = ({
 
     const rawNum = Math.max(0, parseFloat(itemDiscountInput.replace(',', '.')) || 0);
 
-    // Modo 3: Alteração Direta de Preço Unitário (somente Admin / Gerente Geral)
+    // Modo 3: Alteração Direta de Preço Unitário (Admin, Gerente Geral ou Balconista autorizado no PDV Balcão)
     if (itemAdjustmentMode === 'alterar_preco') {
       if (!canAlterUnitPrice) {
         toast.error(
-          'Apenas Administrador Geral ou Gerente Geral podem alterar o preço unitário.',
+          'Você não possui permissão para alterar o preço unitário no PDV Balcão. Solicite liberação ao Administrador.',
           'Permissão Restrita'
         );
         return;

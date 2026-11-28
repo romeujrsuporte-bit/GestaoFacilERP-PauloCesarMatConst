@@ -17,6 +17,7 @@ export interface UserPermissions {
   canManageUsers: boolean;
   canAdjustStock: boolean;
   canCloseCashRegister: boolean;
+  canAlterPosUnitPrice?: boolean; // Permite ao Balconista alterar o preço unitário do produto na hora da venda no PDV Balcão
 
   // VISIBILIDADE DE INFORMAÇÕES & NÚMEROS DA EMPRESA (KPIS FINANCEIROS)
   canViewGrossProfit?: boolean;    // Visualizar Lucro Bruto (R$ e Margem Bruta)
@@ -388,7 +389,7 @@ export interface OrderItem {
   referenceUnitPrice?: number; // Preço de tabela de referência na inclusão (para controle de alteração manual de preço)
   originalUnitPrice?: number; // Preço unitário original cadastrado no catálogo antes de alteração direta autorizada
   priceOverridden?: boolean; // Indica alteração direta do preço unitário na venda (sem desconto/acréscimo)
-  priceOverriddenByRole?: 'admin' | 'gerente'; // Perfil autorizado que realizou a alteração direta do preço unitário
+  priceOverriddenByRole?: 'admin' | 'gerente' | 'balconista'; // Perfil autorizado que realizou a alteração direta do preço unitário
   discountAuthorization?: DiscountAuthorizationRecord; // Autorização específica vinculada a este item nesta operação
 }
 

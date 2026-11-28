@@ -60,7 +60,7 @@ export interface EvaluateItemDiscountInput {
   unitPrice: number;
   referenceUnitPrice?: number;
   priceOverridden?: boolean;
-  priceOverriddenByRole?: 'admin' | 'gerente';
+  priceOverriddenByRole?: 'admin' | 'gerente' | 'balconista';
   itemDiscountValue?: number;
   itemDiscountPercent?: number;
   globalDiscountShare?: number;
@@ -365,7 +365,9 @@ export function evaluateItemMaxDiscount(input: EvaluateItemDiscountInput): ItemD
   const tablePrice = StockEngine.getProductPriceForCompany(product, companyId);
   const isAuthorizedDirectPriceOverride =
     input.priceOverridden === true &&
-    (input.priceOverriddenByRole === 'admin' || input.priceOverriddenByRole === 'gerente');
+    (input.priceOverriddenByRole === 'admin' ||
+      input.priceOverriddenByRole === 'gerente' ||
+      (input.priceOverriddenByRole === 'balconista' && input.origin === 'pdv'));
   const effectiveRefUnitPrice = isAuthorizedDirectPriceOverride
     ? Math.max(0, unitPrice)
     : input.referenceUnitPrice !== undefined && input.referenceUnitPrice > 0
