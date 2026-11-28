@@ -216,15 +216,11 @@ const VENDEDOR_EXTERNO_WRITABLE_KEYS = new Set<keyof DatabaseState>([
 
 function getWritableKeysForRole(
   role: UserRole | undefined,
-  actorCompanyId: string | undefined,
-  rootCompanyId: string
+  _actorCompanyId: string | undefined,
+  _rootCompanyId: string
 ): Set<keyof DatabaseState> {
   if (role === 'gerente') {
-    const keys = new Set(GERENTE_WRITABLE_KEYS);
-    if (actorCompanyId && actorCompanyId === rootCompanyId) {
-      keys.add('companies');
-    }
-    return keys;
+    return new Set(GERENTE_WRITABLE_KEYS);
   }
   if (role === 'financeiro') {
     return new Set(FINANCEIRO_WRITABLE_KEYS);

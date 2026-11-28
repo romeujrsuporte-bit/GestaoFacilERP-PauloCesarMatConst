@@ -131,6 +131,7 @@ export interface UserProfileDoc {
   email: string;
   role: UserRole;
   companyId: string;
+  defaultCompanyId?: string;
   status: 'ativo' | 'inativo';
   phone?: string;
   createdAt: string;
@@ -194,13 +195,22 @@ export function isValidCompanyIdFormat(companyId: string | undefined | null): bo
 }
 
 /**
+ * Resolve o ID da Empresa Padrão a partir de um User ou UserProfileDoc (defaultCompanyId com fallback para companyId).
+ */
+export function resolveUserDefaultCompanyId(
+  source?: { defaultCompanyId?: string | null; companyId?: string | null } | null
+): string {
+  return (source?.defaultCompanyId || source?.companyId || '').trim();
+}
+
+/**
  * Valida se o companyId informado corresponde a uma empresa cadastrada e ativa no ERP.
  */
 function assertActiveRegisteredCompany(companyId: string | undefined | null): string {
   const cleanId = (companyId || '').trim();
   if (!isValidCompanyIdFormat(cleanId)) {
     throw new Error(
-      'Selecione uma Empresa de Vinculação válida (Matriz ou Filial) antes de salvar o usuário.'
+      'Selecione uma Empresa Padrão válida (Matriz ou Filial) antes de salvar o usuário.'
     );
   }
   const companies = Database.getState().companies || [];
@@ -212,7 +222,7 @@ function assertActiveRegisteredCompany(companyId: string | undefined | null): st
   }
   if (matched.status === 'inativo') {
     throw new Error(
-      `A empresa "${matched.tradeName || matched.name}" está inativa e não pode receber novos vínculos de usuários.`
+      `A empresa "${matched.tradeName || matched.name}" está inativa e não pode ser definida como Empresa Padrão.`
     );
   }
   return cleanId;
@@ -224,10 +234,10 @@ export function buildUserProfilePayload(
   fbEmail: string,
   existingCreatedAt?: string
 ): UserProfileDoc {
-  const cleanCompanyId = (user.companyId || '').trim();
-  if (!isValidCompanyIdFormat(cleanCompanyId)) {
+  const cleanDefaultCompanyId = resolveUserDefaultCompanyId(user);
+  if (!isValidCompanyIdFormat(cleanDefaultCompanyId)) {
     throw new Error(
-      'Vínculo de empresa inválido ou ausente. Selecione uma empresa (Matriz ou Filial) válida para o usuário.'
+      'Empresa Padrão inválida ou ausente. Selecione uma empresa (Matriz ou Filial) válida para o usuário.'
     );
   }
 
@@ -247,7 +257,8 @@ export function buildUserProfilePayload(
     login: safeLogin,
     email: safeEmail,
     role: safeRole,
-    companyId: cleanCompanyId,
+    companyId: cleanDefaultCompanyId,
+    defaultCompanyId: cleanDefaultCompanyId,
     status: safeStatus,
     createdAt: existingCreatedAt && existingCreatedAt.trim().length > 0 ? existingCreatedAt.trim() : nowIso,
     updatedAt: nowIso,
@@ -306,6 +317,9 @@ async function ensureUserProfileDocBeforePull(
     }
 
     const nowIso = new Date().toISOString();
+    const resolvedMasterCompany = isValidCompanyIdFormat(resolveUserDefaultCompanyId(localUser))
+      ? resolveUserDefaultCompanyId(localUser)
+      : 'comp-matriz';
     const initialDoc: UserProfileDoc = {
       uid,
       erpUserId: localUser?.id || 'usr-admin',
@@ -313,7 +327,8 @@ async function ensureUserProfileDocBeforePull(
       login: localUser?.login || 'admin',
       email: MASTER_ADMIN_EMAIL,
       role: 'admin',
-      companyId: isValidCompanyIdFormat(localUser?.companyId) ? localUser!.companyId : 'comp-matriz',
+      companyId: resolvedMasterCompany,
+      defaultCompanyId: resolvedMasterCompany,
       status: 'ativo',
       createdAt: nowIso,
       updatedAt: nowIso,
@@ -446,6 +461,7 @@ export async function listFirestoreUserProfiles(): Promise<UserProfileDoc[]> {
     const snap = await getDocs(collection(db, 'users'));
     return snap.docs.map((docSnap) => {
       const data = docSnap.data() as Partial<UserProfileDoc>;
+      const resolvedDefault = (data.defaultCompanyId || data.companyId || '').trim();
       return {
         uid: data.uid || docSnap.id,
         erpUserId: data.erpUserId,
@@ -453,7 +469,8 @@ export async function listFirestoreUserProfiles(): Promise<UserProfileDoc[]> {
         login: data.login || '',
         email: data.email || '',
         role: (data.role || 'balconista') as UserRole,
-        companyId: data.companyId || '',
+        companyId: data.companyId || resolvedDefault,
+        defaultCompanyId: resolvedDefault || undefined,
         status: (data.status || 'inativo') as 'ativo' | 'inativo',
         phone: data.phone,
         createdAt: data.createdAt || '',
@@ -565,6 +582,7 @@ export async function repairExistingUserFirestoreProfile(params: {
     ...params.user,
     email: fbEmail,
     companyId: validCompanyId,
+    defaultCompanyId: validCompanyId,
     firebaseUid: resolvedUid,
   };
   const payload = buildUserProfilePayload(resolvedUid, repairedUser, fbEmail, existingCreatedAt);
@@ -597,7 +615,7 @@ export async function provisionFirebaseAuthForUser(
     );
   }
 
-  const validCompanyId = assertActiveRegisteredCompany(user.companyId);
+  const validCompanyId = assertActiveRegisteredCompany(resolveUserDefaultCompanyId(user));
 
   const fbEmail = (user.email || '').trim().toLowerCase();
   if (!isValidGoogleAccountEmail(fbEmail)) {
@@ -685,7 +703,7 @@ export async function provisionFirebaseAuthForUser(
   // Grava o perfil /users/{uid} usando a sessão autenticada do Administrador Master atual
   const profilePayload = buildUserProfilePayload(
     uid,
-    { ...user, companyId: validCompanyId, email: fbEmail, firebaseUid: uid },
+    { ...user, companyId: validCompanyId, defaultCompanyId: validCompanyId, email: fbEmail, firebaseUid: uid },
     fbEmail,
     existingCreatedAt
   );
@@ -711,7 +729,7 @@ export async function syncUserProfileStatusRoleInFirestore(user: User): Promise<
   const targetUid = user.firebaseUid || (user.id === 'usr-admin' ? auth.currentUser.uid : undefined);
   if (!targetUid) return;
 
-  const validCompanyId = assertActiveRegisteredCompany(user.companyId);
+  const validCompanyId = assertActiveRegisteredCompany(resolveUserDefaultCompanyId(user));
   const fbEmail = resolveUserFirebaseEmail(user.email || user.login, user);
   const docPath = `users/${targetUid}`;
   try {
@@ -720,7 +738,7 @@ export async function syncUserProfileStatusRoleInFirestore(user: User): Promise<
     const existingData = snap.exists() ? (snap.data() as Partial<UserProfileDoc>) : undefined;
     const payload = buildUserProfilePayload(
       targetUid,
-      { ...user, companyId: validCompanyId },
+      { ...user, companyId: validCompanyId, defaultCompanyId: validCompanyId },
       fbEmail,
       existingData?.createdAt
     );
@@ -878,19 +896,20 @@ export async function loginWithSystemCredentials(
       throw new Error('Perfil de usuário não provisionado no Firestore (/users/{uid}). Solicite ao Administrador Master para completar o vínculo no cadastro de usuários.');
     }
 
-    if (!isMasterIdentifier && !isValidCompanyIdFormat(existingFirestoreProfile?.companyId)) {
+    const remoteDefaultCompId = resolveUserDefaultCompanyId(existingFirestoreProfile);
+    if (!isMasterIdentifier && !isValidCompanyIdFormat(remoteDefaultCompId)) {
       clearCachedFirestoreUserProfile();
       await signOut(auth);
-      throw new Error('Perfil do usuário no Firestore sem Empresa de Vinculação válida. Solicite ao Administrador Master para vincular o usuário à Matriz ou a uma Filial.');
+      throw new Error('Perfil do usuário no Firestore sem Empresa Padrão válida. Solicite ao Administrador Master para definir a Empresa Padrão (Matriz ou Filial).');
     }
 
-    // Puxa o estado oficial mais recente do Firestore para suportar troca de computador/celular
+    // Puxa o estado oficial mais recente do Firestore para carregar Matriz, Filiais e dados do ERP
     const pullResult = await pullRemoteStateDirectly();
     if (pullResult.permissionDenied && !isMasterIdentifier) {
       clearCachedFirestoreUserProfile();
       await signOut(auth);
       throw new Error(
-        'Permissão negada pelo Firebase Firestore. Verifique com o Administrador Master se o perfil do usuário e o vínculo com a empresa/filial estão ativos e sincronizados.'
+        'Permissão negada pelo Firebase Firestore. Verifique com o Administrador Master se o perfil do usuário está ativo e configurado no Firestore.'
       );
     }
   }
@@ -955,13 +974,15 @@ export async function loginWithSystemCredentials(
     const subDefaults = DEFAULT_ROLE_SUB_ITEMS[profileRole] || DEFAULT_ROLE_SUB_ITEMS.balconista;
     const isBalconistaRole = profileRole === 'balconista';
 
+    const resolvedProfileComp = resolveUserDefaultCompanyId(existingFirestoreProfile) || Database.getCurrentCompany().id;
     targetUser = {
       id: existingFirestoreProfile.erpUserId || `usr-${currentFbUser.uid.slice(0, 12)}`,
       name: existingFirestoreProfile.name || currentFbUser.displayName || fallbackLogin,
       login: fallbackLogin,
       email: existingFirestoreProfile.email || fbEmail,
       role: profileRole,
-      companyId: existingFirestoreProfile.companyId || Database.getCurrentCompany().id,
+      companyId: resolvedProfileComp,
+      defaultCompanyId: resolvedProfileComp,
       status: 'ativo',
       firebaseUid: currentFbUser.uid,
       updatedAt: new Date().toISOString(),
@@ -1005,25 +1026,29 @@ export async function loginWithSystemCredentials(
     throw new Error(`O usuário @${targetUser.login} está desativado pelo administrador.`);
   }
 
-  // Alinha em memória o vínculo de empresa e papel do usuário com o documento oficial /users/{uid} do Firestore
-  if (!isMasterIdentifier && existingFirestoreProfile) {
-    if (isValidCompanyIdFormat(existingFirestoreProfile.companyId)) {
-      targetUser.companyId = existingFirestoreProfile.companyId!;
+  // Alinha em memória a Empresa Padrão e papel do usuário com o documento oficial /users/{uid} do Firestore
+  if (existingFirestoreProfile) {
+    const remoteDefaultComp = resolveUserDefaultCompanyId(existingFirestoreProfile);
+    if (isValidCompanyIdFormat(remoteDefaultComp)) {
+      targetUser.defaultCompanyId = remoteDefaultComp;
+      targetUser.companyId = remoteDefaultComp;
     }
-    if (existingFirestoreProfile.role) {
+    if (!isMasterIdentifier && existingFirestoreProfile.role) {
       targetUser.role = existingFirestoreProfile.role;
     }
-    if (existingFirestoreProfile.status) {
+    if (!isMasterIdentifier && existingFirestoreProfile.status) {
       targetUser.status = existingFirestoreProfile.status;
     }
+  } else if (!targetUser.defaultCompanyId && targetUser.companyId) {
+    targetUser.defaultCompanyId = targetUser.companyId;
   }
 
-  // Bloqueia acesso caso usuário não-admin não possua empresa ativa autorizada
+  // Bloqueia acesso caso usuário não possua nenhuma empresa ativa cadastrada no ERP
   if (targetUser.role !== 'admin' && !Database.hasValidCompanyBinding(targetUser)) {
     clearCachedFirestoreUserProfile();
     await signOut(auth);
     throw new Error(
-      'A empresa vinculada a este usuário está inativa ou não cadastrada. Solicite ao Administrador Master para revisar a Empresa de Vinculação.'
+      'Nenhuma empresa ativa foi encontrada no ERP para este usuário. Solicite ao Administrador Master para revisar o cadastro de empresas.'
     );
   }
 
@@ -1309,7 +1334,8 @@ export function onFirebaseAuthStateChanged(callback: (user: User | null, loading
       const isOnline = typeof navigator === 'undefined' || navigator.onLine !== false;
       if (!isMaster && isOnline) {
         remoteProfile = await fetchFirestoreUserProfile(firebaseUser.uid, true);
-        if (!remoteProfile || remoteProfile.status === 'inativo' || !isValidCompanyIdFormat(remoteProfile.companyId)) {
+        const remoteDefaultComp = resolveUserDefaultCompanyId(remoteProfile);
+        if (!remoteProfile || remoteProfile.status === 'inativo' || !isValidCompanyIdFormat(remoteDefaultComp)) {
           clearCachedFirestoreUserProfile();
           await signOut(auth);
           Database.logout();
@@ -1334,11 +1360,13 @@ export function onFirebaseAuthStateChanged(callback: (user: User | null, loading
       }
 
       if (matchedUser) {
-        if (!isMaster && remoteProfile) {
-          if (isValidCompanyIdFormat(remoteProfile.companyId)) {
-            matchedUser.companyId = remoteProfile.companyId!;
+        if (remoteProfile) {
+          const remoteDefaultComp = resolveUserDefaultCompanyId(remoteProfile);
+          if (isValidCompanyIdFormat(remoteDefaultComp)) {
+            matchedUser.defaultCompanyId = remoteDefaultComp;
+            matchedUser.companyId = remoteDefaultComp;
           }
-          if (remoteProfile.role) {
+          if (!isMaster && remoteProfile.role) {
             matchedUser.role = remoteProfile.role;
           }
         }

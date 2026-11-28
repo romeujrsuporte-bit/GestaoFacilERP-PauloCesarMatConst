@@ -31,9 +31,13 @@
           "enum": ["admin", "gerente", "balconista", "vendedor_externo", "financeiro"],
           "description": "Papel de acesso RBAC no ERP: admin, gerente, balconista, vendedor_externo, financeiro"
         },
+        "defaultCompanyId": {
+          "type": "string",
+          "description": "ID da empresa padrão aberta automaticamente no login do usuário (Matriz ou Filial)"
+        },
         "companyId": {
           "type": "string",
-          "description": "ID da empresa matriz ou filial vinculada"
+          "description": "ID da empresa padrão (mantido sincronizado com defaultCompanyId para compatibilidade)"
         },
         "status": {
           "type": "string",

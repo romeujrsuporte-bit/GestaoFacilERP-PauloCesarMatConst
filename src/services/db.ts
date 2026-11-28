@@ -3059,8 +3059,17 @@ export class Database {
     let anyChanged = false;
     const normalized = users.map((u) => {
       let updated = false;
-      const { password: legacyPassword, ...userWithoutPassword } = u;
-      if (legacyPassword !== undefined || 'password' in u) {
+      const {
+        password: legacyPassword,
+        allowedCompanyIds: legacyAllowedCompanies,
+        ...userWithoutPassword
+      } = u;
+      if (
+        legacyPassword !== undefined ||
+        'password' in u ||
+        legacyAllowedCompanies !== undefined ||
+        'allowedCompanyIds' in u
+      ) {
         updated = true;
       }
 
@@ -3070,6 +3079,22 @@ export class Database {
         (u.email || '').trim().toLowerCase() === 'romeujr.suporte@gmail.com';
       if (isMasterRecord && (!userWithoutPassword.email || !userWithoutPassword.email.includes('@'))) {
         userWithoutPassword.email = 'romeujr.suporte@gmail.com';
+        updated = true;
+      }
+
+      // Adequação suave ao modelo multiempresa padronizado:
+      // preserva a empresa padrão atual do usuário (defaultCompanyId ou companyId existente)
+      const resolvedDefaultComp = (
+        userWithoutPassword.defaultCompanyId ||
+        userWithoutPassword.companyId ||
+        'comp-matriz'
+      ).trim();
+      if (
+        userWithoutPassword.defaultCompanyId !== resolvedDefaultComp ||
+        userWithoutPassword.companyId !== resolvedDefaultComp
+      ) {
+        userWithoutPassword.defaultCompanyId = resolvedDefaultComp;
+        userWithoutPassword.companyId = resolvedDefaultComp;
         updated = true;
       }
 
@@ -4682,8 +4707,17 @@ export class Database {
   }
 
   /**
-   * Resolve a empresa autorizada mais adequada para o usuário atual,
-   * respeitando o vínculo cadastrado e as empresas permitidas.
+   * Retorna o ID da Empresa Padrão do usuário (defaultCompanyId, com fallback compatível para companyId).
+   */
+  public static getUserDefaultCompanyId(user?: User | null): string {
+    const u = user || this.getCurrentUser();
+    return (u?.defaultCompanyId || u?.companyId || '').trim();
+  }
+
+  /**
+   * Resolve a empresa autorizada mais adequada para o usuário atual:
+   * - No login (preferUserLinkedCompany=true): abre automaticamente a Empresa Padrão do usuário (defaultCompanyId || companyId).
+   * - Durante a sessão: respeita a empresa escolhida no seletor (Matriz ou qualquer Filial ativa do projeto).
    */
   public static resolveAuthorizedCompanyForUser(
     user?: User | null,
@@ -4714,10 +4748,13 @@ export class Database {
       status: 'ativo',
     };
 
-    if (options?.preferUserLinkedCompany && u?.companyId) {
-      const linked = pool.find((c) => c.id === u.companyId && c.status !== 'inativo') ||
-        pool.find((c) => c.id === u.companyId);
-      if (linked) return linked;
+    const userDefaultCompanyId = this.getUserDefaultCompanyId(u);
+
+    if (options?.preferUserLinkedCompany && userDefaultCompanyId) {
+      const defaultMatch =
+        pool.find((c) => c.id === userDefaultCompanyId && c.status !== 'inativo') ||
+        pool.find((c) => c.id === userDefaultCompanyId);
+      if (defaultMatch) return defaultMatch;
     }
 
     const candidateId = preferredCompanyId || s.currentCompanyId;
@@ -4726,13 +4763,18 @@ export class Database {
       if (matched) return matched;
     }
 
-    if (u?.companyId) {
-      const linked = pool.find((c) => c.id === u.companyId && c.status !== 'inativo') ||
-        pool.find((c) => c.id === u.companyId);
-      if (linked) return linked;
+    if (userDefaultCompanyId) {
+      const defaultMatch =
+        pool.find((c) => c.id === userDefaultCompanyId && c.status !== 'inativo') ||
+        pool.find((c) => c.id === userDefaultCompanyId);
+      if (defaultMatch) return defaultMatch;
     }
 
-    return pool.find((c) => c.status !== 'inativo') || fallbackCompany;
+    return (
+      pool.find((c) => c.id === 'comp-matriz' && c.status !== 'inativo') ||
+      pool.find((c) => c.status !== 'inativo') ||
+      fallbackCompany
+    );
   }
 
   /**
@@ -4868,8 +4910,7 @@ export class Database {
   }
 
   /**
-   * Verifica se o usuário possui vínculo válido e ativo com uma empresa cadastrada
-   * (Administradores mantêm acesso global a todas as empresas).
+   * Verifica se o usuário está ativo e possui empresas disponíveis para operação neste ERP.
    */
   public static hasValidCompanyBinding(user?: User | null): boolean {
     const u = user || this.getCurrentUser();
@@ -4880,12 +4921,11 @@ export class Database {
   }
 
   /**
-   * Retorna as empresas às quais o usuário possui permissão de acesso
-   * - Administrador: visualiza e gerencia todas as empresas (Matriz e Filiais)
-   * - Demais perfis (Gerente, Financeiro, Balconista, Vendedor Externo):
-   *   operam exclusivamente na empresa principal vinculada via companyId
-   *   (ou nas empresas explicitamente autorizadas em allowedCompanyIds, quando definido).
-   *   Nunca realiza fallback indiscriminado para todas as empresas.
+   * Retorna as empresas às quais o usuário possui acesso no modelo multiempresa padronizado:
+   * - Usuário inativo: sem acesso a nenhuma empresa ([]).
+   * - Administrador: visualiza e gerencia todas as empresas (Matriz e Filiais, inclusive inativas).
+   * - Demais perfis ativos autenticados (Gerente, Financeiro, Balconista, Vendedor Externo):
+   *   acessam a Matriz e todas as Filiais ativas cadastradas neste ERP (mantendo as permissões RBAC de cada perfil).
    */
   public static getAvailableCompaniesForUser(user?: User | null): Company[] {
     const s = this.getState();
@@ -4898,27 +4938,14 @@ export class Database {
       return [];
     }
 
-    // Administrador (incluindo Admin Master) mantém acesso global irrestrito a todas as empresas
+    // Administrador (incluindo Admin Master) mantém acesso global a todas as empresas cadastradas
     if (this.isAdmin(u)) {
       return allCompanies;
     }
 
-    // Se houver lista explícita de empresas autorizadas (sem vínculo indiscriminado), respeita somente empresas ativas dessa lista
-    if (Array.isArray(u.allowedCompanyIds) && u.allowedCompanyIds.length > 0) {
-      const allowedSet = new Set(u.allowedCompanyIds.filter((id) => typeof id === 'string' && id.trim().length > 0));
-      if (u.companyId && u.companyId.trim().length > 0) {
-        allowedSet.add(u.companyId.trim());
-      }
-      return allCompanies.filter((c) => allowedSet.has(c.id) && c.status !== 'inativo');
-    }
-
-    // Regra principal: vínculo exclusivo à empresa definida em companyId (Matriz ou Filial ativa)
-    if (u.companyId && u.companyId.trim().length > 0) {
-      return allCompanies.filter((c) => c.id === u.companyId && c.status !== 'inativo');
-    }
-
-    // Sem companyId válido: não libera acesso indiscriminado a nenhuma empresa
-    return [];
+    // Todos os usuários ativos e autenticados acessam todas as empresas ativas (Matriz e Filiais) deste projeto Firebase
+    const activeCompanies = allCompanies.filter((c) => c.status !== 'inativo');
+    return activeCompanies;
   }
 
   public static readonly AUTH_SESSION_KEY = 'omni_erp_auth_active';

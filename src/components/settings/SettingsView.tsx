@@ -77,6 +77,7 @@ import {
   provisionFirebaseAuthForUser,
   repairExistingUserFirestoreProfile,
   requestFirebasePasswordReset,
+  resolveUserDefaultCompanyId,
   syncUserProfileStatusRoleInFirestore,
 } from '../../services/firebase';
 import { processLogoFile } from '../../services/imageUtils';
@@ -256,23 +257,23 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ initialTab = 'empres
   const canManageSettings = isAdmin || isGerente;
 
   // Usuários & Perfis é exclusivo do Administrador Master (romeujr.suporte@gmail.com);
-  // Menus do Sistema e Limpeza de Dados são exclusivos do Admin;
-  // Matriz / Filiais e Auditoria são acessíveis ao Admin e Gerente Geral
+  // Matriz / Filiais, Menus do Sistema e Limpeza de Dados são exclusivos do Administrador;
+  // Auditoria é acessível ao Admin e Gerente Geral
   const isRestrictedTab = (tab: string) => {
     if (tab === 'usuarios' && !isMasterAdmin) return true;
-    if (!isAdmin && (tab === 'menus' || tab === 'limpeza')) return true;
-    if (!canManageSettings && (tab === 'empresas' || tab === 'auditoria')) return true;
+    if (!isAdmin && (tab === 'empresas' || tab === 'menus' || tab === 'limpeza')) return true;
+    if (!canManageSettings && tab === 'auditoria') return true;
     return false;
   };
 
-  const fallbackAllowedTab = canManageSettings ? 'empresas' : 'preferencias';
+  const fallbackAllowedTab = isAdmin ? 'empresas' : canManageSettings ? 'auditoria' : 'preferencias';
   const initialAllowedTab = isRestrictedTab(initialTab) ? fallbackAllowedTab : initialTab;
 
   const [activeTab, setActiveTab] = useState<'empresas' | 'usuarios' | 'impressora' | 'etiquetas' | 'preferencias' | 'menus' | 'supabase' | 'auditoria' | 'backup' | 'limpeza'>(initialAllowedTab);
 
   useEffect(() => {
     if (isRestrictedTab(initialTab)) {
-      setActiveTab(canManageSettings ? 'empresas' : 'preferencias');
+      setActiveTab(isAdmin ? 'empresas' : canManageSettings ? 'auditoria' : 'preferencias');
     } else {
       setActiveTab(initialTab);
     }
@@ -736,9 +737,13 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ initialTab = 'empres
     }
   };
 
-  // Salvar Empresa (aguarda sincronização do registro de empresas/filiais no Firestore)
+  // Salvar Empresa (exclusivo do Administrador; aguarda sincronização do registro de empresas/filiais no Firestore)
   const handleSaveCompany = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!isAdmin) {
+      toast.error('Somente o Administrador pode cadastrar ou editar empresas e filiais.', 'Acesso Restrito');
+      return;
+    }
     if (!compName.trim() || !compCnpj.trim()) {
       toast.warning('Razão Social e CNPJ da empresa são obrigatórios.', 'Campos Obrigatórios');
       return;
@@ -863,10 +868,10 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ initialTab = 'empres
         editingUser.id === 'usr-admin' ||
         editingUser.email?.toLowerCase() === MASTER_ADMIN_EMAIL.toLowerCase());
 
-    const effectiveCompanyId = isTargetProtectedAdmin ? 'comp-matriz' : selectedCompanyId;
+    const effectiveCompanyId = selectedCompanyId || (isTargetProtectedAdmin ? 'comp-matriz' : '');
     if (!effectiveCompanyId || !isValidCompanyIdFormat(effectiveCompanyId)) {
       setUserModalError(
-        'Selecione a Empresa de Vinculação (Matriz ou Filial). Este campo é obrigatório para autorização no Firebase Firestore.'
+        'Selecione a Empresa Padrão (Matriz ou Filial). Este campo é obrigatório para definir a empresa aberta automaticamente no login.'
       );
       return;
     }
@@ -875,7 +880,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ initialTab = 'empres
     const matchedCompany = (state.companies || []).find((c) => c.id === effectiveCompanyId);
     if (!matchedCompany || matchedCompany.status === 'inativo') {
       setUserModalError(
-        'A Empresa de Vinculação selecionada não existe ou está inativa. Selecione uma empresa ativa (Matriz ou Filial).'
+        'A Empresa Padrão selecionada não existe ou está inativa. Selecione uma empresa ativa (Matriz ou Filial).'
       );
       return;
     }
@@ -1051,6 +1056,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ initialTab = 'empres
           email: effectiveEmail,
           role: effectiveRole,
           companyId: effectiveCompanyId,
+          defaultCompanyId: effectiveCompanyId,
           status: effectiveStatus,
           firebaseUid: knownExistingUid || existingWithoutPass.firebaseUid,
           updatedAt: nowIso,
@@ -1086,7 +1092,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ initialTab = 'empres
           'ATUALIZAR_USUARIO',
           'CONFIGURACOES',
           editingUser.id,
-          `Usuário ${updatedObj.name} (${updatedObj.email}) vinculado à empresa ${matchedCompany.tradeName || matchedCompany.name} (${effectiveCompanyId}) e sincronizado no Firebase.`
+          `Usuário ${updatedObj.name} (${updatedObj.email}) atualizado com Empresa Padrão ${matchedCompany.tradeName || matchedCompany.name} (${effectiveCompanyId}) e sincronizado no Firebase.`
         );
       } else {
         const newUser: User = {
@@ -1096,6 +1102,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ initialTab = 'empres
           email: cleanEmail,
           role: userRole,
           companyId: effectiveCompanyId,
+          defaultCompanyId: effectiveCompanyId,
           status: 'ativo',
           updatedAt: nowIso,
           permissions: {
@@ -1113,7 +1120,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ initialTab = 'empres
           },
         };
 
-        // Cria obrigatoriamente a conta no Firebase Authentication + documento /users/{uid} no Firestore com companyId
+        // Cria obrigatoriamente a conta no Firebase Authentication + documento /users/{uid} no Firestore com defaultCompanyId
         const provisionedUid = await provisionFirebaseAuthForUser(newUser, cleanPassword);
         newUser.firebaseUid = provisionedUid;
         newUser.updatedAt = new Date().toISOString();
@@ -1123,7 +1130,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ initialTab = 'empres
           'CRIAR_USUARIO',
           'CONFIGURACOES',
           newUser.id,
-          `Usuário ${newUser.name} (${newUser.email}, perfil ${userRole}) criado e vinculado à empresa ${matchedCompany.tradeName || matchedCompany.name} (${effectiveCompanyId}).`
+          `Usuário ${newUser.name} (${newUser.email}, perfil ${userRole}) criado com Empresa Padrão ${matchedCompany.tradeName || matchedCompany.name} (${effectiveCompanyId}).`
         );
       }
 
@@ -1136,8 +1143,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ initialTab = 'empres
       if (syncedToCloud) {
         toast.success(
           editingUser
-            ? `Usuário ${cleanName} atualizado, vinculado a ${matchedCompany.tradeName || matchedCompany.name} e confirmado no Firebase!`
-            : `Usuário ${cleanName} (${cleanEmail}) criado, vinculado a ${matchedCompany.tradeName || matchedCompany.name} e liberado para acesso!`,
+            ? `Usuário ${cleanName} atualizado (Empresa Padrão: ${matchedCompany.tradeName || matchedCompany.name}) e confirmado no Firebase!`
+            : `Usuário ${cleanName} (${cleanEmail}) criado (Empresa Padrão: ${matchedCompany.tradeName || matchedCompany.name}) e liberado para acesso!`,
           editingUser ? 'Usuário Atualizado' : 'Usuário Provisionado no Firebase'
         );
       } else {
@@ -1159,7 +1166,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ initialTab = 'empres
   const handleQuickSyncUserProfile = async (targetUser: User, detectedUid?: string) => {
     if (!isMasterAdmin) return;
     const effectiveUid = (targetUser.firebaseUid || detectedUid || '').trim();
-    const targetComp = getCompanyInfoById(targetUser.companyId);
+    const targetComp = getCompanyInfoById(resolveUserDefaultCompanyId(targetUser));
 
     if (!effectiveUid || !targetComp || targetComp.status === 'inativo') {
       handleOpenRepairModal(targetUser, detectedUid);
@@ -1181,6 +1188,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ initialTab = 'empres
         return {
           ...rest,
           companyId: targetComp.id,
+          defaultCompanyId: targetComp.id,
           firebaseUid: uid,
           updatedAt: new Date().toISOString(),
         };
@@ -1189,7 +1197,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ initialTab = 'empres
         'REPARAR_VINCULO_USUARIO',
         'CONFIGURACOES',
         targetUser.id,
-        `Perfil /users/${uid} sincronizado no Firestore para ${targetUser.name} na empresa ${targetComp.tradeName || targetComp.name} (${targetComp.id}).`
+        `Perfil /users/${uid} sincronizado no Firestore para ${targetUser.name} com Empresa Padrão ${targetComp.tradeName || targetComp.name} (${targetComp.id}).`
       );
       Database.persist();
       const synced = await FirebaseSyncService.syncToFirebase(Database.getState(), true);
@@ -1198,8 +1206,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ initialTab = 'empres
 
       if (synced) {
         toast.success(
-          `Vínculo Firestore de ${targetUser.name} atualizado na empresa ${targetComp.tradeName || targetComp.name}!`,
-          'Vínculo Sincronizado'
+          `Perfil Firestore de ${targetUser.name} atualizado (Empresa Padrão: ${targetComp.tradeName || targetComp.name})!`,
+          'Perfil Sincronizado'
         );
       } else {
         toast.warning(
@@ -1217,7 +1225,9 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ initialTab = 'empres
   // Abre modal de reparo para completar /users/{uid} de usuário já existente no Firebase Auth
   const handleOpenRepairModal = (targetUser: User, detectedUid?: string) => {
     const matchedProfile = findMatchingFirestoreProfile(targetUser);
-    const existingComp = getCompanyInfoById(targetUser.companyId || matchedProfile?.companyId);
+    const existingComp = getCompanyInfoById(
+      resolveUserDefaultCompanyId(targetUser) || resolveUserDefaultCompanyId(matchedProfile)
+    );
     setRepairTargetUser(targetUser);
     setRepairCompanyId(
       existingComp && existingComp.status !== 'inativo'
@@ -1241,7 +1251,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ initialTab = 'empres
 
     const cleanCompanyId = repairCompanyId.trim();
     if (!cleanCompanyId || !isValidCompanyIdFormat(cleanCompanyId)) {
-      setRepairError('Selecione uma Empresa de Vinculação válida (Matriz ou Filial).');
+      setRepairError('Selecione uma Empresa Padrão válida (Matriz ou Filial).');
       return;
     }
 
@@ -1267,6 +1277,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ initialTab = 'empres
         role: repairRole,
         status: repairStatus,
         companyId: cleanCompanyId,
+        defaultCompanyId: cleanCompanyId,
       };
 
       const { uid } = await repairExistingUserFirestoreProfile({
@@ -1285,6 +1296,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ initialTab = 'empres
           role: repairRole,
           status: repairStatus,
           companyId: cleanCompanyId,
+          defaultCompanyId: cleanCompanyId,
           firebaseUid: uid,
           updatedAt: new Date().toISOString(),
         };
@@ -1294,7 +1306,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ initialTab = 'empres
         'REPARAR_VINCULO_USUARIO',
         'CONFIGURACOES',
         repairTargetUser.id,
-        `Documento /users/${uid} completado/reparado no Firestore para ${repairTargetUser.name} (${repairTargetUser.email || repairTargetUser.login}) na empresa ${targetComp.tradeName || targetComp.name} (${cleanCompanyId}).`
+        `Documento /users/${uid} completado/reparado no Firestore para ${repairTargetUser.name} (${repairTargetUser.email || repairTargetUser.login}) com Empresa Padrão ${targetComp.tradeName || targetComp.name} (${cleanCompanyId}).`
       );
 
       Database.persist();
@@ -1305,8 +1317,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ initialTab = 'empres
 
       if (synced) {
         toast.success(
-          `Vínculo de ${repairTargetUser.name} reparado no Firestore (/users/${uid}) e autorizado para ${targetComp.tradeName || targetComp.name}!`,
-          'Vínculo Reparado com Sucesso'
+          `Perfil de ${repairTargetUser.name} atualizado no Firestore (/users/${uid}) com Empresa Padrão ${targetComp.tradeName || targetComp.name}!`,
+          'Perfil Atualizado com Sucesso'
         );
       } else {
         toast.warning(
@@ -1426,7 +1438,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ initialTab = 'empres
         </div>
 
         <div className="flex flex-wrap bg-slate-100 p-1 rounded-xl text-xs font-bold gap-1">
-          {canManageSettings && (
+          {isAdmin && (
             <button
               onClick={() => setActiveTab('empresas')}
               className={`px-3 py-1.5 rounded-lg transition-colors flex items-center gap-1.5 ${
@@ -1520,8 +1532,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ initialTab = 'empres
         </div>
       </div>
 
-      {/* ABA 1: EMPRESAS (MATRIZ E FILIAIS) */}
-      {activeTab === 'empresas' && (
+      {/* ABA 1: EMPRESAS (MATRIZ E FILIAIS — EXCLUSIVO DO ADMINISTRADOR) */}
+      {activeTab === 'empresas' && isAdmin && (
         <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-xs space-y-4">
           <div className="flex justify-between items-center pb-2 border-b border-slate-100">
             <div>
@@ -1617,7 +1629,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ initialTab = 'empres
             <div>
               <h3 className="font-bold text-sm text-slate-800">Usuários e Perfis de Acesso</h3>
               <p className="text-xs text-slate-500">
-                Gerenciamento exclusivo do Administrador Master ({MASTER_ADMIN_EMAIL}). Todo usuário é vinculado a uma empresa (Matriz ou Filial) e validado em <code className="font-mono text-[11px] bg-slate-100 px-1 rounded">/users/&#123;uid&#125;</code> no Firestore.
+                Gerenciamento exclusivo do Administrador Master ({MASTER_ADMIN_EMAIL}). Cada usuário possui uma <strong>Empresa Padrão</strong> (<code className="font-mono text-[11px] bg-slate-100 px-1 rounded">defaultCompanyId</code>) aberta no login e pode alternar entre Matriz e Filiais deste ERP conforme seu perfil.
               </p>
             </div>
             <div className="flex items-center gap-2 flex-wrap">
@@ -1679,20 +1691,22 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ initialTab = 'empres
                 u.email?.toLowerCase() === MASTER_ADMIN_EMAIL.toLowerCase();
               const isSelfUser = u.id === currentUser.id;
               const hasGoogleEmail = isValidGoogleAccountEmail(u.email || '');
-              const boundCompany = getCompanyInfoById(u.companyId);
+              const userDefaultCompanyId = resolveUserDefaultCompanyId(u);
+              const boundCompany = getCompanyInfoById(userDefaultCompanyId);
               const isCompanyValidAndActive = Boolean(boundCompany && boundCompany.status !== 'inativo');
               const remoteProfile = findMatchingFirestoreProfile(u);
               const resolvedUid = u.firebaseUid || remoteProfile?.uid;
+              const remoteDefaultCompanyId = resolveUserDefaultCompanyId(remoteProfile);
 
               // Avalia saúde real do documento /users/{uid} no Firestore
               const hasCompleteRemoteProfile = Boolean(
                 remoteProfile &&
                   remoteProfile.uid &&
-                  isValidCompanyIdFormat(remoteProfile.companyId) &&
+                  isValidCompanyIdFormat(remoteDefaultCompanyId) &&
                   remoteProfile.createdAt &&
                   remoteProfile.status === u.status &&
                   remoteProfile.role === u.role &&
-                  remoteProfile.companyId === u.companyId
+                  remoteDefaultCompanyId === userDefaultCompanyId
               );
               const needsFirestoreRepair =
                 !isProtectedAdminUser &&
@@ -1714,7 +1728,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ initialTab = 'empres
                         </span>
                       ) : null}
 
-                      {/* Selo da Empresa de Vinculação */}
+                      {/* Selo da Empresa Padrão */}
                       {boundCompany ? (
                         <span
                           className={`inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full border ${
@@ -1724,18 +1738,18 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ initialTab = 'empres
                               ? 'bg-blue-50 text-blue-800 border-blue-200'
                               : 'bg-indigo-50 text-indigo-800 border-indigo-200'
                           }`}
-                          title={`Empresa de Vinculação: ${boundCompany.name} (ID: ${boundCompany.id})`}
+                          title={`Empresa Padrão (defaultCompanyId): ${boundCompany.name} (ID: ${boundCompany.id})`}
                         >
                           <Building2 size={10} />
                           <span>
-                            {boundCompany.tradeName || boundCompany.name} ({boundCompany.type === 'matriz' ? 'Matriz' : 'Filial'})
+                            Padrão: {boundCompany.tradeName || boundCompany.name} ({boundCompany.type === 'matriz' ? 'Matriz' : 'Filial'})
                             {boundCompany.status === 'inativo' ? ' — INATIVA' : ''}
                           </span>
                         </span>
                       ) : (
                         <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full bg-rose-50 text-rose-800 border border-rose-200">
                           <AlertTriangle size={10} />
-                          <span>Sem Empresa Vinculada</span>
+                          <span>Sem Empresa Padrão</span>
                         </span>
                       )}
                     </div>
@@ -1898,10 +1912,10 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ initialTab = 'empres
                         setShowInitialPassword(false);
                         setUserRole(u.role);
                         setUserCompanyId(
-                          isProtectedAdminUser
+                          isCompanyValidAndActive
+                            ? userDefaultCompanyId
+                            : isProtectedAdminUser
                             ? 'comp-matriz'
-                            : isCompanyValidAndActive
-                            ? u.companyId
                             : ''
                         );
                         setUserStatus(u.status || 'ativo');
@@ -1910,7 +1924,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ initialTab = 'empres
                         setIsUserModalOpen(true);
                       }}
                       className="p-1.5 hover:bg-slate-100 text-slate-600 rounded-md cursor-pointer"
-                      title="Editar dados cadastrais e empresa de vinculação do usuário"
+                      title="Editar dados cadastrais e Empresa Padrão do usuário"
                     >
                       <Edit2 size={14} />
                     </button>
@@ -3147,16 +3161,16 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ initialTab = 'empres
                   />
                 </div>
 
-                {/* CAMPO OBRIGATÓRIO: EMPRESA DE VINCULAÇÃO (MATRIZ OU FILIAL) */}
+                {/* CAMPO OBRIGATÓRIO: EMPRESA PADRÃO (MATRIZ OU FILIAL) */}
                 <div>
                   <label className="block font-bold text-slate-700 mb-1 flex items-center gap-1">
                     <Building2 size={13} className="text-blue-600" />
-                    <span>Empresa de Vinculação *</span>
+                    <span>Empresa Padrão *</span>
                   </label>
                   <select
                     required
-                    disabled={isSavingUser || isTargetProtectedAdmin}
-                    value={isTargetProtectedAdmin ? 'comp-matriz' : userCompanyId}
+                    disabled={isSavingUser}
+                    value={userCompanyId}
                     onChange={(e) => {
                       setUserCompanyId(e.target.value);
                       setUserModalError(null);
@@ -3171,9 +3185,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ initialTab = 'empres
                     ))}
                   </select>
                   <p className="text-[10px] text-slate-500 mt-1 leading-snug">
-                    {isTargetProtectedAdmin
-                      ? 'O Administrador Master permanece vinculado à Matriz (comp-matriz) com acesso global a todas as filiais.'
-                      : 'Define a empresa principal (companyId) gravada em /users/{uid} no Firestore. O usuário terá acesso somente à empresa autorizada.'}
+                    Define a empresa aberta automaticamente no login (<code className="font-mono">defaultCompanyId</code>). Usuários ativos autenticados podem alternar entre Matriz e Filiais deste ERP, mantendo as permissões do perfil.
                   </p>
                 </div>
 
@@ -3273,10 +3285,10 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ initialTab = 'empres
                 <div className="p-2.5 bg-blue-50/80 border border-blue-200/80 rounded-xl space-y-1 text-[11px] text-blue-900">
                   <div className="flex items-center gap-1.5 font-bold text-blue-950">
                     <ShieldCheck size={13} className="text-blue-600" />
-                    <span>Provisionamento & Vínculo no Firestore:</span>
+                    <span>Provisionamento & Perfil no Firestore:</span>
                   </div>
                   <p className="text-blue-800 leading-snug">
-                    Ao salvar, o perfil <code className="font-mono">/users/&#123;uid&#125;</code> é gravado com o <strong>companyId</strong> da empresa selecionada e o registro central <code className="font-mono">/erp_sync/comp-matriz</code> (<code className="font-mono">registeredCompanyIds</code>) é sincronizado imediatamente.
+                    Ao salvar, o perfil <code className="font-mono">/users/&#123;uid&#125;</code> é gravado com o campo <strong>defaultCompanyId</strong> (e <code className="font-mono">companyId</code> sincronizado) da Empresa Padrão selecionada, mantendo todas as regras RBAC do perfil.
                   </p>
                 </div>
               </div>
@@ -3349,7 +3361,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ initialTab = 'empres
               <div>
                 <label className="block font-bold text-slate-700 mb-1 flex items-center gap-1">
                   <Building2 size={13} className="text-blue-600" />
-                  <span>Empresa de Vinculação *</span>
+                  <span>Empresa Padrão *</span>
                 </label>
                 <select
                   required

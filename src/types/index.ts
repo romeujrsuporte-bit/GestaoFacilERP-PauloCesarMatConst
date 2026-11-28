@@ -40,11 +40,12 @@ export interface User {
   password?: string;
   role: UserRole;
   companyId: string;
+  defaultCompanyId?: string; // Empresa padrão (Matriz ou Filial) aberta automaticamente ao fazer login
   status: 'ativo' | 'inativo';
   permissions: UserPermissions;
   email?: string;
   phone?: string;
-  allowedCompanyIds?: string[]; // IDs das empresas que o usuário possui permissão de acesso
+  allowedCompanyIds?: string[]; // Legado: não utilizado no modelo multiempresa padronizado
   commissionPercent?: number; // Percentual padrão de comissão de vendas
   firebaseUid?: string; // UID do usuário vinculado no Firebase Authentication
   updatedAt?: string;

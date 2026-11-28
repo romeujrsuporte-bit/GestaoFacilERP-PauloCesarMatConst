@@ -201,7 +201,7 @@ export const Header: React.FC<HeaderProps> = ({
           ) : (
             <span
               className="text-xs font-semibold text-slate-700 truncate"
-              title={`Empresa vinculada: ${currentCompany.tradeName || currentCompany.name}`}
+              title={`Empresa ativa: ${currentCompany.tradeName || currentCompany.name}`}
             >
               {currentCompany.tradeName || currentCompany.name} ({currentCompany.type === 'matriz' ? 'Matriz' : 'Filial'})
             </span>

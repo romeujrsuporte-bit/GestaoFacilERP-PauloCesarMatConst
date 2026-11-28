@@ -96,37 +96,31 @@ service cloud.firestore {
         isActiveUserWithRole(['admin', 'gerente', 'balconista', 'vendedor_externo', 'financeiro']);
     }
 
-    // Validação rigorosa do vínculo entre usuário e empresa/filial:
-    // - Admin autorizado acessa o documento de empresa válida.
-    // - Operador ativo só acessa se:
-    //   (a) seu companyId for exatamente o companyId do documento; OU
-    //   (b) o documento for a Matriz ('comp-matriz') e o companyId EXATO da filial do usuário
-    //       estiver explicitamente registrado e ativo no mapa 'registeredCompanyIds' do documento,
-    //       com múltiplas empresas cadastradas e raiz coincidente em state.companies[0].id.
-    // - Bloqueia qualquer filial inexistente, inativa ou não vinculada à Matriz.
-    // - LIMITAÇÃO CEL: a linguagem CEL do Firestore Rules não permite iterar sobre state.companies (List<Map>)
-    //   para validar dinamicamente IDs/unicidade nos índices 1..N; por isso o índice em mapa 'registeredCompanyIds'
-    //   (somente editável por Admin ou Gerente da Matriz) é usado como registro de chaves únicas.
+    // Validação de operador autorizado no modelo multiempresa do projeto Firebase:
+    // - Todo usuário ativo e autenticado COM perfil válido em /users/{uid} dentro deste projeto Firebase
+    //   pode operar na Matriz e nas Filiais registradas no documento central /erp_sync/comp-matriz.
+    // - Bloqueia usuários não autenticados, anônimos, sem perfil em /users/{uid}, inativos ou de outros projetos Firebase.
+    // - Mantém rigorosamente a autorização de escrita por módulo/perfil RBAC (Admin, Gerente, Financeiro, Balconista, Vendedor Externo).
+    function hasValidUserDefaultCompany() {
+      return (
+        ('defaultCompanyId' in userProfile() && isValidCompanyId(userProfile().defaultCompanyId)) ||
+        ('companyId' in userProfile() && isValidCompanyId(userProfile().companyId))
+      );
+    }
+
     function isOperatorInCompany(companyId) {
       return isAdmin() || (
         resource != null &&
         isActiveOperator() &&
         hasUserProfile() &&
-        'companyId' in userProfile() &&
-        isValidCompanyId(userProfile().companyId) &&
+        hasValidUserDefaultCompany() &&
         (
-          userProfile().companyId == companyId ||
+          companyId == 'comp-matriz' ||
           (
-            companyId == 'comp-matriz' &&
             'registeredCompanyIds' in existing() &&
             existing().registeredCompanyIds is map &&
-            userProfile().companyId in existing().registeredCompanyIds &&
-            existing().registeredCompanyIds[userProfile().companyId] == true &&
-            existing().state.companies is list &&
-            existing().state.companies.size() >= 1 &&
-            existing().state.companies[0] is map &&
-            'id' in existing().state.companies[0] &&
-            existing().state.companies[0].id == companyId
+            companyId in existing().registeredCompanyIds &&
+            existing().registeredCompanyIds[companyId] == true
           )
         )
       );
@@ -147,6 +141,7 @@ service cloud.firestore {
           'login',
           'role',
           'companyId',
+          'defaultCompanyId',
           'status',
           'createdAt',
           'updatedAt',
@@ -159,6 +154,7 @@ service cloud.firestore {
         data.name is string && data.name.size() > 0 && data.name.size() <= 128 &&
         data.role in ['admin', 'gerente', 'balconista', 'vendedor_externo', 'financeiro'] &&
         isValidCompanyId(data.companyId) &&
+        (!('defaultCompanyId' in data) || isValidCompanyId(data.defaultCompanyId)) &&
         data.status in ['ativo', 'inativo'] &&
         data.createdAt is string && data.createdAt.size() > 0 && data.createdAt.size() <= 64 &&
         (!('updatedAt' in data) || (data.updatedAt is string && data.updatedAt.size() <= 64)) &&
@@ -275,11 +271,10 @@ service cloud.firestore {
     }
 
     // Permissões de gravação por módulo para o perfil Gerente Geral
-    // (Bloqueado de alterar usuários, usuários excluídos, menus globais do sistema, limpeza de auditoria
-    // e registeredCompanyIds; alteração cadastral de 'companies' permitida apenas ao gerente vinculado à Matriz)
-    function canGerenteUpdateState(companyId) {
+    // (Bloqueado de alterar usuários, empresas/filiais, usuários excluídos, menus globais do sistema,
+    // limpeza de auditoria e registeredCompanyIds — exclusivos do Administrador)
+    function canGerenteUpdateState() {
       return incoming().state.diff(existing().state).affectedKeys().hasOnly([
-        'companies',
         'currentCompanyId',
         'currentUserId',
         'stockLocations',
@@ -322,8 +317,7 @@ service cloud.firestore {
         'deletedUserIds'
       ]) &&
       isImmutableOrEmptyInit('deletedUserIds') &&
-      sameOptionalField('registeredCompanyIds') &&
-      (userProfile().companyId == companyId || incoming().state.companies == existing().state.companies);
+      sameOptionalField('registeredCompanyIds');
     }
 
     // Permissões de gravação por módulo para o perfil Financeiro
@@ -477,6 +471,7 @@ service cloud.firestore {
             sameOptionalField('login') &&
             sameOptionalField('email') &&
             sameOptionalField('companyId') &&
+            sameOptionalField('defaultCompanyId') &&
             incoming().diff(existing()).affectedKeys().hasOnly(['name', 'phone', 'updatedAt'])
           )
         );
@@ -536,7 +531,7 @@ service cloud.firestore {
         (
           (isAdmin() && 'registeredCompanyIds' in incoming()) ||
           (isOperatorInCompany(companyId) && (
-            (isGerente() && canGerenteUpdateState(companyId)) ||
+            (isGerente() && canGerenteUpdateState()) ||
             (isFinanceiro() && canFinanceiroUpdateState()) ||
             (isBalconista() && canBalconistaUpdateState()) ||
             (isVendedorExterno() && canVendedorExternoUpdateState())
