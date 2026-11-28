@@ -12,6 +12,7 @@ import {
   ShieldCheck,
   User as UserIcon,
   RefreshCw,
+  CloudOff,
 } from 'lucide-react';
 import { Database } from '../../services/db';
 import { toast } from '../../services/toast';
@@ -65,10 +66,14 @@ export const Header: React.FC<HeaderProps> = ({
     });
   }, []);
 
+  const hasSyncError = syncStatus.status === 'error' || syncStatus.failedCount > 0;
   const isSyncingOrPending = syncStatus.status === 'syncing' || syncStatus.pendingCount > 0;
+  const showSyncIcon = isSyncingOrPending || hasSyncError;
   const syncIconTitle =
     syncStatus.status === 'syncing'
       ? 'Sincronizando dados com o Firebase...'
+      : hasSyncError
+      ? `Falha na sincronização com o Firebase: ${syncStatus.lastError || 'erro ao enviar alterações'} — clique para tentar novamente`
       : `${syncStatus.pendingCount} operação(ões) aguardando sincronização com o Firebase — clique para enviar`;
 
   // Fecha o menu de perfil ao clicar fora
@@ -204,7 +209,7 @@ export const Header: React.FC<HeaderProps> = ({
         </div>
 
         {/* Ícone discreto de sincronização com o Firebase próximo ao nome da empresa */}
-        {isSyncingOrPending && (
+        {showSyncIcon && (
           <button
             type="button"
             onClick={() => {
@@ -214,12 +219,20 @@ export const Header: React.FC<HeaderProps> = ({
             }}
             title={syncIconTitle}
             aria-label={syncIconTitle}
-            className="hidden sm:inline-flex items-center justify-center w-8 h-8 rounded-xl bg-blue-50 text-blue-600 border border-blue-200 hover:bg-blue-100 transition-colors cursor-pointer shrink-0"
+            className={`hidden sm:inline-flex items-center justify-center w-8 h-8 rounded-xl border transition-colors cursor-pointer shrink-0 ${
+              hasSyncError && syncStatus.status !== 'syncing'
+                ? 'bg-rose-50 text-rose-600 border-rose-200 hover:bg-rose-100'
+                : 'bg-blue-50 text-blue-600 border-blue-200 hover:bg-blue-100'
+            }`}
           >
-            <RefreshCw
-              size={15}
-              className={syncStatus.status === 'syncing' ? 'animate-spin' : ''}
-            />
+            {hasSyncError && syncStatus.status !== 'syncing' ? (
+              <CloudOff size={15} />
+            ) : (
+              <RefreshCw
+                size={15}
+                className={syncStatus.status === 'syncing' ? 'animate-spin' : ''}
+              />
+            )}
           </button>
         )}
       </div>
@@ -402,7 +415,7 @@ export const Header: React.FC<HeaderProps> = ({
           )}
         </div>
 
-        {isSyncingOrPending && (
+        {showSyncIcon && (
           <button
             type="button"
             onClick={() => {
@@ -412,12 +425,20 @@ export const Header: React.FC<HeaderProps> = ({
             }}
             title={syncIconTitle}
             aria-label={syncIconTitle}
-            className="shrink-0 inline-flex items-center justify-center w-7 h-7 rounded-lg bg-blue-500/20 text-blue-300 border border-blue-400/40 cursor-pointer"
+            className={`shrink-0 inline-flex items-center justify-center w-7 h-7 rounded-lg border cursor-pointer ${
+              hasSyncError && syncStatus.status !== 'syncing'
+                ? 'bg-rose-500/20 text-rose-300 border-rose-400/40'
+                : 'bg-blue-500/20 text-blue-300 border-blue-400/40'
+            }`}
           >
-            <RefreshCw
-              size={14}
-              className={syncStatus.status === 'syncing' ? 'animate-spin' : ''}
-            />
+            {hasSyncError && syncStatus.status !== 'syncing' ? (
+              <CloudOff size={14} />
+            ) : (
+              <RefreshCw
+                size={14}
+                className={syncStatus.status === 'syncing' ? 'animate-spin' : ''}
+              />
+            )}
           </button>
         )}
 

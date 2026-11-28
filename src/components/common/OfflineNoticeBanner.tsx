@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { WifiOff, CloudOff, RefreshCw, Loader2, Database as DatabaseIcon } from 'lucide-react';
+import { WifiOff, Database as DatabaseIcon } from 'lucide-react';
 import { useOnlineStatus } from '../../hooks/useOnlineStatus';
 import { FirebaseSyncService, FirebaseSyncStatus } from '../../services/firebaseSync';
 import { Database } from '../../services/db';
@@ -7,7 +7,6 @@ import { Database } from '../../services/db';
 export const OfflineNoticeBanner: React.FC = () => {
   const isOnline = useOnlineStatus();
   const [syncStatus, setSyncStatus] = useState<FirebaseSyncStatus>(() => FirebaseSyncService.getStatus());
-  const [isRetrying, setIsRetrying] = useState(false);
   const [dismissedSizeWarning, setDismissedSizeWarning] = useState(false);
 
   useEffect(() => {
@@ -15,16 +14,6 @@ export const OfflineNoticeBanner: React.FC = () => {
       setSyncStatus(next);
     });
   }, []);
-
-  const handleRetrySync = async () => {
-    if (isRetrying) return;
-    setIsRetrying(true);
-    try {
-      await FirebaseSyncService.retryPendingSync();
-    } finally {
-      setIsRetrying(false);
-    }
-  };
 
   const hasPendingOrFailed = syncStatus.pendingCount > 0 || syncStatus.failedCount > 0;
 
@@ -52,42 +41,7 @@ export const OfflineNoticeBanner: React.FC = () => {
     );
   }
 
-  // 2. Falha efetiva na sincronização (autenticação, permissão, limite de 1 MB ou erro do Firestore)
-  if (syncStatus.status === 'error' || syncStatus.failedCount > 0) {
-    return (
-      <div
-        role="alert"
-        aria-live="assertive"
-        className="fixed bottom-4 left-1/2 -translate-x-1/2 z-[120] w-[calc(100%-2rem)] max-w-xl bg-rose-700 text-white px-4 py-3 rounded-2xl shadow-xl border border-rose-400/60 flex items-center gap-3 animate-in fade-in slide-in-from-bottom-3 duration-200"
-      >
-        <div className="w-8 h-8 rounded-xl bg-white/20 flex items-center justify-center shrink-0">
-          <CloudOff size={18} className="text-white" />
-        </div>
-        <div className="min-w-0 flex-1">
-          <p className="text-xs font-extrabold leading-snug">
-            Falha na sincronização com o Firebase
-            {syncStatus.failedCount > 0 ? ` (${syncStatus.failedCount} pendente${syncStatus.failedCount > 1 ? 's' : ''})` : ''}
-          </p>
-          <p className="text-[11px] text-rose-100 leading-snug">
-            {syncStatus.lastError || 'Não foi possível gravar as últimas alterações na nuvem.'}
-          </p>
-        </div>
-        {syncStatus.lastErrorCode !== 'AUTH_REQUIRED' && (
-          <button
-            type="button"
-            onClick={handleRetrySync}
-            disabled={isRetrying}
-            className="shrink-0 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white/20 hover:bg-white/30 text-white text-[11px] font-extrabold transition-colors cursor-pointer disabled:opacity-50"
-          >
-            {isRetrying ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />}
-            <span>{isRetrying ? 'Enviando...' : 'Tentar agora'}</span>
-          </button>
-        )}
-      </div>
-    );
-  }
-
-  // 3. Alerta preventivo para Admin/Gerente caso o documento centralizado se aproxime do limite de 1 MB
+  // 2. Alerta preventivo para Admin/Gerente caso o documento centralizado se aproxime do limite de 1 MB
   if (
     syncStatus.documentSizeWarning &&
     !dismissedSizeWarning &&
