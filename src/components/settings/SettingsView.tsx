@@ -47,6 +47,9 @@ import {
   Trash2,
   Mail,
   Tag,
+  RefreshCw,
+  Wrench,
+  Link2,
 } from 'lucide-react';
 import {
   Database,
@@ -66,9 +69,13 @@ import { FirebaseSyncService } from '../../services/firebaseSync';
 import {
   auth,
   MASTER_ADMIN_EMAIL,
+  UserProfileDoc,
   deleteUserProfileInFirestore,
+  isValidCompanyIdFormat,
   isValidGoogleAccountEmail,
+  listFirestoreUserProfiles,
   provisionFirebaseAuthForUser,
+  repairExistingUserFirestoreProfile,
   requestFirebasePasswordReset,
   syncUserProfileStatusRoleInFirestore,
 } from '../../services/firebase';
@@ -437,13 +444,77 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ initialTab = 'empres
   const [userInitialPassword, setUserInitialPassword] = useState('');
   const [showInitialPassword, setShowInitialPassword] = useState(false);
   const [userRole, setUserRole] = useState<UserRole>('balconista');
+  const [userCompanyId, setUserCompanyId] = useState<string>('');
   const [userStatus, setUserStatus] = useState<'ativo' | 'inativo'>('ativo');
   const [userMaxDiscount, setUserMaxDiscount] = useState('10');
   const [prefSaveMsg, setPrefSaveMsg] = useState<string | null>(null);
 
+  // Diagnóstico e Reparo de Vínculos /users/{uid} no Firestore (Exclusivo Admin Master)
+  const [firestoreProfiles, setFirestoreProfiles] = useState<UserProfileDoc[]>([]);
+  const [firestoreProfilesLoaded, setFirestoreProfilesLoaded] = useState(false);
+  const [isLoadingFirestoreProfiles, setIsLoadingFirestoreProfiles] = useState(false);
+  const [firestoreProfilesError, setFirestoreProfilesError] = useState<string | null>(null);
+  const [quickSyncingUserId, setQuickSyncingUserId] = useState<string | null>(null);
+
+  // Modal de Reparo/Complementação de Usuário Existente no Firestore (sem duplicar conta Auth)
+  const [repairTargetUser, setRepairTargetUser] = useState<User | null>(null);
+  const [repairCompanyId, setRepairCompanyId] = useState<string>('');
+  const [repairRole, setRepairRole] = useState<UserRole>('balconista');
+  const [repairStatus, setRepairStatus] = useState<'ativo' | 'inativo'>('ativo');
+  const [repairExistingUid, setRepairExistingUid] = useState<string>('');
+  const [repairExistingPassword, setRepairExistingPassword] = useState<string>('');
+  const [showRepairPassword, setShowRepairPassword] = useState(false);
+  const [repairError, setRepairError] = useState<string | null>(null);
+  const [isRepairingUser, setIsRepairingUser] = useState(false);
+
+  const activeCompanies = useMemo(() => {
+    const list = (dbState.companies || []).filter((c) => c && c.status !== 'inativo');
+    return [...list].sort((a, b) => {
+      if (a.type === 'matriz' && b.type !== 'matriz') return -1;
+      if (a.type !== 'matriz' && b.type === 'matriz') return 1;
+      return (a.tradeName || a.name).localeCompare(b.tradeName || b.name);
+    });
+  }, [dbState.companies]);
+
+  const loadFirestoreProfiles = async (silent: boolean = false) => {
+    if (!isMasterAdmin || !auth.currentUser) return;
+    setIsLoadingFirestoreProfiles(true);
+    setFirestoreProfilesError(null);
+    try {
+      const profiles = await listFirestoreUserProfiles();
+      setFirestoreProfiles(profiles);
+      setFirestoreProfilesLoaded(true);
+    } catch (err: any) {
+      const msg = err?.message || 'Não foi possível consultar os perfis /users no Firestore.';
+      setFirestoreProfilesError(msg);
+      if (!silent) {
+        toast.warning(msg, 'Verificação do Firestore');
+      }
+    } finally {
+      setIsLoadingFirestoreProfiles(false);
+    }
+  };
+
+  const findMatchingFirestoreProfile = (u: User): UserProfileDoc | undefined => {
+    if (firestoreProfiles.length === 0) return undefined;
+    const cleanEmail = (u.email || '').trim().toLowerCase();
+    return (
+      (u.firebaseUid ? firestoreProfiles.find((p) => p.uid === u.firebaseUid) : undefined) ||
+      firestoreProfiles.find((p) => p.erpUserId && p.erpUserId === u.id) ||
+      (cleanEmail ? firestoreProfiles.find((p) => (p.email || '').trim().toLowerCase() === cleanEmail) : undefined)
+    );
+  };
+
+  const getCompanyInfoById = (companyId?: string): Company | undefined => {
+    if (!companyId) return undefined;
+    return (dbState.companies || []).find((c) => c.id === companyId);
+  };
+
   useEffect(() => {
     if (!isMasterAdmin && activeTab === 'usuarios') {
       setActiveTab(canManageSettings ? 'empresas' : 'preferencias');
+    } else if (isMasterAdmin && activeTab === 'usuarios') {
+      loadFirestoreProfiles(true);
     }
   }, [activeTab, isMasterAdmin, canManageSettings]);
 
@@ -665,8 +736,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ initialTab = 'empres
     }
   };
 
-  // Salvar Empresa
-  const handleSaveCompany = (e: React.FormEvent) => {
+  // Salvar Empresa (aguarda sincronização do registro de empresas/filiais no Firestore)
+  const handleSaveCompany = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!compName.trim() || !compCnpj.trim()) {
       toast.warning('Razão Social e CNPJ da empresa são obrigatórios.', 'Campos Obrigatórios');
@@ -678,6 +749,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ initialTab = 'empres
     const finalTradeName = compTradeName.trim() || compName.trim();
 
     if (editingCompany) {
+      const isRootMatriz = editingCompany.id === 'comp-matriz';
       state.companies = state.companies.map((c) =>
         c.id === editingCompany.id
           ? {
@@ -685,7 +757,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ initialTab = 'empres
               name: compName.trim(),
               tradeName: finalTradeName,
               cnpjCpf: compCnpj.trim(),
-              type: compType,
+              type: isRootMatriz ? 'matriz' : compType,
               phone: compPhone.trim(),
               address: {
                 street: c.address?.street || '',
@@ -708,7 +780,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ initialTab = 'empres
         name: compName.trim(),
         tradeName: finalTradeName,
         cnpjCpf: compCnpj.trim(),
-        type: compType,
+        type: compType === 'matriz' ? 'filial' : compType,
         phone: compPhone.trim(),
         email: 'contato@empresa.com.br',
         address: {
@@ -728,15 +800,40 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ initialTab = 'empres
       Database.addAuditLog('CRIAR_EMPRESA', 'CONFIGURACOES', newComp.id, `Filial/Empresa ${newComp.tradeName} cadastrada`);
     }
 
+    // Garante que a empresa Matriz permaneça sempre na posição 0 (requisito das regras do Firestore)
+    const matrizIdx = state.companies.findIndex((c) => c.id === 'comp-matriz');
+    if (matrizIdx > 0) {
+      const [matriz] = state.companies.splice(matrizIdx, 1);
+      state.companies.unshift(matriz);
+    }
+
     Database.persist();
-    FirebaseSyncService.syncToFirebase(Database.getState(), true).catch((syncErr) => {
-      console.warn('Erro ao sincronizar empresa com Firebase:', syncErr);
-    });
-    toast.success('Dados da empresa salvos com sucesso!', 'Empresa Atualizada');
+    setDbState({ ...Database.getState() });
     setIsCompanyModalOpen(false);
+
+    try {
+      const synced = await FirebaseSyncService.syncToFirebase(Database.getState(), isAdmin);
+      if (synced) {
+        toast.success(
+          'Dados da empresa salvos e registrados no Firebase Firestore (registeredCompanyIds atualizado)!',
+          'Empresa Atualizada'
+        );
+      } else {
+        toast.warning(
+          'Empresa salva localmente, mas a sincronização com o Firebase Firestore não foi confirmada. Clique no ícone de sincronização para reenviar.',
+          'Sincronização Pendente'
+        );
+      }
+    } catch (syncErr) {
+      console.warn('Erro ao sincronizar empresa com Firebase:', syncErr);
+      toast.warning(
+        'Empresa salva localmente, mas houve falha ao atualizar o registro no Firebase Firestore.',
+        'Sincronização Pendente'
+      );
+    }
   };
 
-  // Salvar Usuário (Exclusivo romeujr.suporte@gmail.com com criação real no Firebase Authentication)
+  // Salvar Usuário (Exclusivo romeujr.suporte@gmail.com com vínculo obrigatório de empresa e gravação no Firestore)
   const handleSaveUser = async (e: React.FormEvent) => {
     e.preventDefault();
     setUserModalError(null);
@@ -753,6 +850,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ initialTab = 'empres
     const cleanLogin = userLogin.trim().toLowerCase().replace(/^@/, '');
     const cleanEmail = userEmail.trim().toLowerCase();
     const cleanPassword = userInitialPassword.trim();
+    const selectedCompanyId = userCompanyId.trim();
 
     if (!cleanName || !cleanLogin) {
       setUserModalError('Nome Completo e Login de Acesso são obrigatórios.');
@@ -765,6 +863,23 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ initialTab = 'empres
         editingUser.id === 'usr-admin' ||
         editingUser.email?.toLowerCase() === MASTER_ADMIN_EMAIL.toLowerCase());
 
+    const effectiveCompanyId = isTargetProtectedAdmin ? 'comp-matriz' : selectedCompanyId;
+    if (!effectiveCompanyId || !isValidCompanyIdFormat(effectiveCompanyId)) {
+      setUserModalError(
+        'Selecione a Empresa de Vinculação (Matriz ou Filial). Este campo é obrigatório para autorização no Firebase Firestore.'
+      );
+      return;
+    }
+
+    const state = Database.getState();
+    const matchedCompany = (state.companies || []).find((c) => c.id === effectiveCompanyId);
+    if (!matchedCompany || matchedCompany.status === 'inativo') {
+      setUserModalError(
+        'A Empresa de Vinculação selecionada não existe ou está inativa. Selecione uma empresa ativa (Matriz ou Filial).'
+      );
+      return;
+    }
+
     if (!isTargetProtectedAdmin && !isValidGoogleAccountEmail(cleanEmail)) {
       setUserModalError(
         'Informe uma conta Google válida (@gmail.com ou @googlemail.com) para autenticação no Firebase.'
@@ -772,7 +887,6 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ initialTab = 'empres
       return;
     }
 
-    const state = Database.getState();
     const duplicateUser = state.users.find(
       (u) =>
         u.id !== editingUser?.id &&
@@ -786,8 +900,12 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ initialTab = 'empres
       return;
     }
 
+    // Caso o usuário já possua documento /users/{uid} detectado no Firestore, reaproveita o UID sem exigir recriação
+    const detectedRemoteProfile = editingUser ? findMatchingFirestoreProfile(editingUser) : undefined;
+    const knownExistingUid = editingUser?.firebaseUid || detectedRemoteProfile?.uid || '';
+
     const needsFirebaseProvisioning =
-      !isTargetProtectedAdmin && (!editingUser || !editingUser.firebaseUid);
+      !isTargetProtectedAdmin && (!editingUser || !knownExistingUid);
 
     if (needsFirebaseProvisioning && cleanPassword.length < 6) {
       setUserModalError(
@@ -921,14 +1039,20 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ initialTab = 'empres
           }
         }
 
-        const { password: _removedLegacyPass, ...existingWithoutPass } = targetExisting;
+        const {
+          password: _removedLegacyPass,
+          allowedCompanyIds: _removedIndiscriminateCompanies,
+          ...existingWithoutPass
+        } = targetExisting;
         const updatedObj: User = {
           ...existingWithoutPass,
           name: cleanName,
           login: isTargetProtectedAdmin ? targetExisting.login : cleanLogin,
           email: effectiveEmail,
           role: effectiveRole,
+          companyId: effectiveCompanyId,
           status: effectiveStatus,
+          firebaseUid: knownExistingUid || existingWithoutPass.firebaseUid,
           updatedAt: nowIso,
           permissions: {
             ...permissions,
@@ -962,7 +1086,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ initialTab = 'empres
           'ATUALIZAR_USUARIO',
           'CONFIGURACOES',
           editingUser.id,
-          `Usuário ${updatedObj.name} (${updatedObj.email}) atualizado e sincronizado no Firebase.`
+          `Usuário ${updatedObj.name} (${updatedObj.email}) vinculado à empresa ${matchedCompany.tradeName || matchedCompany.name} (${effectiveCompanyId}) e sincronizado no Firebase.`
         );
       } else {
         const newUser: User = {
@@ -971,7 +1095,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ initialTab = 'empres
           login: cleanLogin,
           email: cleanEmail,
           role: userRole,
-          companyId: currentCompany.id,
+          companyId: effectiveCompanyId,
           status: 'ativo',
           updatedAt: nowIso,
           permissions: {
@@ -989,7 +1113,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ initialTab = 'empres
           },
         };
 
-        // Cria obrigatoriamente a conta no Firebase Authentication + documento /users/{uid} no Firestore
+        // Cria obrigatoriamente a conta no Firebase Authentication + documento /users/{uid} no Firestore com companyId
         const provisionedUid = await provisionFirebaseAuthForUser(newUser, cleanPassword);
         newUser.firebaseUid = provisionedUid;
         newUser.updatedAt = new Date().toISOString();
@@ -999,26 +1123,203 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ initialTab = 'empres
           'CRIAR_USUARIO',
           'CONFIGURACOES',
           newUser.id,
-          `Usuário ${newUser.name} (${newUser.email}, perfil ${userRole}) criado no ERP e no Firebase Authentication.`
+          `Usuário ${newUser.name} (${newUser.email}, perfil ${userRole}) criado e vinculado à empresa ${matchedCompany.tradeName || matchedCompany.name} (${effectiveCompanyId}).`
         );
       }
 
       Database.persist();
-      await FirebaseSyncService.syncToFirebase(Database.getState(), true);
+      const syncedToCloud = await FirebaseSyncService.syncToFirebase(Database.getState(), true);
       setDbState({ ...Database.getState() });
+      await loadFirestoreProfiles(true);
       setIsUserModalOpen(false);
-      toast.success(
-        editingUser
-          ? `Usuário ${cleanName} atualizado e sincronizado no Firebase!`
-          : `Usuário ${cleanName} (${cleanEmail}) criado no Firebase Authentication e liberado para acesso!`,
-        editingUser ? 'Usuário Atualizado' : 'Usuário Provisionado no Firebase'
-      );
+
+      if (syncedToCloud) {
+        toast.success(
+          editingUser
+            ? `Usuário ${cleanName} atualizado, vinculado a ${matchedCompany.tradeName || matchedCompany.name} e confirmado no Firebase!`
+            : `Usuário ${cleanName} (${cleanEmail}) criado, vinculado a ${matchedCompany.tradeName || matchedCompany.name} e liberado para acesso!`,
+          editingUser ? 'Usuário Atualizado' : 'Usuário Provisionado no Firebase'
+        );
+      } else {
+        toast.warning(
+          `Perfil /users/{uid} salvo no Firestore, porém a sincronização central (/erp_sync/comp-matriz) não pôde ser confirmada agora. Verifique sua conexão e sincronize antes do login do usuário.`,
+          'Sincronização Central Pendente'
+        );
+      }
     } catch (err: any) {
       const msg = err?.message || 'Não foi possível salvar e provisionar o usuário no Firebase.';
       setUserModalError(msg);
       toast.error(msg, 'Erro ao Provisionar Usuário');
     } finally {
       setIsSavingUser(false);
+    }
+  };
+
+  // Sincronização rápida de 1 clique quando o UID já existe (sem duplicar conta Auth)
+  const handleQuickSyncUserProfile = async (targetUser: User, detectedUid?: string) => {
+    if (!isMasterAdmin) return;
+    const effectiveUid = (targetUser.firebaseUid || detectedUid || '').trim();
+    const targetComp = getCompanyInfoById(targetUser.companyId);
+
+    if (!effectiveUid || !targetComp || targetComp.status === 'inativo') {
+      handleOpenRepairModal(targetUser, detectedUid);
+      return;
+    }
+
+    setQuickSyncingUserId(targetUser.id);
+    try {
+      const { uid } = await repairExistingUserFirestoreProfile({
+        user: targetUser,
+        targetCompanyId: targetComp.id,
+        existingUid: effectiveUid,
+      });
+
+      const state = Database.getState();
+      state.users = state.users.map((u) => {
+        if (u.id !== targetUser.id) return u;
+        const { allowedCompanyIds: _removed, password: _legacyPass, ...rest } = u;
+        return {
+          ...rest,
+          companyId: targetComp.id,
+          firebaseUid: uid,
+          updatedAt: new Date().toISOString(),
+        };
+      });
+      Database.addAuditLog(
+        'REPARAR_VINCULO_USUARIO',
+        'CONFIGURACOES',
+        targetUser.id,
+        `Perfil /users/${uid} sincronizado no Firestore para ${targetUser.name} na empresa ${targetComp.tradeName || targetComp.name} (${targetComp.id}).`
+      );
+      Database.persist();
+      const synced = await FirebaseSyncService.syncToFirebase(Database.getState(), true);
+      setDbState({ ...Database.getState() });
+      await loadFirestoreProfiles(true);
+
+      if (synced) {
+        toast.success(
+          `Vínculo Firestore de ${targetUser.name} atualizado na empresa ${targetComp.tradeName || targetComp.name}!`,
+          'Vínculo Sincronizado'
+        );
+      } else {
+        toast.warning(
+          'Documento /users/{uid} atualizado, mas a sincronização central (/erp_sync/comp-matriz) ficou pendente.',
+          'Sincronização Pendente'
+        );
+      }
+    } catch (err: any) {
+      toast.error(err?.message || 'Não foi possível sincronizar o perfil no Firestore.');
+    } finally {
+      setQuickSyncingUserId(null);
+    }
+  };
+
+  // Abre modal de reparo para completar /users/{uid} de usuário já existente no Firebase Auth
+  const handleOpenRepairModal = (targetUser: User, detectedUid?: string) => {
+    const matchedProfile = findMatchingFirestoreProfile(targetUser);
+    const existingComp = getCompanyInfoById(targetUser.companyId || matchedProfile?.companyId);
+    setRepairTargetUser(targetUser);
+    setRepairCompanyId(
+      existingComp && existingComp.status !== 'inativo'
+        ? existingComp.id
+        : activeCompanies.length === 1
+        ? activeCompanies[0].id
+        : ''
+    );
+    setRepairRole(targetUser.role || matchedProfile?.role || 'balconista');
+    setRepairStatus(targetUser.status || matchedProfile?.status || 'ativo');
+    setRepairExistingUid((targetUser.firebaseUid || detectedUid || matchedProfile?.uid || '').trim());
+    setRepairExistingPassword('');
+    setShowRepairPassword(false);
+    setRepairError(null);
+  };
+
+  const handleExecuteRepairUser = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!isMasterAdmin || !repairTargetUser) return;
+    setRepairError(null);
+
+    const cleanCompanyId = repairCompanyId.trim();
+    if (!cleanCompanyId || !isValidCompanyIdFormat(cleanCompanyId)) {
+      setRepairError('Selecione uma Empresa de Vinculação válida (Matriz ou Filial).');
+      return;
+    }
+
+    const targetComp = getCompanyInfoById(cleanCompanyId);
+    if (!targetComp || targetComp.status === 'inativo') {
+      setRepairError('A empresa selecionada está inativa ou não cadastrada.');
+      return;
+    }
+
+    const cleanUid = repairExistingUid.trim();
+    const cleanPass = repairExistingPassword.trim();
+    if (!cleanUid && !cleanPass) {
+      setRepairError(
+        'Informe o UID da conta existente no Firebase Authentication ou a senha atual dessa conta para vincular sem criar conta duplicada.'
+      );
+      return;
+    }
+
+    setIsRepairingUser(true);
+    try {
+      const targetWithUpdates: User = {
+        ...repairTargetUser,
+        role: repairRole,
+        status: repairStatus,
+        companyId: cleanCompanyId,
+      };
+
+      const { uid } = await repairExistingUserFirestoreProfile({
+        user: targetWithUpdates,
+        targetCompanyId: cleanCompanyId,
+        existingUid: cleanUid || undefined,
+        existingPassword: cleanPass || undefined,
+      });
+
+      const state = Database.getState();
+      state.users = state.users.map((u) => {
+        if (u.id !== repairTargetUser.id) return u;
+        const { allowedCompanyIds: _removed, password: _legacyPass, ...rest } = u;
+        return {
+          ...rest,
+          role: repairRole,
+          status: repairStatus,
+          companyId: cleanCompanyId,
+          firebaseUid: uid,
+          updatedAt: new Date().toISOString(),
+        };
+      });
+
+      Database.addAuditLog(
+        'REPARAR_VINCULO_USUARIO',
+        'CONFIGURACOES',
+        repairTargetUser.id,
+        `Documento /users/${uid} completado/reparado no Firestore para ${repairTargetUser.name} (${repairTargetUser.email || repairTargetUser.login}) na empresa ${targetComp.tradeName || targetComp.name} (${cleanCompanyId}).`
+      );
+
+      Database.persist();
+      const synced = await FirebaseSyncService.syncToFirebase(Database.getState(), true);
+      setDbState({ ...Database.getState() });
+      await loadFirestoreProfiles(true);
+      setRepairTargetUser(null);
+
+      if (synced) {
+        toast.success(
+          `Vínculo de ${repairTargetUser.name} reparado no Firestore (/users/${uid}) e autorizado para ${targetComp.tradeName || targetComp.name}!`,
+          'Vínculo Reparado com Sucesso'
+        );
+      } else {
+        toast.warning(
+          `Documento /users/${uid} gravado no Firestore, mas a sincronização central (/erp_sync/comp-matriz) ficou pendente. Tente sincronizar novamente.`,
+          'Sincronização Central Pendente'
+        );
+      }
+    } catch (err: any) {
+      const msg = err?.message || 'Erro ao reparar vínculo do usuário no Firestore.';
+      setRepairError(msg);
+      toast.error(msg, 'Falha no Reparo de Vínculo');
+    } finally {
+      setIsRepairingUser(false);
     }
   };
 
@@ -1312,15 +1613,26 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ initialTab = 'empres
       {/* ABA 2: USUÁRIOS E PERFIS (EXCLUSIVO romeujr.suporte@gmail.com) */}
       {activeTab === 'usuarios' && isMasterAdmin && (
         <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-xs space-y-4">
-          <div className="flex justify-between items-center pb-2 border-b border-slate-100">
+          <div className="flex flex-wrap justify-between items-center gap-3 pb-2 border-b border-slate-100">
             <div>
               <h3 className="font-bold text-sm text-slate-800">Usuários e Perfis de Acesso</h3>
               <p className="text-xs text-slate-500">
-                Gerenciamento exclusivo do Administrador Master ({MASTER_ADMIN_EMAIL}). Todo usuário é criado no Firebase Authentication com conta Google válida (@gmail.com).
+                Gerenciamento exclusivo do Administrador Master ({MASTER_ADMIN_EMAIL}). Todo usuário é vinculado a uma empresa (Matriz ou Filial) e validado em <code className="font-mono text-[11px] bg-slate-100 px-1 rounded">/users/&#123;uid&#125;</code> no Firestore.
               </p>
             </div>
             <div className="flex items-center gap-2 flex-wrap">
               <button
+                type="button"
+                disabled={isLoadingFirestoreProfiles}
+                onClick={() => loadFirestoreProfiles(false)}
+                className="flex items-center gap-1.5 px-3 py-2 bg-slate-100 hover:bg-slate-200 disabled:opacity-50 text-slate-700 font-bold text-xs rounded-lg border border-slate-200 cursor-pointer"
+                title="Consultar a coleção /users no Firestore para verificar perfis incompletos ou pendentes"
+              >
+                <RefreshCw size={13} className={isLoadingFirestoreProfiles ? 'animate-spin' : ''} />
+                <span>{isLoadingFirestoreProfiles ? 'Verificando...' : 'Verificar Vínculos Firestore'}</span>
+              </button>
+              <button
+                type="button"
                 onClick={() => {
                   setEditingUser(null);
                   setUserName('');
@@ -1329,6 +1641,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ initialTab = 'empres
                   setUserInitialPassword('');
                   setShowInitialPassword(false);
                   setUserRole('balconista');
+                  setUserCompanyId(activeCompanies.length === 1 ? activeCompanies[0].id : '');
                   setUserStatus('ativo');
                   setUserMaxDiscount('10');
                   setUserModalError(null);
@@ -1342,6 +1655,22 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ initialTab = 'empres
             </div>
           </div>
 
+          {firestoreProfilesError && (
+            <div className="p-3 bg-amber-50 border border-amber-200 rounded-xl text-xs text-amber-900 flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <AlertTriangle size={15} className="text-amber-600 shrink-0" />
+                <span>Aviso ao auditar perfis no Firestore: {firestoreProfilesError}</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => loadFirestoreProfiles(false)}
+                className="px-2.5 py-1 bg-amber-100 hover:bg-amber-200 text-amber-900 font-bold rounded-lg cursor-pointer shrink-0"
+              >
+                Tentar novamente
+              </button>
+            </div>
+          )}
+
           <div className="divide-y divide-slate-100 text-xs">
             {dbState.users.map((u) => {
               const isProtectedAdminUser =
@@ -1350,11 +1679,31 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ initialTab = 'empres
                 u.email?.toLowerCase() === MASTER_ADMIN_EMAIL.toLowerCase();
               const isSelfUser = u.id === currentUser.id;
               const hasGoogleEmail = isValidGoogleAccountEmail(u.email || '');
+              const boundCompany = getCompanyInfoById(u.companyId);
+              const isCompanyValidAndActive = Boolean(boundCompany && boundCompany.status !== 'inativo');
+              const remoteProfile = findMatchingFirestoreProfile(u);
+              const resolvedUid = u.firebaseUid || remoteProfile?.uid;
+
+              // Avalia saúde real do documento /users/{uid} no Firestore
+              const hasCompleteRemoteProfile = Boolean(
+                remoteProfile &&
+                  remoteProfile.uid &&
+                  isValidCompanyIdFormat(remoteProfile.companyId) &&
+                  remoteProfile.createdAt &&
+                  remoteProfile.status === u.status &&
+                  remoteProfile.role === u.role &&
+                  remoteProfile.companyId === u.companyId
+              );
+              const needsFirestoreRepair =
+                !isProtectedAdminUser &&
+                (!isCompanyValidAndActive ||
+                  !resolvedUid ||
+                  (firestoreProfilesLoaded && !hasCompleteRemoteProfile));
 
               return (
-                <div key={u.id} className="py-3 flex items-center justify-between gap-3">
+                <div key={u.id} className="py-3 flex flex-col md:flex-row md:items-center justify-between gap-3">
                   <div>
-                    <div className="font-bold text-slate-800 text-sm flex items-center gap-2">
+                    <div className="font-bold text-slate-800 text-sm flex items-center gap-2 flex-wrap">
                       <span>{u.name}</span>
                       <span className="text-[10px] font-bold px-2 py-0.2 rounded-full uppercase bg-slate-100 text-slate-700">
                         {u.role}
@@ -1364,8 +1713,34 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ initialTab = 'empres
                           Admin Master
                         </span>
                       ) : null}
+
+                      {/* Selo da Empresa de Vinculação */}
+                      {boundCompany ? (
+                        <span
+                          className={`inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full border ${
+                            boundCompany.status === 'inativo'
+                              ? 'bg-rose-50 text-rose-800 border-rose-200'
+                              : boundCompany.type === 'matriz'
+                              ? 'bg-blue-50 text-blue-800 border-blue-200'
+                              : 'bg-indigo-50 text-indigo-800 border-indigo-200'
+                          }`}
+                          title={`Empresa de Vinculação: ${boundCompany.name} (ID: ${boundCompany.id})`}
+                        >
+                          <Building2 size={10} />
+                          <span>
+                            {boundCompany.tradeName || boundCompany.name} ({boundCompany.type === 'matriz' ? 'Matriz' : 'Filial'})
+                            {boundCompany.status === 'inativo' ? ' — INATIVA' : ''}
+                          </span>
+                        </span>
+                      ) : (
+                        <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full bg-rose-50 text-rose-800 border border-rose-200">
+                          <AlertTriangle size={10} />
+                          <span>Sem Empresa Vinculada</span>
+                        </span>
+                      )}
                     </div>
-                    <div className="text-slate-500 text-[11px] mt-0.5 flex flex-wrap items-center gap-2">
+
+                    <div className="text-slate-500 text-[11px] mt-1 flex flex-wrap items-center gap-2">
                       <span>Login: <strong className="font-mono text-slate-800">@{u.login}</strong></span>
                       <span>•</span>
                       <span className="inline-flex items-center gap-1">
@@ -1375,15 +1750,22 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ initialTab = 'empres
                       <span>•</span>
                       <span>Desconto Máx: <strong>{u.permissions.maxDiscountPercent}%</strong></span>
                       <span>•</span>
-                      {u.firebaseUid || isProtectedAdminUser ? (
+
+                      {/* Status real no Firebase Auth & Firestore /users/{uid} */}
+                      {isProtectedAdminUser || (resolvedUid && (!firestoreProfilesLoaded || hasCompleteRemoteProfile) && isCompanyValidAndActive) ? (
                         <span className="font-semibold text-emerald-800 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200 inline-flex items-center gap-1">
                           <ShieldCheck size={11} className="text-emerald-600" />
-                          <span>Firebase Auth OK</span>
+                          <span>Firestore /users OK</span>
                         </span>
-                      ) : (
+                      ) : resolvedUid && firestoreProfilesLoaded && remoteProfile && !hasCompleteRemoteProfile ? (
                         <span className="font-semibold text-amber-800 bg-amber-50 px-2 py-0.5 rounded border border-amber-200 inline-flex items-center gap-1">
                           <AlertTriangle size={11} className="text-amber-600" />
-                          <span>Pendente Firebase Auth (Editar para vincular)</span>
+                          <span>Perfil /users divergente ou incompleto no Firestore</span>
+                        </span>
+                      ) : (
+                        <span className="font-semibold text-rose-800 bg-rose-50 px-2 py-0.5 rounded border border-rose-200 inline-flex items-center gap-1">
+                          <AlertTriangle size={11} className="text-rose-600" />
+                          <span>Perfil /users pendente no Firestore (Reparar Vínculo)</span>
                         </span>
                       )}
                     </div>
@@ -1424,6 +1806,36 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ initialTab = 'empres
                     }`}>
                       {u.status}
                     </span>
+
+                    {/* Botão de Reparo / Sincronização de Vínculo no Firestore (sem duplicar conta Auth) */}
+                    {!isProtectedAdminUser && (
+                      needsFirestoreRepair && resolvedUid && isCompanyValidAndActive ? (
+                        <button
+                          type="button"
+                          disabled={quickSyncingUserId === u.id}
+                          onClick={() => handleQuickSyncUserProfile(u, resolvedUid)}
+                          className="flex items-center gap-1 px-2.5 py-1 text-[11px] font-bold text-amber-800 bg-amber-50 hover:bg-amber-100 disabled:opacity-50 rounded-lg border border-amber-300 transition-colors cursor-pointer shadow-2xs"
+                          title="Completar e sincronizar o documento /users/{uid} no Firestore com a empresa vinculada sem duplicar a conta"
+                        >
+                          <RefreshCw size={12} className={quickSyncingUserId === u.id ? 'animate-spin' : ''} />
+                          <span>{quickSyncingUserId === u.id ? 'Sincronizando...' : 'Sincronizar Vínculo'}</span>
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => handleOpenRepairModal(u, resolvedUid)}
+                          className={`flex items-center gap-1 px-2.5 py-1 text-[11px] font-bold rounded-lg border transition-colors cursor-pointer ${
+                            needsFirestoreRepair
+                              ? 'text-rose-800 bg-rose-50 hover:bg-rose-100 border-rose-300 shadow-2xs'
+                              : 'text-slate-700 bg-slate-50 hover:bg-slate-100 border-slate-200'
+                          }`}
+                          title="Completar ou reparar o vínculo /users/{uid} no Firestore para uma conta já existente no Firebase Authentication"
+                        >
+                          <Wrench size={12} />
+                          <span>{needsFirestoreRepair ? 'Reparar Vínculo' : 'Vínculo Firestore'}</span>
+                        </button>
+                      )
+                    )}
 
                     {/* Botão Configuração de Menus, Submenus & Números da Empresa (Exclusivo romeujr.suporte@gmail.com) */}
                     <button
@@ -1485,13 +1897,20 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ initialTab = 'empres
                         setUserInitialPassword('');
                         setShowInitialPassword(false);
                         setUserRole(u.role);
+                        setUserCompanyId(
+                          isProtectedAdminUser
+                            ? 'comp-matriz'
+                            : isCompanyValidAndActive
+                            ? u.companyId
+                            : ''
+                        );
                         setUserStatus(u.status || 'ativo');
                         setUserMaxDiscount(String(u.permissions.maxDiscountPercent));
                         setUserModalError(null);
                         setIsUserModalOpen(true);
                       }}
                       className="p-1.5 hover:bg-slate-100 text-slate-600 rounded-md cursor-pointer"
-                      title="Editar dados cadastrais do usuário"
+                      title="Editar dados cadastrais e empresa de vinculação do usuário"
                     >
                       <Edit2 size={14} />
                     </button>
@@ -2637,7 +3056,9 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ initialTab = 'empres
           (editingUser.login === 'admin' ||
             editingUser.id === 'usr-admin' ||
             editingUser.email?.toLowerCase() === MASTER_ADMIN_EMAIL.toLowerCase());
-        const requiresInitialPassword = !isTargetProtectedAdmin && (!editingUser || !editingUser.firebaseUid);
+        const detectedRemote = editingUser ? findMatchingFirestoreProfile(editingUser) : undefined;
+        const hasExistingUid = Boolean(editingUser?.firebaseUid || detectedRemote?.uid);
+        const requiresInitialPassword = !isTargetProtectedAdmin && (!editingUser || !hasExistingUid);
 
         return (
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-xs p-4 overflow-y-auto">
@@ -2690,7 +3111,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ initialTab = 'empres
                   <input
                     type="email"
                     required
-                    disabled={isSavingUser || isTargetProtectedAdmin || !!editingUser?.firebaseUid}
+                    disabled={isSavingUser || isTargetProtectedAdmin || hasExistingUid}
                     value={userEmail}
                     onChange={(e) => {
                       const val = e.target.value;
@@ -2704,7 +3125,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ initialTab = 'empres
                     className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg font-mono disabled:opacity-60"
                   />
                   <p className="text-[10px] text-slate-500 mt-1">
-                    {editingUser?.firebaseUid
+                    {hasExistingUid
                       ? 'Conta já vinculada ao Firebase Authentication.'
                       : 'Informe um e-mail Google válido (@gmail.com) para criar a conta no Firebase Authentication.'}
                   </p>
@@ -2724,6 +3145,36 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ initialTab = 'empres
                     placeholder="ex: maria.vendas"
                     className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg font-mono font-bold disabled:opacity-60"
                   />
+                </div>
+
+                {/* CAMPO OBRIGATÓRIO: EMPRESA DE VINCULAÇÃO (MATRIZ OU FILIAL) */}
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1 flex items-center gap-1">
+                    <Building2 size={13} className="text-blue-600" />
+                    <span>Empresa de Vinculação *</span>
+                  </label>
+                  <select
+                    required
+                    disabled={isSavingUser || isTargetProtectedAdmin}
+                    value={isTargetProtectedAdmin ? 'comp-matriz' : userCompanyId}
+                    onChange={(e) => {
+                      setUserCompanyId(e.target.value);
+                      setUserModalError(null);
+                    }}
+                    className="w-full bg-slate-50 border border-slate-300 rounded-lg p-2 font-semibold text-slate-800 disabled:opacity-60 focus:outline-hidden focus:ring-1 focus:ring-blue-500"
+                  >
+                    <option value="">Selecione a Matriz ou uma Filial...</option>
+                    {activeCompanies.map((comp) => (
+                      <option key={comp.id} value={comp.id}>
+                        {comp.tradeName || comp.name} ({comp.type === 'matriz' ? 'Matriz' : 'Filial'}) — {comp.address?.city || comp.cnpjCpf}
+                      </option>
+                    ))}
+                  </select>
+                  <p className="text-[10px] text-slate-500 mt-1 leading-snug">
+                    {isTargetProtectedAdmin
+                      ? 'O Administrador Master permanece vinculado à Matriz (comp-matriz) com acesso global a todas as filiais.'
+                      : 'Define a empresa principal (companyId) gravada em /users/{uid} no Firestore. O usuário terá acesso somente à empresa autorizada.'}
+                  </p>
                 </div>
 
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
@@ -2822,10 +3273,10 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ initialTab = 'empres
                 <div className="p-2.5 bg-blue-50/80 border border-blue-200/80 rounded-xl space-y-1 text-[11px] text-blue-900">
                   <div className="flex items-center gap-1.5 font-bold text-blue-950">
                     <ShieldCheck size={13} className="text-blue-600" />
-                    <span>Provisionamento Automático no Firebase:</span>
+                    <span>Provisionamento & Vínculo no Firestore:</span>
                   </div>
                   <p className="text-blue-800 leading-snug">
-                    Ao salvar, o usuário é registrado diretamente no <strong>Firebase Authentication</strong> com sua conta Google válida e autorizado no Firestore para acessar o sistema em qualquer dispositivo.
+                    Ao salvar, o perfil <code className="font-mono">/users/&#123;uid&#125;</code> é gravado com o <strong>companyId</strong> da empresa selecionada e o registro central <code className="font-mono">/erp_sync/comp-matriz</code> (<code className="font-mono">registeredCompanyIds</code>) é sincronizado imediatamente.
                   </p>
                 </div>
               </div>
@@ -2844,13 +3295,184 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ initialTab = 'empres
                   disabled={isSavingUser}
                   className="px-4 py-2 text-xs font-bold bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white rounded-lg shadow-xs cursor-pointer"
                 >
-                  {isSavingUser ? 'Provisionando no Firebase...' : 'Salvar Usuário'}
+                  {isSavingUser ? 'Sincronizando no Firebase...' : 'Salvar Usuário'}
                 </button>
               </div>
             </form>
           </div>
         );
       })()}
+
+      {/* Modal de Reparo / Complementação de Vínculo no Firestore (Conta Existente sem Duplicar Auth) */}
+      {isMasterAdmin && repairTargetUser && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-xs p-4 overflow-y-auto">
+          <form
+            onSubmit={handleExecuteRepairUser}
+            className="bg-white rounded-2xl max-w-md w-full border border-slate-200 shadow-2xl p-6 space-y-3 my-auto"
+          >
+            <div className="flex items-start justify-between gap-2">
+              <div className="flex items-center gap-2.5">
+                <div className="w-9 h-9 rounded-xl bg-amber-100 text-amber-700 flex items-center justify-center shrink-0">
+                  <Link2 size={18} />
+                </div>
+                <div>
+                  <h3 className="font-bold text-sm text-slate-900">
+                    Reparar Vínculo no Firestore
+                  </h3>
+                  <p className="text-[11px] text-slate-500">
+                    {repairTargetUser.name} (@{repairTargetUser.login}) • {repairTargetUser.email || 'Sem e-mail'}
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                disabled={isRepairingUser}
+                onClick={() => setRepairTargetUser(null)}
+                className="p-1 text-slate-400 hover:text-slate-600 rounded-lg cursor-pointer"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            <div className="p-2.5 bg-emerald-50/80 border border-emerald-200 rounded-xl text-[11px] text-emerald-900 leading-snug">
+              <strong>Seguro (sem duplicação):</strong> Esta ação apenas cria ou atualiza o documento <code className="font-mono">/users/&#123;uid&#125;</code> e sincroniza <code className="font-mono">registeredCompanyIds</code> para uma conta <strong>já existente</strong> no Firebase Authentication. Nenhuma nova conta será criada.
+            </div>
+
+            {repairError && (
+              <div className="p-3 bg-rose-50 border border-rose-200 rounded-xl flex items-start gap-2 text-xs text-rose-800 font-semibold">
+                <AlertTriangle size={15} className="text-rose-600 shrink-0 mt-0.5" />
+                <span>{repairError}</span>
+              </div>
+            )}
+
+            <div className="space-y-2.5 text-xs">
+              <div>
+                <label className="block font-bold text-slate-700 mb-1 flex items-center gap-1">
+                  <Building2 size={13} className="text-blue-600" />
+                  <span>Empresa de Vinculação *</span>
+                </label>
+                <select
+                  required
+                  disabled={isRepairingUser}
+                  value={repairCompanyId}
+                  onChange={(e) => {
+                    setRepairCompanyId(e.target.value);
+                    setRepairError(null);
+                  }}
+                  className="w-full bg-slate-50 border border-slate-300 rounded-lg p-2 font-semibold text-slate-800"
+                >
+                  <option value="">Selecione a Matriz ou uma Filial...</option>
+                  {activeCompanies.map((comp) => (
+                    <option key={comp.id} value={comp.id}>
+                      {comp.tradeName || comp.name} ({comp.type === 'matriz' ? 'Matriz' : 'Filial'}) — {comp.id}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="grid grid-cols-2 gap-2.5">
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">Perfil de Acesso</label>
+                  <select
+                    disabled={isRepairingUser}
+                    value={repairRole}
+                    onChange={(e) => setRepairRole(e.target.value as UserRole)}
+                    className="w-full bg-slate-50 border border-slate-200 rounded-lg p-2 font-semibold"
+                  >
+                    <option value="admin">Administrador</option>
+                    <option value="gerente">Gerente Geral</option>
+                    <option value="balconista">Balconista PDV</option>
+                    <option value="vendedor_externo">Vendedor Externo</option>
+                    <option value="financeiro">Financeiro</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">Status</label>
+                  <select
+                    disabled={isRepairingUser}
+                    value={repairStatus}
+                    onChange={(e) => setRepairStatus(e.target.value as 'ativo' | 'inativo')}
+                    className="w-full bg-slate-50 border border-slate-200 rounded-lg p-2 font-semibold"
+                  >
+                    <option value="ativo">Ativo (Liberado)</option>
+                    <option value="inativo">Inativo (Bloqueado)</option>
+                  </select>
+                </div>
+              </div>
+
+              <div>
+                <label className="block font-bold text-slate-700 mb-1">
+                  UID do Firebase Authentication
+                </label>
+                <input
+                  type="text"
+                  disabled={isRepairingUser}
+                  value={repairExistingUid}
+                  onChange={(e) => {
+                    setRepairExistingUid(e.target.value);
+                    setRepairError(null);
+                  }}
+                  placeholder="Cole o UID do usuário no Firebase Auth (se conhecido)"
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg font-mono text-[11px]"
+                />
+                <p className="text-[10px] text-slate-500 mt-1">
+                  {repairExistingUid.trim()
+                    ? 'UID identificado! Não é necessário informar a senha do usuário.'
+                    : 'Se não souber o UID, deixe em branco e informe abaixo a senha atual da conta já cadastrada.'}
+                </p>
+              </div>
+
+              {!repairExistingUid.trim() && (
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">
+                    Ou informe a Senha Atual da Conta Existente
+                  </label>
+                  <div className="relative">
+                    <input
+                      type={showRepairPassword ? 'text' : 'password'}
+                      disabled={isRepairingUser}
+                      value={repairExistingPassword}
+                      onChange={(e) => {
+                        setRepairExistingPassword(e.target.value);
+                        setRepairError(null);
+                      }}
+                      placeholder="Senha já cadastrada no Firebase Auth"
+                      className="w-full px-3 py-2 pr-10 bg-slate-50 border border-slate-200 rounded-lg font-mono"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowRepairPassword(!showRepairPassword)}
+                      className="absolute inset-y-0 right-0 pr-3 flex items-center text-slate-400 hover:text-slate-600 cursor-pointer"
+                    >
+                      {showRepairPassword ? <EyeOff size={15} /> : <Eye size={15} />}
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div className="flex justify-end gap-2 pt-2 border-t border-slate-100">
+              <button
+                type="button"
+                disabled={isRepairingUser}
+                onClick={() => setRepairTargetUser(null)}
+                className="px-3 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-100 rounded-lg cursor-pointer"
+              >
+                Cancelar
+              </button>
+              <button
+                type="submit"
+                disabled={isRepairingUser}
+                className="px-4 py-2 text-xs font-bold bg-amber-600 hover:bg-amber-700 disabled:opacity-50 text-white rounded-lg shadow-xs cursor-pointer flex items-center gap-1.5"
+              >
+                <Wrench size={13} />
+                <span>{isRepairingUser ? 'Reparando no Firestore...' : 'Completar / Reparar Vínculo'}</span>
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
 
       {/* Modal de Configuração de Menus, Submenus & Números da Empresa (Exclusivo para romeujr.suporte@gmail.com e @admin) */}
       {isMasterAdmin && userConfiguringPermissions && (

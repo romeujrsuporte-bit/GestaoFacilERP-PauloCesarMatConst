@@ -12,8 +12,10 @@ import {
 } from "firebase/auth";
 import {
   getFirestore,
+  collection,
   doc,
   getDoc,
+  getDocs,
   setDoc,
   updateDoc,
   deleteDoc,
@@ -182,24 +184,84 @@ export function resolveUserFirebaseEmail(loginOrEmail: string, matchedUser?: Use
   return `${clean}@gestaofacil.com.br`;
 }
 
-function buildUserProfilePayload(uid: string, user: User, fbEmail: string, existingCreatedAt?: string): UserProfileDoc {
+const VALID_COMPANY_ID_REGEX = /^comp-[a-zA-Z0-9_-]{1,120}$/;
+
+/**
+ * Valida o formato oficial do identificador de empresa/filial compatível com firestore.rules
+ */
+export function isValidCompanyIdFormat(companyId: string | undefined | null): boolean {
+  return typeof companyId === 'string' && VALID_COMPANY_ID_REGEX.test(companyId.trim());
+}
+
+/**
+ * Valida se o companyId informado corresponde a uma empresa cadastrada e ativa no ERP.
+ */
+function assertActiveRegisteredCompany(companyId: string | undefined | null): string {
+  const cleanId = (companyId || '').trim();
+  if (!isValidCompanyIdFormat(cleanId)) {
+    throw new Error(
+      'Selecione uma Empresa de Vinculação válida (Matriz ou Filial) antes de salvar o usuário.'
+    );
+  }
+  const companies = Database.getState().companies || [];
+  const matched = companies.find((c) => c.id === cleanId);
+  if (!matched) {
+    throw new Error(
+      `A empresa selecionada (${cleanId}) não foi encontrada no cadastro de empresas do sistema.`
+    );
+  }
+  if (matched.status === 'inativo') {
+    throw new Error(
+      `A empresa "${matched.tradeName || matched.name}" está inativa e não pode receber novos vínculos de usuários.`
+    );
+  }
+  return cleanId;
+}
+
+export function buildUserProfilePayload(
+  uid: string,
+  user: User,
+  fbEmail: string,
+  existingCreatedAt?: string
+): UserProfileDoc {
+  const cleanCompanyId = (user.companyId || '').trim();
+  if (!isValidCompanyIdFormat(cleanCompanyId)) {
+    throw new Error(
+      'Vínculo de empresa inválido ou ausente. Selecione uma empresa (Matriz ou Filial) válida para o usuário.'
+    );
+  }
+
   const nowIso = new Date().toISOString();
+  const safeName = (user.name || fbEmail || 'Usuário').trim().slice(0, 128);
+  const safeLogin = (user.login || fbEmail.split('@')[0] || 'usuario').trim().slice(0, 128);
+  const safeEmail = (fbEmail || '').trim().toLowerCase().slice(0, 128);
+  const safeRole: UserRole = (['admin', 'gerente', 'balconista', 'vendedor_externo', 'financeiro'] as UserRole[]).includes(user.role)
+    ? user.role
+    : 'balconista';
+  const safeStatus: 'ativo' | 'inativo' = user.status === 'inativo' ? 'inativo' : 'ativo';
+
   const payload: UserProfileDoc = {
-    uid,
-    erpUserId: user.id,
-    name: user.name,
-    login: user.login,
-    email: fbEmail,
-    role: user.role,
-    companyId: user.companyId || 'comp-matriz',
-    status: user.status || 'ativo',
-    createdAt: existingCreatedAt || nowIso,
+    uid: uid.trim(),
+    erpUserId: (user.id || `usr-${uid.slice(0, 12)}`).trim().slice(0, 128),
+    name: safeName,
+    login: safeLogin,
+    email: safeEmail,
+    role: safeRole,
+    companyId: cleanCompanyId,
+    status: safeStatus,
+    createdAt: existingCreatedAt && existingCreatedAt.trim().length > 0 ? existingCreatedAt.trim() : nowIso,
     updatedAt: nowIso,
   };
-  if (user.phone) {
-    payload.phone = user.phone;
+  if (user.phone && user.phone.trim().length > 0) {
+    payload.phone = user.phone.trim().slice(0, 64);
   }
   return payload;
+}
+
+function isFirestorePermissionError(err: unknown): boolean {
+  const code = String((err as any)?.code || '').toLowerCase();
+  const msg = (err instanceof Error ? err.message : String(err || '')).toLowerCase();
+  return code === 'permission-denied' || msg.includes('missing or insufficient permissions');
 }
 
 async function ensureUserProfileDocBeforePull(
@@ -215,15 +277,25 @@ async function ensureUserProfileDocBeforePull(
   const docPath = `users/${uid}`;
   const docRef = doc(db, 'users', uid);
   try {
-    const snap = await getDoc(docRef);
+    // Prioriza leitura direta do servidor para refletir imediatamente vínculos/reparos feitos pelo Admin Master
+    let snap;
+    try {
+      snap = await getDocFromServer(docRef);
+    } catch (serverErr) {
+      if (isFirestorePermissionError(serverErr)) {
+        throw serverErr;
+      }
+      snap = await getDoc(docRef);
+    }
+
     if (snap.exists()) {
       const data = snap.data() as Partial<UserProfileDoc>;
-      cachedFirestoreUserProfile = data;
+      cachedFirestoreUserProfile = { ...data, uid: data.uid || uid };
       return {
         profileExists: true,
         existingStatus: data.status,
         existingCreatedAt: data.createdAt,
-        existingProfile: data,
+        existingProfile: cachedFirestoreUserProfile,
       };
     }
 
@@ -241,7 +313,7 @@ async function ensureUserProfileDocBeforePull(
       login: localUser?.login || 'admin',
       email: MASTER_ADMIN_EMAIL,
       role: 'admin',
-      companyId: localUser?.companyId || 'comp-matriz',
+      companyId: isValidCompanyIdFormat(localUser?.companyId) ? localUser!.companyId : 'comp-matriz',
       status: 'ativo',
       createdAt: nowIso,
       updatedAt: nowIso,
@@ -306,14 +378,28 @@ export function registerRemotePullObserver(observer: RemotePullObserver) {
   remotePullObserver = observer;
 }
 
-async function pullRemoteStateDirectly(): Promise<boolean> {
+async function pullRemoteStateDirectly(): Promise<{
+  ok: boolean;
+  permissionDenied?: boolean;
+  error?: string;
+}> {
   const state = Database.getState();
   const matriz = state.companies?.find((c) => c.type === 'matriz') || state.companies?.[0];
   const targetCompId = matriz?.id || 'comp-matriz';
   const docPath = `erp_sync/${targetCompId}`;
 
   try {
-    const snap = await getDoc(doc(db, 'erp_sync', targetCompId));
+    const docRef = doc(db, 'erp_sync', targetCompId);
+    let snap;
+    try {
+      snap = await getDocFromServer(docRef);
+    } catch (serverErr) {
+      if (isFirestorePermissionError(serverErr)) {
+        throw serverErr;
+      }
+      snap = await getDoc(docRef);
+    }
+
     if (snap.exists()) {
       const data = snap.data();
       if (data && data.state) {
@@ -326,14 +412,170 @@ async function pullRemoteStateDirectly(): Promise<boolean> {
           );
         }
         Database.reconcileWithRemote(data.state as DatabaseState, data.updatedAt);
-        return true;
+        return { ok: true };
       }
     }
-    return false;
+    return { ok: false };
   } catch (err) {
+    const permissionDenied = isFirestorePermissionError(err);
     console.warn(`Aviso ao consultar sincronização (${docPath}) no Firestore:`, err);
-    return false;
+    return {
+      ok: false,
+      permissionDenied,
+      error: err instanceof Error ? err.message : String(err || ''),
+    };
   }
+}
+
+/**
+ * Lista todos os documentos da coleção /users no Firestore (exclusivo do Administrador Master)
+ * para diagnosticar perfis incompletos, divergências de companyId ou vínculos pendentes.
+ */
+export async function listFirestoreUserProfiles(): Promise<UserProfileDoc[]> {
+  if (!auth.currentUser) {
+    throw new Error('Sessão do Firebase Authentication não encontrada.');
+  }
+  const currentAuthEmail = (auth.currentUser.email || '').trim().toLowerCase();
+  if (currentAuthEmail !== MASTER_ADMIN_EMAIL.toLowerCase()) {
+    throw new Error(
+      `Apenas o Administrador Master (${MASTER_ADMIN_EMAIL}) pode listar os perfis /users no Firestore.`
+    );
+  }
+
+  try {
+    const snap = await getDocs(collection(db, 'users'));
+    return snap.docs.map((docSnap) => {
+      const data = docSnap.data() as Partial<UserProfileDoc>;
+      return {
+        uid: data.uid || docSnap.id,
+        erpUserId: data.erpUserId,
+        name: data.name || '',
+        login: data.login || '',
+        email: data.email || '',
+        role: (data.role || 'balconista') as UserRole,
+        companyId: data.companyId || '',
+        status: (data.status || 'inativo') as 'ativo' | 'inativo',
+        phone: data.phone,
+        createdAt: data.createdAt || '',
+        updatedAt: data.updatedAt,
+      };
+    });
+  } catch (err) {
+    handleFirestoreError(err, OperationType.LIST, 'users');
+  }
+}
+
+/**
+ * Repara ou completa o documento /users/{uid} no Firestore para uma conta JÁ EXISTENTE
+ * no Firebase Authentication — NUNCA chama createUserWithEmailAndPassword (zero duplicação).
+ */
+export async function repairExistingUserFirestoreProfile(params: {
+  user: User;
+  targetCompanyId: string;
+  existingUid?: string;
+  existingPassword?: string;
+}): Promise<{ uid: string; profile: UserProfileDoc }> {
+  if (!auth.currentUser) {
+    throw new Error('Sessão do Firebase Authentication não encontrada. Faça login novamente com romeujr.suporte@gmail.com.');
+  }
+  const currentAuthEmail = (auth.currentUser.email || '').trim().toLowerCase();
+  if (currentAuthEmail !== MASTER_ADMIN_EMAIL.toLowerCase()) {
+    throw new Error(
+      `Apenas o Administrador Master (${MASTER_ADMIN_EMAIL}) pode reparar vínculos de usuários no Firestore.`
+    );
+  }
+
+  const validCompanyId = assertActiveRegisteredCompany(params.targetCompanyId);
+  const fbEmail = resolveUserFirebaseEmail(params.user.email || params.user.login, params.user);
+  let resolvedUid = (params.existingUid || params.user.firebaseUid || '').trim();
+
+  // Se o UID não foi fornecido, valida via login em app secundária isolada (SEM criar nova conta)
+  if (!resolvedUid) {
+    const cleanPass = (params.existingPassword || '').trim();
+    if (!cleanPass) {
+      throw new Error(
+        'Informe o UID existente do usuário (Firebase Authentication) ou a senha atual da conta já cadastrada para localizar o UID sem criar conta duplicada.'
+      );
+    }
+    if (!isValidGoogleAccountEmail(fbEmail) && fbEmail.toLowerCase() !== MASTER_ADMIN_EMAIL.toLowerCase()) {
+      throw new Error('E-mail Google inválido para localizar a conta existente no Firebase Authentication.');
+    }
+
+    const secondaryAppName = `erp-user-repair-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    let secondaryApp: FirebaseApp | null = null;
+    try {
+      secondaryApp = initializeApp(firebaseConfig, secondaryAppName);
+      const secondaryAuth = getAuth(secondaryApp);
+      const cred = await signInWithEmailAndPassword(
+        secondaryAuth,
+        fbEmail,
+        formatFirebaseAuthPassword(cleanPass)
+      );
+      if (!cred.user?.uid) {
+        throw new Error('Não foi possível obter o UID da conta existente no Firebase Authentication.');
+      }
+      resolvedUid = cred.user.uid;
+      await signOut(secondaryAuth);
+    } catch (authErr: any) {
+      const code = authErr?.code || '';
+      if (code === 'auth/user-not-found') {
+        throw new Error(
+          `Nenhuma conta existente foi encontrada no Firebase Authentication para "${fbEmail}". Use "Editar Usuário" para provisionar uma nova conta.`
+        );
+      }
+      if (code === 'auth/wrong-password' || code === 'auth/invalid-credential') {
+        throw new Error(
+          `Senha incorreta para a conta existente "${fbEmail}". Informe a senha atual dessa conta ou cole diretamente o UID do Firebase Authentication.`
+        );
+      }
+      if (code === 'auth/network-request-failed') {
+        throw new Error('Falha de conexão com o Firebase Authentication. Verifique sua internet e tente novamente.');
+      }
+      throw new Error(authErr?.message || 'Não foi possível localizar a conta existente no Firebase Authentication.');
+    } finally {
+      if (secondaryApp) {
+        try {
+          await deleteApp(secondaryApp);
+        } catch {
+          // ignore
+        }
+      }
+    }
+  }
+
+  if (!/^[a-zA-Z0-9_-]{4,128}$/.test(resolvedUid)) {
+    throw new Error('O UID informado possui formato inválido. Copie exatamente o UID do Firebase Authentication.');
+  }
+
+  const docRef = doc(db, 'users', resolvedUid);
+  let existingCreatedAt: string | undefined;
+  try {
+    const snap = await getDoc(docRef);
+    if (snap.exists()) {
+      const existingData = snap.data() as Partial<UserProfileDoc>;
+      if (typeof existingData.createdAt === 'string' && existingData.createdAt.trim().length > 0) {
+        existingCreatedAt = existingData.createdAt;
+      }
+    }
+  } catch (readErr) {
+    console.warn(`Aviso ao consultar documento existente users/${resolvedUid}:`, readErr);
+  }
+
+  const repairedUser: User = {
+    ...params.user,
+    email: fbEmail,
+    companyId: validCompanyId,
+    firebaseUid: resolvedUid,
+  };
+  const payload = buildUserProfilePayload(resolvedUid, repairedUser, fbEmail, existingCreatedAt);
+
+  try {
+    await setDoc(docRef, payload, { merge: true });
+  } catch (firestoreErr) {
+    handleFirestoreError(firestoreErr, OperationType.WRITE, `users/${resolvedUid}`);
+  }
+
+  return { uid: resolvedUid, profile: payload };
 }
 
 /**
@@ -354,6 +596,8 @@ export async function provisionFirebaseAuthForUser(
       `Apenas o Administrador Master (${MASTER_ADMIN_EMAIL}) pode criar novos usuários no Firebase Authentication.`
     );
   }
+
+  const validCompanyId = assertActiveRegisteredCompany(user.companyId);
 
   const fbEmail = (user.email || '').trim().toLowerCase();
   if (!isValidGoogleAccountEmail(fbEmail)) {
@@ -387,7 +631,7 @@ export async function provisionFirebaseAuthForUser(
     } catch (authErr: any) {
       const code = authErr?.code || '';
       if (code === 'auth/email-already-in-use') {
-        // Caso a conta Google já exista no Firebase Auth (ex: usuário recriado), tenta vincular com a senha informada
+        // Caso a conta Google já exista no Firebase Auth (ex: usuário recriado), tenta vincular com a senha informada sem duplicar
         try {
           const existingCred = await signInWithEmailAndPassword(secondaryAuth, fbEmail, fbPassword);
           if (!existingCred.user?.uid) {
@@ -398,7 +642,7 @@ export async function provisionFirebaseAuthForUser(
           await signOut(secondaryAuth);
         } catch {
           throw new Error(
-            `A conta Google "${fbEmail}" já está cadastrada no Firebase Authentication com outra senha. Informe a senha atual dessa conta ou solicite a redefinição de senha na tela de login.`
+            `A conta Google "${fbEmail}" já está cadastrada no Firebase Authentication com outra senha. Utilize a opção "Reparar Vínculo" (com o UID ou senha atual) para completar o perfil no Firestore sem duplicar a conta.`
           );
         }
       } else if (code === 'auth/invalid-email') {
@@ -423,13 +667,33 @@ export async function provisionFirebaseAuthForUser(
     }
   }
 
-  // Grava o perfil /users/{uid} usando a sessão autenticada do Administrador Master atual
-  const profilePayload = buildUserProfilePayload(uid, { ...user, email: fbEmail, firebaseUid: uid }, fbEmail);
+  // Preserva createdAt caso o documento /users/{uid} já exista (compatibilidade com imutabilidade nas regras)
+  const docRef = doc(db, 'users', uid);
+  let existingCreatedAt: string | undefined;
   try {
-    await setDoc(doc(db, 'users', uid), profilePayload, { merge: true });
+    const existingSnap = await getDoc(docRef);
+    if (existingSnap.exists()) {
+      const data = existingSnap.data() as Partial<UserProfileDoc>;
+      if (typeof data.createdAt === 'string' && data.createdAt.trim().length > 0) {
+        existingCreatedAt = data.createdAt;
+      }
+    }
+  } catch {
+    // prossegue com criação
+  }
+
+  // Grava o perfil /users/{uid} usando a sessão autenticada do Administrador Master atual
+  const profilePayload = buildUserProfilePayload(
+    uid,
+    { ...user, companyId: validCompanyId, email: fbEmail, firebaseUid: uid },
+    fbEmail,
+    existingCreatedAt
+  );
+  try {
+    await setDoc(docRef, profilePayload, { merge: true });
   } catch (firestoreErr: any) {
     throw new Error(
-      `Usuário criado no Firebase Authentication (${fbEmail}), mas o Firestore recusou a gravação do perfil /users/${uid}. Verifique as regras de segurança publicadas.`
+      `Usuário vinculado no Firebase Authentication (${fbEmail}), mas o Firestore recusou a gravação do perfil /users/${uid}. Verifique as regras de segurança publicadas.`
     );
   }
 
@@ -437,7 +701,8 @@ export async function provisionFirebaseAuthForUser(
 }
 
 /**
- * Atualiza status, nome ou papel RBAC do documento /users/{uid} quando alterado pelo Admin Master em Configurações
+ * Atualiza status, nome, empresa de vinculação ou papel RBAC do documento /users/{uid}
+ * quando alterado pelo Admin Master em Configurações
  */
 export async function syncUserProfileStatusRoleInFirestore(user: User): Promise<void> {
   if (!auth.currentUser) {
@@ -446,13 +711,19 @@ export async function syncUserProfileStatusRoleInFirestore(user: User): Promise<
   const targetUid = user.firebaseUid || (user.id === 'usr-admin' ? auth.currentUser.uid : undefined);
   if (!targetUid) return;
 
+  const validCompanyId = assertActiveRegisteredCompany(user.companyId);
   const fbEmail = resolveUserFirebaseEmail(user.email || user.login, user);
   const docPath = `users/${targetUid}`;
   try {
     const docRef = doc(db, 'users', targetUid);
     const snap = await getDoc(docRef);
     const existingData = snap.exists() ? (snap.data() as Partial<UserProfileDoc>) : undefined;
-    const payload = buildUserProfilePayload(targetUid, user, fbEmail, existingData?.createdAt);
+    const payload = buildUserProfilePayload(
+      targetUid,
+      { ...user, companyId: validCompanyId },
+      fbEmail,
+      existingData?.createdAt
+    );
     await setDoc(docRef, payload, { merge: true });
   } catch (err) {
     handleFirestoreError(err, OperationType.WRITE, docPath);
@@ -596,17 +867,32 @@ export async function loginWithSystemCredentials(
     existingFirestoreProfile = profileCheck.existingProfile;
 
     if (profileCheck.existingStatus === 'inativo') {
+      clearCachedFirestoreUserProfile();
       await signOut(auth);
       throw new Error('Este usuário está desativado pelo administrador.');
     }
 
     if (!profileCheck.profileExists && !isMasterIdentifier) {
+      clearCachedFirestoreUserProfile();
       await signOut(auth);
-      throw new Error('Perfil de usuário não provisionado no Firestore. Solicite ao Administrador Master o cadastro do seu acesso.');
+      throw new Error('Perfil de usuário não provisionado no Firestore (/users/{uid}). Solicite ao Administrador Master para completar o vínculo no cadastro de usuários.');
+    }
+
+    if (!isMasterIdentifier && !isValidCompanyIdFormat(existingFirestoreProfile?.companyId)) {
+      clearCachedFirestoreUserProfile();
+      await signOut(auth);
+      throw new Error('Perfil do usuário no Firestore sem Empresa de Vinculação válida. Solicite ao Administrador Master para vincular o usuário à Matriz ou a uma Filial.');
     }
 
     // Puxa o estado oficial mais recente do Firestore para suportar troca de computador/celular
-    await pullRemoteStateDirectly();
+    const pullResult = await pullRemoteStateDirectly();
+    if (pullResult.permissionDenied && !isMasterIdentifier) {
+      clearCachedFirestoreUserProfile();
+      await signOut(auth);
+      throw new Error(
+        'Permissão negada pelo Firebase Firestore. Verifique com o Administrador Master se o perfil do usuário e o vínculo com a empresa/filial estão ativos e sincronizados.'
+      );
+    }
   }
 
   // Reconsulta os usuários após reconciliação com o Firestore
@@ -708,13 +994,37 @@ export async function loginWithSystemCredentials(
   }
 
   if (!targetUser) {
+    clearCachedFirestoreUserProfile();
     await signOut(auth);
     throw new Error(`Usuário "@${cleanIdentifier}" não encontrado no cadastro do sistema.`);
   }
 
   if (targetUser.status === 'inativo') {
+    clearCachedFirestoreUserProfile();
     await signOut(auth);
     throw new Error(`O usuário @${targetUser.login} está desativado pelo administrador.`);
+  }
+
+  // Alinha em memória o vínculo de empresa e papel do usuário com o documento oficial /users/{uid} do Firestore
+  if (!isMasterIdentifier && existingFirestoreProfile) {
+    if (isValidCompanyIdFormat(existingFirestoreProfile.companyId)) {
+      targetUser.companyId = existingFirestoreProfile.companyId!;
+    }
+    if (existingFirestoreProfile.role) {
+      targetUser.role = existingFirestoreProfile.role;
+    }
+    if (existingFirestoreProfile.status) {
+      targetUser.status = existingFirestoreProfile.status;
+    }
+  }
+
+  // Bloqueia acesso caso usuário não-admin não possua empresa ativa autorizada
+  if (targetUser.role !== 'admin' && !Database.hasValidCompanyBinding(targetUser)) {
+    clearCachedFirestoreUserProfile();
+    await signOut(auth);
+    throw new Error(
+      'A empresa vinculada a este usuário está inativa ou não cadastrada. Solicite ao Administrador Master para revisar a Empresa de Vinculação.'
+    );
   }
 
   // Sincroniza documento /users/{uid} no Firestore com o papel/status atualizado
@@ -992,10 +1302,26 @@ export function onFirebaseAuthStateChanged(callback: (user: User | null, loading
     if (firebaseUser) {
       const state = Database.getState();
       const fbEmail = (firebaseUser.email || '').trim().toLowerCase();
+      const isMaster = fbEmail === MASTER_ADMIN_EMAIL.toLowerCase();
+
+      // Quando online, valida o perfil oficial /users/{uid} no Firestore para bloquear usuários inativos ou sem vínculo válido
+      let remoteProfile: Partial<UserProfileDoc> | null = null;
+      const isOnline = typeof navigator === 'undefined' || navigator.onLine !== false;
+      if (!isMaster && isOnline) {
+        remoteProfile = await fetchFirestoreUserProfile(firebaseUser.uid, true);
+        if (!remoteProfile || remoteProfile.status === 'inativo' || !isValidCompanyIdFormat(remoteProfile.companyId)) {
+          clearCachedFirestoreUserProfile();
+          await signOut(auth);
+          Database.logout();
+          callback(null, false);
+          return;
+        }
+      }
+
       const matchedUser =
         state.users.find((u) => u.firebaseUid === firebaseUser.uid) ||
         state.users.find((u) => (u.email || '').trim().toLowerCase() === fbEmail && fbEmail !== '') ||
-        (fbEmail === MASTER_ADMIN_EMAIL.toLowerCase()
+        (isMaster
           ? state.users.find((u) => u.login === 'admin' || u.id === 'usr-admin')
           : undefined);
 
@@ -1008,6 +1334,21 @@ export function onFirebaseAuthStateChanged(callback: (user: User | null, loading
       }
 
       if (matchedUser) {
+        if (!isMaster && remoteProfile) {
+          if (isValidCompanyIdFormat(remoteProfile.companyId)) {
+            matchedUser.companyId = remoteProfile.companyId!;
+          }
+          if (remoteProfile.role) {
+            matchedUser.role = remoteProfile.role;
+          }
+        }
+        if (matchedUser.role !== 'admin' && !Database.hasValidCompanyBinding(matchedUser)) {
+          clearCachedFirestoreUserProfile();
+          await signOut(auth);
+          Database.logout();
+          callback(null, false);
+          return;
+        }
         if (state.currentUserId !== matchedUser.id) {
           Database.setCurrentUser(matchedUser.id);
         }

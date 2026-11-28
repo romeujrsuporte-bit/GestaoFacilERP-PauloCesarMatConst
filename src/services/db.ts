@@ -4868,40 +4868,57 @@ export class Database {
   }
 
   /**
+   * Verifica se o usuário possui vínculo válido e ativo com uma empresa cadastrada
+   * (Administradores mantêm acesso global a todas as empresas).
+   */
+  public static hasValidCompanyBinding(user?: User | null): boolean {
+    const u = user || this.getCurrentUser();
+    if (!u) return false;
+    if (u.status === 'inativo') return false;
+    if (this.isAdmin(u)) return true;
+    return this.getAvailableCompaniesForUser(u).length > 0;
+  }
+
+  /**
    * Retorna as empresas às quais o usuário possui permissão de acesso
-   * - Administrador: visualiza e gerencia todas as empresas
-   * - Gerente: visualiza conforme permissões
-   * - Vendedor e balconista: operam apenas na empresa à qual possuem acesso
+   * - Administrador: visualiza e gerencia todas as empresas (Matriz e Filiais)
+   * - Demais perfis (Gerente, Financeiro, Balconista, Vendedor Externo):
+   *   operam exclusivamente na empresa principal vinculada via companyId
+   *   (ou nas empresas explicitamente autorizadas em allowedCompanyIds, quando definido).
+   *   Nunca realiza fallback indiscriminado para todas as empresas.
    */
   public static getAvailableCompaniesForUser(user?: User | null): Company[] {
     const s = this.getState();
+    const allCompanies = s.companies || [];
     const u = user || this.getCurrentUser();
-    if (!u) return s.companies || [];
+    if (!u) return [];
 
-    // Administrador tem visão global irrestrita de todas as empresas
-    if (u.role === 'admin') {
-      return s.companies || [];
+    // Usuário inativo não possui acesso a nenhuma empresa
+    if (u.status === 'inativo') {
+      return [];
     }
 
-    // Se possui lista de empresas permitidas explicitamente
-    if (u.allowedCompanyIds && u.allowedCompanyIds.length > 0) {
-      const allowedSet = new Set(u.allowedCompanyIds);
-      const filtered = s.companies.filter((c) => allowedSet.has(c.id));
-      if (filtered.length > 0) return filtered;
+    // Administrador (incluindo Admin Master) mantém acesso global irrestrito a todas as empresas
+    if (this.isAdmin(u)) {
+      return allCompanies;
     }
 
-    // Gerente: acesso amplo padrão a não ser que haja restrição expressa
-    if (u.role === 'gerente') {
-      return s.companies || [];
+    // Se houver lista explícita de empresas autorizadas (sem vínculo indiscriminado), respeita somente empresas ativas dessa lista
+    if (Array.isArray(u.allowedCompanyIds) && u.allowedCompanyIds.length > 0) {
+      const allowedSet = new Set(u.allowedCompanyIds.filter((id) => typeof id === 'string' && id.trim().length > 0));
+      if (u.companyId && u.companyId.trim().length > 0) {
+        allowedSet.add(u.companyId.trim());
+      }
+      return allCompanies.filter((c) => allowedSet.has(c.id) && c.status !== 'inativo');
     }
 
-    // Vendedor e Balconista: operam exclusivamente na empresa vinculada
-    if (u.companyId) {
-      const single = s.companies.filter((c) => c.id === u.companyId);
-      if (single.length > 0) return single;
+    // Regra principal: vínculo exclusivo à empresa definida em companyId (Matriz ou Filial ativa)
+    if (u.companyId && u.companyId.trim().length > 0) {
+      return allCompanies.filter((c) => c.id === u.companyId && c.status !== 'inativo');
     }
 
-    return s.companies || [];
+    // Sem companyId válido: não libera acesso indiscriminado a nenhuma empresa
+    return [];
   }
 
   public static readonly AUTH_SESSION_KEY = 'omni_erp_auth_active';

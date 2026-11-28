@@ -325,6 +325,41 @@ export function buildRegisteredCompanyIds(
 }
 
 /**
+ * Garante que a empresa raiz (comp-matriz) permaneça sempre na posição 0 de state.companies,
+ * requisito exigido pelas regras de segurança do Firestore para acesso de operadores de filiais.
+ */
+export function ensureMatrizFirstInCompanies(
+  companies: DatabaseState['companies'] | undefined,
+  rootCompanyId: string = 'comp-matriz'
+): DatabaseState['companies'] {
+  if (!Array.isArray(companies) || companies.length <= 1) {
+    return Array.isArray(companies) ? [...companies] : [];
+  }
+  const matrizIndex = companies.findIndex((c) => c?.id === rootCompanyId);
+  if (matrizIndex <= 0) {
+    return [...companies];
+  }
+  const next = [...companies];
+  const [matriz] = next.splice(matrizIndex, 1);
+  next.unshift(matriz);
+  return next;
+}
+
+/**
+ * Verifica se um companyId está devidamente registrado e ativo no mapa registeredCompanyIds
+ * gerado para o documento central /erp_sync/comp-matriz.
+ */
+export function verifyCompanyRegisteredForSync(
+  companyId: string | undefined | null,
+  companies: DatabaseState['companies'] | undefined,
+  rootCompanyId: string = 'comp-matriz'
+): boolean {
+  if (!companyId || typeof companyId !== 'string') return false;
+  const registry = buildRegisteredCompanyIds(companies, rootCompanyId);
+  return registry[companyId] === true;
+}
+
+/**
  * Remove qualquer campo de senha em texto claro de uma lista de usuários sem alterar os demais dados
  */
 export function stripLegacyPasswordsFromUsers(users: DatabaseState['users'] | undefined): {
@@ -459,8 +494,10 @@ export function prepareErpSyncPayload(params: {
   let hasWritableChanges = true;
 
   if (isCurrentAdmin || !lastRemoteStateSnapshot) {
+    const orderedCompanies = ensureMatrizFirstInCompanies(rawState.companies, companyId);
     const cleanState: Partial<DatabaseState> = {
       ...rawState,
+      companies: orderedCompanies,
       users: sanitizedUsers,
       auditLogs: (rawState.auditLogs || []).slice(0, maxAuditLogs),
       stockMovements: (rawState.stockMovements || []).slice(0, maxStockMovements),

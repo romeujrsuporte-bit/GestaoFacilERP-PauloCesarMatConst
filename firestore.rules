@@ -451,21 +451,25 @@ service cloud.firestore {
         );
 
       // Atualização de perfil:
-      // - Admin pode gerenciar usuários (somente Admin Master altera/concede papel 'admin'; sem auto-rebaixamento)
+      // - Admin pode gerenciar usuários e reparar documentos /users/{uid} incompletos (somente Admin Master altera/concede papel 'admin'; sem auto-rebaixamento)
       // - Usuário comum ativo só pode atualizar seus próprios dados básicos de contato (name, phone, updatedAt)
       allow update: if isSignedIn() &&
         isValidId(userId) &&
         isValidUser(incoming()) &&
-        incoming().uid == existing().uid &&
-        incoming().createdAt == existing().createdAt &&
+        incoming().uid == userId &&
+        (!('uid' in existing()) || incoming().uid == existing().uid) &&
+        (!('createdAt' in existing()) || incoming().createdAt == existing().createdAt) &&
         (
           (
             isAdmin() &&
-            ((incoming().role == 'admin' || existing().role == 'admin') ? isMasterAdminEmail() : true) &&
-            (!isOwner(userId) || (incoming().role == existing().role && incoming().status == existing().status))
+            ((incoming().role == 'admin' || ('role' in existing() && existing().role == 'admin')) ? isMasterAdminEmail() : true) &&
+            (!isOwner(userId) || (('role' in existing() && incoming().role == existing().role) && ('status' in existing() && incoming().status == existing().status)))
           ) ||
           (
             isOwner(userId) &&
+            'status' in existing() &&
+            'role' in existing() &&
+            'companyId' in existing() &&
             existing().status == 'ativo' &&
             incoming().role == existing().role &&
             incoming().status == existing().status &&
