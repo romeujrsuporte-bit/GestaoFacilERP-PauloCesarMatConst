@@ -11,12 +11,14 @@ import {
   LogOut,
   ShieldCheck,
   User as UserIcon,
+  RefreshCw,
 } from 'lucide-react';
 import { Database } from '../../services/db';
 import { toast } from '../../services/toast';
 import { GestaoFacilLogo } from '../common/AppLogo';
 import { ChangePasswordModal } from '../auth/ChangePasswordModal';
 import { logoutFirebase } from '../../services/firebase';
+import { FirebaseSyncService, FirebaseSyncStatus } from '../../services/firebaseSync';
 
 interface HeaderProps {
   onToggleSidebar: () => void;
@@ -54,7 +56,20 @@ export const Header: React.FC<HeaderProps> = ({
 
   const [isProfileMenuOpen, setIsProfileMenuOpen] = useState(false);
   const [isChangePassOpen, setIsChangePassOpen] = useState(false);
+  const [syncStatus, setSyncStatus] = useState<FirebaseSyncStatus>(() => FirebaseSyncService.getStatus());
   const profileMenuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    return FirebaseSyncService.subscribe((next) => {
+      setSyncStatus(next);
+    });
+  }, []);
+
+  const isSyncingOrPending = syncStatus.status === 'syncing' || syncStatus.pendingCount > 0;
+  const syncIconTitle =
+    syncStatus.status === 'syncing'
+      ? 'Sincronizando dados com o Firebase...'
+      : `${syncStatus.pendingCount} operação(ões) aguardando sincronização com o Firebase — clique para enviar`;
 
   // Fecha o menu de perfil ao clicar fora
   useEffect(() => {
@@ -187,6 +202,26 @@ export const Header: React.FC<HeaderProps> = ({
             </span>
           )}
         </div>
+
+        {/* Ícone discreto de sincronização com o Firebase próximo ao nome da empresa */}
+        {isSyncingOrPending && (
+          <button
+            type="button"
+            onClick={() => {
+              if (syncStatus.status !== 'syncing') {
+                FirebaseSyncService.retryPendingSync();
+              }
+            }}
+            title={syncIconTitle}
+            aria-label={syncIconTitle}
+            className="hidden sm:inline-flex items-center justify-center w-8 h-8 rounded-xl bg-blue-50 text-blue-600 border border-blue-200 hover:bg-blue-100 transition-colors cursor-pointer shrink-0"
+          >
+            <RefreshCw
+              size={15}
+              className={syncStatus.status === 'syncing' ? 'animate-spin' : ''}
+            />
+          </button>
+        )}
       </div>
 
       {/* Lado Direito: Atalhos F1, Notificações & Perfil de Usuário */}
@@ -366,6 +401,25 @@ export const Header: React.FC<HeaderProps> = ({
             </div>
           )}
         </div>
+
+        {isSyncingOrPending && (
+          <button
+            type="button"
+            onClick={() => {
+              if (syncStatus.status !== 'syncing') {
+                FirebaseSyncService.retryPendingSync();
+              }
+            }}
+            title={syncIconTitle}
+            aria-label={syncIconTitle}
+            className="shrink-0 inline-flex items-center justify-center w-7 h-7 rounded-lg bg-blue-500/20 text-blue-300 border border-blue-400/40 cursor-pointer"
+          >
+            <RefreshCw
+              size={14}
+              className={syncStatus.status === 'syncing' ? 'animate-spin' : ''}
+            />
+          </button>
+        )}
 
         <span
           className={`shrink-0 text-[10px] font-black uppercase px-2 py-0.5 rounded-full border ${

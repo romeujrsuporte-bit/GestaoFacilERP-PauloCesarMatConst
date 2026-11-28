@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { WifiOff, CloudOff, RefreshCw, AlertTriangle, Loader2, Database as DatabaseIcon } from 'lucide-react';
+import { WifiOff, CloudOff, RefreshCw, Loader2, Database as DatabaseIcon } from 'lucide-react';
 import { useOnlineStatus } from '../../hooks/useOnlineStatus';
 import { FirebaseSyncService, FirebaseSyncStatus } from '../../services/firebaseSync';
 import { Database } from '../../services/db';
@@ -87,47 +87,7 @@ export const OfflineNoticeBanner: React.FC = () => {
     );
   }
 
-  // 3. Fila com operações aguardando envio ao Firebase
-  if (syncStatus.pendingCount > 0) {
-    return (
-      <div
-        role="status"
-        aria-live="polite"
-        className="fixed bottom-4 left-1/2 -translate-x-1/2 z-[120] w-[calc(100%-2rem)] max-w-lg bg-blue-700 text-white px-4 py-3 rounded-2xl shadow-xl border border-blue-400/60 flex items-center gap-3 animate-in fade-in slide-in-from-bottom-3 duration-200"
-      >
-        <div className="w-8 h-8 rounded-xl bg-white/20 flex items-center justify-center shrink-0">
-          {syncStatus.status === 'syncing' ? (
-            <Loader2 size={18} className="text-white animate-spin" />
-          ) : (
-            <AlertTriangle size={18} className="text-white" />
-          )}
-        </div>
-        <div className="min-w-0 flex-1">
-          <p className="text-xs font-extrabold leading-snug">
-            {syncStatus.status === 'syncing'
-              ? 'Sincronizando dados com o Firebase...'
-              : `${syncStatus.pendingCount} operação(ões) aguardando sincronização`}
-          </p>
-          <p className="text-[11px] text-blue-100 leading-snug">
-            Aguarde a confirmação na nuvem antes de fechar o aplicativo.
-          </p>
-        </div>
-        {syncStatus.status !== 'syncing' && (
-          <button
-            type="button"
-            onClick={handleRetrySync}
-            disabled={isRetrying}
-            className="shrink-0 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white/20 hover:bg-white/30 text-white text-[11px] font-extrabold transition-colors cursor-pointer"
-          >
-            <RefreshCw size={13} />
-            <span>Enviar</span>
-          </button>
-        )}
-      </div>
-    );
-  }
-
-  // 4. Alerta preventivo para Admin/Gerente caso o documento centralizado se aproxime do limite de 1 MB
+  // 3. Alerta preventivo para Admin/Gerente caso o documento centralizado se aproxime do limite de 1 MB
   if (
     syncStatus.documentSizeWarning &&
     !dismissedSizeWarning &&
